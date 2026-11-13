@@ -549,6 +549,12 @@ pub(crate) fn single_candidate_previous_round_findings_section(
             let persisted = detail.verdict?;
             crate::product::workspace_engine::deserialize_historical_review_verdict(persisted).ok()
         })?;
+    // B2（design §3 五入口之「前轮 reviewer」）：live（finalize_review_verdict）
+    // 与历史刷新（latest_review_verdict_for_session）都在分类/消费前套同一
+    // SC 会话有效视图；本入口读的同样是 durable 原始 verdict，MUST 先经同一
+    // 投影再 classify——命中窄例外的建议级非契约项不进入驱动返修的前轮
+    // 清单。投影只改内存有效视图，不回写 durable；D6 求交/去重/分区口径不变。
+    let previous = engine.apply_sc_effective_review_verdict(previous);
     // REQ-WSC-14（作者/评审输入面一致性）：`previous` 是 durable 原始 verdict（未按
     // 已处置清单归一），此处 MUST 再按 owner 已处置清单过滤——否则同一 prompt 既说
     // 「这是上一轮未收敛 finding」又说「该事实已被 owner 排除」，自相矛盾。
