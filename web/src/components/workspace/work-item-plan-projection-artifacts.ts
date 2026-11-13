@@ -42,5 +42,8 @@ export function workItemPlanArtifactLabel(
       return `Revision History / ${artifact.payload.entries.length}`;
     case "projection_validation":
       return `Projection Validation / ${artifact.payload.findings.length}`;
+    // P19b：SC 失败修复包不是投影视图，标签只报包身份，不冒充 projection。
+    case "sc_failure_repair_package":
+      return `SC Failure Repair / ${artifact.payload.package_id}`;
   }
 }

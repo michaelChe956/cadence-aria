@@ -335,6 +335,20 @@ function artifactStatusMessage(
       return `Projection Validation 包含 ${artifact.payload.findings.length} 条 finding。`;
     case "context_blocker":
       return "缺少上下文，Work Item Plan 暂时无法继续。";
+    // P19b：SC 失败修复包的状态只按包自身声明的完整性与 missing_evidence
+    // 说话——证据不全就明说不全，不粉饰成已修复。
+    case "sc_failure_repair_package": {
+      const payload = artifact.payload;
+      const missingCount = payload.missing_evidence.length;
+      const rounds = payload.rounds.length;
+      if (payload.completeness === "complete" && missingCount === 0) {
+        return `SC 失败修复包 ${payload.package_id} 证据完整：${rounds} 轮失败记录已归档，失败类别 ${payload.terminal_class}。`;
+      }
+      if (missingCount > 0) {
+        return `SC 失败修复包 ${payload.package_id} 证据不完整：缺少 ${missingCount} 项证据，${rounds} 轮失败记录已归档，失败类别 ${payload.terminal_class}。`;
+      }
+      return `SC 失败修复包 ${payload.package_id} 标记为证据不完整但未列出缺失证据项：${rounds} 轮失败记录已归档，失败类别 ${payload.terminal_class}。`;
+    }
     default:
       return "Work Item Plan artifact 已更新。";
   }
@@ -355,6 +369,9 @@ function defaultArtifactTab(artifact: WorkItemPlanArtifactPayload): WorkItemPlan
     case "work_item_revision_history":
     case "projection_validation":
       return "overview";
+    // P19b：SC 失败修复包没有专用视图，落到既有的 JSON 面板（不新造渲染）。
+    case "sc_failure_repair_package":
+      return "json";
     default:
       return "overview";
   }
