@@ -51,22 +51,51 @@ impl AggregateIndexAcceptance {
         root: &Path,
         member_names: &[String],
     ) -> Result<Self, AggregateIndexError> {
-        // RED（红灯占位）：SDK 探针尚未接线，沿用 CLI files 验收路径；
-        // 绿灯实现将改为 SDK 成员覆盖 + 健康闸 + CLI 回退。
-        let _ = coverage;
-        let files = match cli.files(root) {
-            Ok(files) => files,
-            // 空索引＝每个成员都没有任何可索引文件：把上游人读提示归并
-            // 为业务语义的覆盖不足错误并点名全部成员，而不是让
-            // `expected value at line 1 column 1` 这类 JSON 解析天书透出。
+        let sdk_warning: Option<String>;
+        // 成员覆盖优先走 codegraph SDK（hasFilesUnder 判定，载荷几百字节；
+        // CLI files 的全量清单在 3.1 GB 级索引上 ~230 MB，必然截断）。
+        let member_covered_from_sdk = match coverage.coverage(root, member_names) {
+            Ok(outcome) => {
+                // 健康闸：stale/pending/state/fileCount 异常只记 warning，
+                // 不因健康问题阻断激活（保持既有语义）。
+                sdk_warning = index_health_warning(&outcome);
+                Some(outcome.member_covered)
+            }
+            // 回退保底：SDK 路径解析不到 / SDK 不兼容 ⇒ 走既有 CLI files
+            // 验收（小仓与旧行为不回归），并留下可审计的回退痕迹。
             Err(AggregateIndexError::Failed {
-                code: "codegraph_files_empty_index",
-                ..
-            }) => return Err(member_coverage_failed(member_names)),
+                code: "codegraph_sdk_not_found" | "codegraph_sdk_incompatible",
+                message,
+            }) => {
+                sdk_warning = Some(format!(
+                    "codegraph SDK 覆盖验收不可用（{message}），已回退 CLI files 验收路径"
+                ));
+                None
+            }
             Err(error) => return Err(error),
         };
-        let member_covered = verify_member_coverage(&files, member_names)?;
+        let (member_covered, warning) = match member_covered_from_sdk {
+            Some(covered) => (covered, sdk_warning),
+            None => {
+                let files = match cli.files(root) {
+                    Ok(files) => files,
+                    // 空索引＝每个成员都没有任何可索引文件：把上游人读提示
+                    // 归并为业务语义的覆盖不足错误并点名全部成员，而不是让
+                    // `expected value at line 1 column 1` 这类 JSON 解析天书透出。
+                    Err(AggregateIndexError::Failed {
+                        code: "codegraph_files_empty_index",
+                        ..
+                    }) => return Err(member_coverage_failed(member_names)),
+                    Err(error) => return Err(error),
+                };
+                (
+                    verify_member_coverage(&files, member_names)?,
+                    sdk_warning,
+                )
+            }
+        };
         require_member_coverage(&member_covered, member_names)?;
+        // 排除性查询载荷小，保持既有 CLI query_json 路径不动。
         let mut excluded_queries = BTreeMap::new();
         for query in EXCLUDED_QUERIES {
             let result = cli.query_json(root, query)?;
@@ -80,7 +109,7 @@ impl AggregateIndexAcceptance {
         Ok(Self {
             member_covered,
             excluded_queries,
-            warning: None,
+            warning,
         })
     }
 
@@ -707,10 +736,47 @@ fn require_member_coverage(
 }
 
 /// 健康闸：SDK 返回的 index.state / pending / stale / stats.fileCount 有
-/// 异常信号时记 warning（不阻断激活——保持「不因健康问题阻断」语义）。
-/// RED（红灯占位）：绿灯实现将读取健康字段产出 warning。
-fn index_health_warning(_outcome: &CoverageOutcome) -> Option<String> {
-    None
+/// 异常信号时记 warning（不阻断激活——保持「不因健康问题阻断」语义；
+/// codegraph 1.6 实测健康 state 为 "complete"，未知 state 值也计入信号，
+/// 宁可多一条可审计 warning 也不静默）。
+fn index_health_warning(outcome: &CoverageOutcome) -> Option<String> {
+    let mut signals: Vec<String> = Vec::new();
+    if let Some(index) = &outcome.index {
+        if index.get("stale") == Some(&Value::Bool(true)) {
+            signals.push("索引已过期（stale=true）".to_string());
+        }
+        if let Some(pending) = index.get("pending").and_then(Value::as_u64)
+            && pending > 0
+        {
+            signals.push(format!("仍有 {pending} 个文件待索引（pending）"));
+        }
+        if let Some(Value::String(state)) = index.get("state") {
+            const HEALTHY_STATES: [&str; 10] = [
+                "ready", "idle", "complete", "completed", "ok", "healthy", "clean",
+                "indexed", "active", "current",
+            ];
+            if !HEALTHY_STATES.contains(&state.trim().to_ascii_lowercase().as_str()) {
+                signals.push(format!("index state: {state}"));
+            }
+        }
+    }
+    if outcome
+        .stats
+        .as_ref()
+        .and_then(|stats| stats.get("fileCount"))
+        .and_then(Value::as_u64)
+        == Some(0)
+    {
+        signals.push("stats.fileCount=0（成员覆盖却无文件）".to_string());
+    }
+    if signals.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "codegraph 索引健康闸（不阻断激活）：{}",
+            signals.join("；")
+        ))
+    }
 }
 
 /// 覆盖不足的业务语义错误：点名无可索引代码文件的成员清单（空索引时

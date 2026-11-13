@@ -26,6 +26,11 @@ use crate::cross_cutting::bounded_command_runner::{
     TokioBoundedCommandRunner,
 };
 use crate::product::json_store::validate_relative_id;
+// npm 布局与前缀语义与安装链同源（只读复用，不引入第二套约定）。
+use crate::product::provider_installation::effective_prefix::{
+    npm_package_dir, npm_prefix_from_real_path,
+};
+use crate::product::provider_installation::source_table::resolve_npm_prefix;
 
 use super::AggregateIndexError;
 
@@ -104,11 +109,23 @@ pub struct CoveragePaths {
 }
 
 impl CoveragePaths {
-    /// 生产解析：读进程环境与 PATH；`npm root -g` 探针按需惰性执行
-    /// （只有候选1/3 都落空时才会花这笔子进程开销）。
+    /// 生产解析：读进程环境与 PATH；候选1 已命中时跳过 `npm root -g`
+    /// 探针（口径同 provider_installation 的 `CommandNpmGlobalPrefixProbe`：
+    /// 10s 超时 / 4096 B 输出 / 首个非空行且路径存在）。
     pub fn resolve_from_environment(runner: &Arc<dyn BoundedCommandRunner>) -> Self {
-        let _ = runner;
-        todo!("green: install-prefix / npm root -g / codegraph 反推候选解析")
+        let install_prefix_sdk = install_prefix_sdk_candidate();
+        let npm_global_root = if install_prefix_sdk.as_deref().is_some_and(Path::is_file) {
+            None
+        } else {
+            probe_npm_global_root(runner)
+        };
+        Self {
+            install_prefix_sdk,
+            npm_global_root,
+            codegraph_executable: find_executable_in_path("codegraph"),
+            bundled_nodes: Vec::new(),
+            path_node: find_executable_in_path("node"),
+        }
     }
 }
 
@@ -117,7 +134,7 @@ pub struct CodeGraphCoverage {
     runner: Arc<dyn BoundedCommandRunner>,
     /// 候选注入（测试 seam）；`None` = 生产环境解析。
     paths: Option<CoveragePaths>,
-    /// helper 脚本源（生产 `include_str!` 内嵌；测试可注入）。
+    /// helper 脚本源（`include_str!` 内嵌随源码走，运行时落临时文件）。
     helper_source: String,
     /// helper 落盘目录（`None` = 系统 temp；测试注入以断言清理）。
     scratch_dir: Option<PathBuf>,
@@ -147,6 +164,45 @@ impl CodeGraphCoverage {
             scratch_dir,
         }
     }
+
+    fn run_helper(
+        &self,
+        node: &Path,
+        helper: &Path,
+        sdk_path: &Path,
+        root: &Path,
+        member_names: &[String],
+    ) -> Result<CoverageOutcome, AggregateIndexError> {
+        let members_json = serde_json::to_string(member_names).map_err(|error| {
+            coverage_failed(format!("serialize members JSON for helper: {error}"))
+        })?;
+        let request = BoundedCommandRequest {
+            executable: node.display().to_string(),
+            argv: vec![
+                helper.display().to_string(),
+                "--sdk".to_string(),
+                sdk_path.display().to_string(),
+                "--root".to_string(),
+                root.display().to_string(),
+                "--members".to_string(),
+                members_json,
+            ],
+            working_dir: root.to_path_buf(),
+            timeout: Duration::from_secs(HELPER_TIMEOUT_SECS),
+            cancellation: CancellationToken::new(),
+            environment: sanitized_environment(),
+            stdout_limit: HELPER_OUTPUT_LIMIT_BYTES,
+            stderr_limit: HELPER_STDERR_LIMIT_BYTES,
+        };
+        let output = run_bounded_sync(&self.runner, request)
+            .map_err(|error| coverage_failed(error.to_string()))?;
+        if output.timed_out {
+            return Err(coverage_failed(format!(
+                "coverage helper timed out after {HELPER_TIMEOUT_SECS}s"
+            )));
+        }
+        parse_helper_output(&output, member_names)
+    }
 }
 
 impl AggregateCoverageProbe for CodeGraphCoverage {
@@ -155,16 +211,131 @@ impl AggregateCoverageProbe for CodeGraphCoverage {
         root: &Path,
         member_names: &[String],
     ) -> Result<CoverageOutcome, AggregateIndexError> {
-        let _ = (root, member_names);
-        todo!("green: 写临时 helper → node 执行 → 解析 JSON → CoverageOutcome")
+        for member in member_names {
+            validate_relative_id(member)?;
+        }
+        let paths = match &self.paths {
+            Some(injected) => injected.clone(),
+            None => CoveragePaths::resolve_from_environment(&self.runner),
+        };
+        let sdk_path = resolve_sdk_path(&paths).ok_or_else(|| AggregateIndexError::Failed {
+            code: "codegraph_sdk_not_found",
+            message: format!(
+                "未找到 codegraph 的 npm-sdk.js（安装前缀 / npm root -g / 可执行反推均未\
+                 命中）；可手动安装：npm install -g {CODEGRAPH_NPM_PACKAGE}"
+            ),
+        })?;
+        let node = resolve_node_executable(&paths, &sdk_path, &self.runner)?;
+        let helper_path = write_helper_file(&self.helper_source, self.scratch_dir.as_deref())?;
+        let result = self.run_helper(&node, &helper_path, &sdk_path, root, member_names);
+        let _ = std::fs::remove_file(&helper_path);
+        result
+    }
+}
+
+/// helper 的 stdout 协议（成功与失败共用一个 JSON 形态）。
+#[derive(Deserialize)]
+struct HelperOutput {
+    ok: bool,
+    #[serde(default)]
+    members: BTreeMap<String, bool>,
+    #[serde(default)]
+    stats: Option<Value>,
+    #[serde(default)]
+    index: Option<Value>,
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+fn parse_helper_output(
+    output: &BoundedCommandResult,
+    member_names: &[String],
+) -> Result<CoverageOutcome, AggregateIndexError> {
+    let stdout = output.stdout.trim();
+    let parsed: HelperOutput = serde_json::from_str(stdout).map_err(|error| {
+        coverage_failed(format!(
+            "helper stdout 不是合法 JSON（exit {:?}）：{error}；stdout 前 200 字节 {:?}；\
+             stderr：{}",
+            output.exit_code,
+            &stdout[..stdout.len().min(200)],
+            output.stderr.trim()
+        ))
+    })?;
+    if !parsed.ok {
+        let code = parsed.code.as_deref().unwrap_or("unknown");
+        let message = parsed
+            .message
+            .unwrap_or_else(|| "helper failed without a message".to_string());
+        if code == "sdk_incompatible" {
+            return Err(AggregateIndexError::Failed {
+                code: "codegraph_sdk_incompatible",
+                message: format!("codegraph SDK 不兼容：{message}"),
+            });
+        }
+        return Err(coverage_failed(format!("helper 报告失败（{code}）：{message}")));
+    }
+    let mut member_covered = BTreeMap::new();
+    for member in member_names {
+        let covered = parsed.members.get(member).copied().ok_or_else(|| {
+            coverage_failed(format!("helper 结果缺少成员 {member} 的覆盖判定"))
+        })?;
+        member_covered.insert(member.clone(), covered);
+    }
+    Ok(CoverageOutcome {
+        member_covered,
+        stats: parsed.stats,
+        index: parsed.index,
+    })
+}
+
+/// 把内嵌 helper 写到唯一临时文件（目录不存在则创建）。
+fn write_helper_file(
+    source: &str,
+    scratch_dir: Option<&Path>,
+) -> Result<PathBuf, AggregateIndexError> {
+    let dir = scratch_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| coverage_failed(format!("create helper scratch dir: {error}")))?;
+    let path = dir.join(format!("codegraph-coverage-helper-{}.mjs", uuid::Uuid::new_v4()));
+    std::fs::write(&path, source)
+        .map_err(|error| coverage_failed(format!("write helper temp file: {error}")))?;
+    Ok(path)
+}
+
+fn coverage_failed(message: String) -> AggregateIndexError {
+    AggregateIndexError::Failed {
+        code: "codegraph_coverage_failed",
+        message,
     }
 }
 
 /// 按序取第一个真实存在的 `npm-sdk.js`：
 /// 1. 安装前缀 npm 标准布局；2. `npm root -g`；3. codegraph 可执行反推。
 pub fn resolve_sdk_path(paths: &CoveragePaths) -> Option<PathBuf> {
-    let _ = paths;
-    todo!("green: SDK 路径解析")
+    if let Some(candidate) = paths
+        .install_prefix_sdk
+        .as_deref()
+        .filter(|candidate| candidate.is_file())
+    {
+        return Some(candidate.to_path_buf());
+    }
+    if let Some(global_root) = paths.npm_global_root.as_deref() {
+        let candidate = global_root
+            .join(CODEGRAPH_NPM_PACKAGE)
+            .join("npm-sdk.js");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    let executable = paths.codegraph_executable.as_deref()?;
+    let real = std::fs::canonicalize(executable).ok()?;
+    let prefix = npm_prefix_from_real_path(&real)?;
+    let candidate = npm_package_dir(&prefix, CODEGRAPH_NPM_PACKAGE).join("npm-sdk.js");
+    candidate.is_file().then_some(candidate)
 }
 
 /// node 解析：自带 node（存在且可执行）优先；PATH node 需 `--version`
@@ -174,25 +345,212 @@ pub fn resolve_node_executable(
     sdk_path: &Path,
     runner: &Arc<dyn BoundedCommandRunner>,
 ) -> Result<PathBuf, AggregateIndexError> {
-    let _ = (paths, sdk_path, runner);
-    todo!("green: node 解析与版本闸")
+    let mut bundled = paths.bundled_nodes.clone();
+    if bundled.is_empty() {
+        bundled = bundled_node_candidates(sdk_path);
+    }
+    for candidate in &bundled {
+        if is_executable_file(candidate) {
+            return Ok(candidate.clone());
+        }
+    }
+    if let Some(path_node) = paths
+        .path_node
+        .as_deref()
+        .filter(|candidate| is_executable_file(candidate))
+        && path_node_meets_minimum(path_node, runner)
+    {
+        return Ok(path_node.to_path_buf());
+    }
+    Err(AggregateIndexError::Failed {
+        code: "codegraph_node_unavailable",
+        message: "需要 Node.js ≥ 22.5 运行 codegraph SDK 覆盖验收：未找到 codegraph 平台\
+                 包自带的 node，PATH 上的 node 缺失或版本低于 22.5；可安装 Node.js \
+                 ≥ 22.5，或重装 codegraph（npm install -g @colbymchenry/codegraph）"
+            .to_string(),
+    })
+}
+
+/// SDK 包根下自带 node 候选：`node_modules/@colbymchenry/codegraph-*/node`
+/// （目录名按平台包命名通配，排序保证确定性）。
+fn bundled_node_candidates(sdk_path: &Path) -> Vec<PathBuf> {
+    let Some(package_root) = sdk_path.parent() else {
+        return Vec::new();
+    };
+    let scoped = package_root
+        .join("node_modules")
+        .join("@colbymchenry");
+    let Ok(entries) = std::fs::read_dir(&scoped) else {
+        return Vec::new();
+    };
+    let mut candidates: Vec<(String, PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            name.starts_with("codegraph-")
+                .then(|| (name, entry.path().join(node_executable_name())))
+        })
+        .collect();
+    candidates.sort();
+    candidates.into_iter().map(|(_, node)| node).collect()
+}
+
+fn node_executable_name() -> &'static str {
+    if cfg!(windows) {
+        "node.exe"
+    } else {
+        "node"
+    }
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// PATH 回退 node 的版本闸：`node --version` 实测 ≥ 22.5 才采用
+///（无法解析/命令失败均 fail-closed 不采用）。
+fn path_node_meets_minimum(node: &Path, runner: &Arc<dyn BoundedCommandRunner>) -> bool {
+    let request = BoundedCommandRequest {
+        executable: node.display().to_string(),
+        argv: vec!["--version".to_string()],
+        working_dir: std::env::temp_dir(),
+        timeout: Duration::from_secs(NPM_PROBE_TIMEOUT_SECS),
+        cancellation: CancellationToken::new(),
+        environment: sanitized_environment(),
+        stdout_limit: PROBE_OUTPUT_LIMIT_BYTES,
+        stderr_limit: PROBE_OUTPUT_LIMIT_BYTES,
+    };
+    let Ok(output) = run_bounded_sync(runner, request) else {
+        return false;
+    };
+    output.exit_code == Some(0)
+        && parse_node_version(&output.stdout).is_some_and(|version| version >= MIN_NODE_VERSION)
 }
 
 /// 解析 `node --version` 输出（`v22.5.0`、`v24.16.0-nightly.1` 等）；
 /// 无法解析 ⇒ None（fail-closed，不采用）。
 pub fn parse_node_version(output: &str) -> Option<(u64, u64, u64)> {
-    let _ = output;
-    todo!("green: node 版本解析")
+    let trimmed = output.trim();
+    let token = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    let numeric: String = token
+        .chars()
+        .take_while(|character| character.is_ascii_digit() || *character == '.')
+        .collect();
+    let mut segments = numeric.split('.');
+    let major = leading_u64(segments.next()?)?;
+    let minor = leading_u64(segments.next()?)?;
+    let patch = leading_u64(segments.next()?)?;
+    if segments.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// 取段的前导数字（`0-nightly.1` ⇒ 0；空段 ⇒ None）。
+fn leading_u64(segment: &str) -> Option<u64> {
+    let digits: String = segment
+        .chars()
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
 }
 
 /// 以同步方式跑一次有界命令（镜像 `codegraph_cli` 的线程 + 单线程
-/// runtime 阻塞口径）。
+/// runtime 阻塞口径，避免把 async 传染给上层验收调用链）。
 fn run_bounded_sync(
     runner: &Arc<dyn BoundedCommandRunner>,
     request: BoundedCommandRequest,
 ) -> Result<BoundedCommandResult, BoundedCommandError> {
-    let _ = (runner, request);
-    todo!("green: 同步有界命令执行")
+    let runner = runner.clone();
+    std::thread::spawn(move || -> Result<BoundedCommandResult, BoundedCommandError> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| BoundedCommandError::Io {
+                details: error.to_string(),
+            })?;
+        runtime.block_on(runner.run(request))
+    })
+    .join()
+    .map_err(|_| BoundedCommandError::Io {
+        details: "coverage runner thread panicked".to_string(),
+    })?
+}
+
+/// 我们自己安装时用的前缀（NPM_PREFIX 覆盖 → `$HOME/.npm-global`）下的
+/// npm 标准布局 `npm-sdk.js` 候选。
+fn install_prefix_sdk_candidate() -> Option<PathBuf> {
+    let prefix = resolve_npm_prefix(
+        std::env::var("NPM_PREFIX").ok().as_deref(),
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    );
+    Some(
+        npm_package_dir(&prefix, CODEGRAPH_NPM_PACKAGE).join("npm-sdk.js"),
+    )
+}
+
+/// `npm root -g` 探针：全局 node_modules 根（首非空行且确为目录）。
+fn probe_npm_global_root(runner: &Arc<dyn BoundedCommandRunner>) -> Option<PathBuf> {
+    let request = BoundedCommandRequest {
+        executable: "npm".to_string(),
+        argv: vec!["root".to_string(), "-g".to_string()],
+        working_dir: std::env::temp_dir(),
+        timeout: Duration::from_secs(NPM_PROBE_TIMEOUT_SECS),
+        cancellation: CancellationToken::new(),
+        environment: sanitized_environment(),
+        stdout_limit: PROBE_OUTPUT_LIMIT_BYTES,
+        stderr_limit: PROBE_OUTPUT_LIMIT_BYTES,
+    };
+    let output = run_bounded_sync(runner, request).ok()?;
+    if output.exit_code != Some(0) || output.timed_out {
+        return None;
+    }
+    let line = output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let path = PathBuf::from(line);
+    path.is_dir().then_some(path)
+}
+
+fn find_executable_in_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(executable_file_name(name)))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+fn executable_file_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+fn sanitized_environment() -> BTreeMap<String, String> {
+    let mut environment = std::env::var("PATH")
+        .map(|path| BTreeMap::from([("PATH".to_string(), path)]))
+        .unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        environment.insert("HOME".to_string(), home.to_string_lossy().into_owned());
+    }
+    environment
 }
 
 #[cfg(test)]
