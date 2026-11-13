@@ -23,6 +23,8 @@ pub mod integration_queue;
 pub mod json_rpc_peer;
 pub mod kimi_code_provider;
 pub mod local_usage;
+// 生产 tracing subscriber 初始化（仅 `aria web` 服务形态调用）。
+pub mod logging_setup;
 pub mod manual_intervention;
 pub mod openspec_constraints;
 pub mod path_overlay;
