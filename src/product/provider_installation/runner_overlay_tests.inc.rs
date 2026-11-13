@@ -628,3 +628,56 @@ fn npm_plan_carries_allow_scripts_and_prefix_bin_on_path() {
         "安装子进程的 PATH 必须前插目标前缀的 bin: {path}"
     );
 }
+
+/// 装完探测失败（装上但跑不起来）⇒ 自动以 `--include=optional` 重试一次；
+/// 仍失败 ⇒ 错误文案含**可复制**的修复命令（npm 会「留下缺 native 包的
+/// 安装」却仍 exit 0 ⇒ 首次装不上平台包时要带 optional 重装）。
+#[tokio::test]
+async fn install_retries_once_with_include_optional_when_probe_fails() {
+    let root = tempdir().expect("root");
+    let install_runner = ScriptedRunner::new(
+        vec![success("added 1 package"), success("added 1 package")],
+        Duration::ZERO,
+    );
+    let mut execution = execution(root.path(), install_runner.clone(), SpyProber::new(None));
+    execution.path_value = Some(root.path().join("empty-bin").to_string_lossy().into_owned());
+    execution.npm_prefix = root.path().join("installation");
+
+    let job = execution
+        .store
+        .create("codex", FixedClock.now())
+        .expect("create");
+    execution
+        .run(&job.job_id, InstallTarget::Provider(ProviderName::Codex))
+        .await;
+
+    let requests = install_runner.requests();
+    assert_eq!(requests.len(), 2, "探测失败必须自动重试一次: {requests:?}");
+    assert!(
+        requests[1].argv.contains(&"--include=optional".to_string()),
+        "重试必须带 --include=optional: {:?}",
+        requests[1].argv
+    );
+    assert!(
+        !requests[1].argv.contains(&"--omit=optional".to_string()),
+        "重试不得与 --omit=optional 互斥: {:?}",
+        requests[1].argv
+    );
+
+    let done = execution
+        .store
+        .get(&job.job_id)
+        .expect("io")
+        .expect("job exists");
+    let failure = done.failure.expect("仍失败必须有失败载荷");
+    assert!(
+        failure.message.contains("--include=optional") && failure.message.contains("--prefix"),
+        "错误文案必须含可复制的修复命令: {}",
+        failure.message
+    );
+    assert!(
+        failure.manual_command.contains("--include=optional"),
+        "手动命令必须含可复制的修复命令: {}",
+        failure.manual_command
+    );
+}
