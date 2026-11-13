@@ -906,6 +906,8 @@ pub async fn serve_web(
         }
         Err(error) => eprintln!("[aria-startup] dangling reference governance failed: {error}"),
     }
+    // 计划 2026-11-13 包 2.4b/2.4c/2.12：登记用户工具目录 + 异步探测登录 shell PATH/env。
+    crate::cross_cutting::path_overlay::register_startup_overlay().await;
     refresh_provider_health_for_startup(&state).await;
 
     let app = assemble_production_router(state.clone(), evidence_enabled, static_service);
