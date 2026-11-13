@@ -51,6 +51,16 @@ pub const DEFAULT_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// 安装输出上限（stdout/stderr 各自）。
 pub const INSTALL_OUTPUT_LIMIT: usize = 64 * 1024;
 
+/// codegraph **真实命令**验证（`status --json`）的专用超时。
+///
+/// 理由：已初始化索引上 `status` 是**读写**打开（上游 1.6.2
+/// `codegraph.ts:1094` 用 `CodeGraph.open(projectPath)`，无 `readOnly`），会
+/// 走迁移 / WAL 自愈；3.1 GB 级索引上实测可能远超 5s。若沿用普通的 5s 探测
+/// 时限，**健康**安装会被误判为「真实命令失败」⇒ 无谓的
+/// `--include=optional` 重试并最终落 failed（假红灯）。故仅对该目标放宽，
+/// 其它 provider 的探测口径不变（`--version` / `--help` 都是秒级）。
+const CODEGRAPH_VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// 宿主环境透传基线（计划覆盖层叠在其上；与 `provider_health` 的
 /// probe 环境构造同口径）。
 fn host_environment() -> BTreeMap<String, String> {
@@ -327,6 +337,13 @@ impl HealthRefreshProber {
             return false;
         };
         let argv = post_install_verification_argv(target.wire_label());
+        let timeout = match &target {
+            // codegraph 的 `status --json` 在大索引上可能要几十秒
+            // （详见 `CODEGRAPH_VERIFY_TIMEOUT`）：只放宽它的探测时限，
+            // 其它 provider 保持构造时的口径。
+            InstallTarget::CodeGraph => self.timeout.max(CODEGRAPH_VERIFY_TIMEOUT),
+            InstallTarget::Provider(_) => self.timeout,
+        };
         let mut executables = Vec::new();
         if let Some(dir) = bin_dir {
             executables.push(dir.join(row.command).to_string_lossy().into_owned());
@@ -337,7 +354,7 @@ impl HealthRefreshProber {
                 executable,
                 argv: argv.clone(),
                 working_dir: self.working_dir.clone(),
-                timeout: self.timeout,
+                timeout,
                 cancellation: CancellationToken::new(),
                 environment: host_environment(),
                 stdout_limit: 4096,
