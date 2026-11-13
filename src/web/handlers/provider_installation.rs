@@ -86,6 +86,49 @@ fn install_job_store(state: &WebAppState) -> InstallJobStore {
     )
 }
 
+/// 装配安装作业执行器。
+///
+/// 生产：宿主环境解析（PATH / HOME / npm 全局前缀）——`InstallJobExecution::production`。
+/// 测试：可注入**隔离执行器**（临时 npm 前缀 + 空 PATH + 临时 HOME）——
+/// 否则宿主真装了 codex 时，安装会落到**宿主**前缀、装后版本直接读宿主真实
+/// 包的 `package.json`，用例断言随开发机状态漂移（见 tests 模块的
+/// `IsolatedInstallEnv`）。
+fn install_job_execution(store: InstallJobStore, state: &WebAppState) -> InstallJobExecution {
+    #[cfg(test)]
+    {
+        if let Some(builder) = test_install_execution_builder(state) {
+            return builder(store, state);
+        }
+    }
+    InstallJobExecution::production(
+        store,
+        state.command_runner.clone(),
+        state.workspace_root.clone(),
+        state.provider_health.clone(),
+    )
+}
+
+/// 测试用执行器装配器（按 workspace_root 命中 ⇒ 并行用例互不干扰）。
+#[cfg(test)]
+type TestInstallExecutionBuilder =
+    Arc<dyn Fn(InstallJobStore, &WebAppState) -> InstallJobExecution + Send + Sync>;
+
+/// 测试登记的隔离执行器（workspace_root → 装配器）。
+#[cfg(test)]
+static TEST_INSTALL_EXECUTIONS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, TestInstallExecutionBuilder)>,
+> = std::sync::Mutex::new(Vec::new());
+
+/// 取该 state 登记的隔离执行器装配器（未登记 ⇒ `None` = 走生产装配）。
+#[cfg(test)]
+fn test_install_execution_builder(state: &WebAppState) -> Option<TestInstallExecutionBuilder> {
+    let registry = TEST_INSTALL_EXECUTIONS.lock().ok()?;
+    registry
+        .iter()
+        .find(|(root, _)| *root == state.workspace_root)
+        .map(|(_, builder)| builder.clone())
+}
+
 fn error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (status, Json(ApiError::validation(code, message))).into_response()
 }
@@ -284,12 +327,7 @@ pub async fn post_provider_install(
             );
         }
     };
-    let execution = InstallJobExecution::production(
-        store,
-        state.command_runner.clone(),
-        state.workspace_root.clone(),
-        state.provider_health.clone(),
-    );
+    let execution = install_job_execution(store, &state);
     let job_id = job.job_id.clone();
     tokio::spawn(async move {
         execution.run(&job_id, target).await;
@@ -364,7 +402,7 @@ pub async fn post_provider_expose(Path(target_wire): Path<String>) -> Response {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -378,8 +416,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        get_install_job, get_install_targets, post_provider_expose, post_provider_install,
-        resolve_install_action,
+        InstallJobExecution, TEST_INSTALL_EXECUTIONS, TestInstallExecutionBuilder, get_install_job,
+        get_install_targets, post_provider_expose, post_provider_install, resolve_install_action,
     };
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::bounded_command_runner::{
@@ -397,6 +435,8 @@ mod tests {
         /// 脚本原件：脚本用尽时**回放一轮**（见 `run` 的说明）。
         script: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
         delay: Duration,
+        /// 可选副作用：命令执行时的宿主侧效果（模拟 npm **真的装上了**）。
+        on_run: Option<Arc<dyn Fn(&BoundedCommandRequest) + Send + Sync>>,
     }
 
     impl ScriptedRunner {
@@ -408,6 +448,21 @@ mod tests {
                 results: Mutex::new(VecDeque::from(results.clone())),
                 script: results,
                 delay,
+                on_run: None,
+            })
+        }
+
+        /// 带副作用的 runner：每次命令执行**前**触发 `on_run`（模拟安装落盘）。
+        fn with_side_effect(
+            results: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
+            delay: Duration,
+            on_run: Arc<dyn Fn(&BoundedCommandRequest) + Send + Sync>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                results: Mutex::new(VecDeque::from(results.clone())),
+                script: results,
+                delay,
+                on_run: Some(on_run),
             })
         }
     }
@@ -416,10 +471,13 @@ mod tests {
     impl BoundedCommandRunner for ScriptedRunner {
         async fn run(
             &self,
-            _request: BoundedCommandRequest,
+            request: BoundedCommandRequest,
         ) -> Result<BoundedCommandResult, BoundedCommandError> {
             if !self.delay.is_zero() {
                 tokio::time::sleep(self.delay).await;
+            }
+            if let Some(on_run) = self.on_run.as_ref() {
+                on_run(&request);
             }
             let mut results = self.results.lock().expect("scripted results");
             if results.is_empty() {
@@ -491,6 +549,133 @@ mod tests {
                 .with_provider_health(health, gate, install_runner);
         state.test_provider_enabled = false;
         state
+    }
+
+    /// 用例级**宿主隔离环境**：临时 npm 前缀（自带 stub `package.json`）+
+    /// 空 PATH + 临时 HOME。
+    ///
+    /// 为什么需要：装后版本**优先读 npm 包的 `package.json`**（§五 2.8①），
+    /// 而安装落点由**宿主** PATH / npm 全局前缀 / HOME 决定 —— 宿主真装了
+    /// codex 时，作业会落到宿主前缀、版本直接读宿主真实包（开发机装了什么
+    /// 就读到什么），用例断言随开发机状态漂移。这里把落点钉到临时前缀，
+    /// 宿主 PATH / 已装包 / HOME 一律不进断言。
+    #[derive(Clone)]
+    struct IsolatedInstallEnv {
+        /// 隔离的 npm 全局前缀（安装落点；`lib/node_modules/<pkg>/package.json`）。
+        prefix: PathBuf,
+        /// 空 bin 目录（PATH 上没有任何命令 ⇒ 宿主的 visible 前缀不参与）。
+        empty_bin: PathBuf,
+        /// 临时 HOME（脚本类安装源落点推断用）。
+        home: PathBuf,
+        /// 装**后**的版本（假安装真的写进 `package.json`）。
+        new_version: String,
+    }
+
+    impl IsolatedInstallEnv {
+        /// 在 `root` 下建隔离环境：装前版本 `old_version`，假安装后写入
+        /// `new_version`。
+        fn new(root: &Path, old_version: &str, new_version: &str) -> Self {
+            let prefix = root.join("npm-prefix");
+            let package_dir = prefix
+                .join("lib")
+                .join("node_modules")
+                .join("@openai")
+                .join("codex");
+            std::fs::create_dir_all(&package_dir).expect("package dir");
+            std::fs::write(
+                package_dir.join("package.json"),
+                format!(r#"{{"name":"@openai/codex","version":"{old_version}"}}"#),
+            )
+            .expect("package.json");
+            let empty_bin = root.join("empty-bin");
+            std::fs::create_dir_all(&empty_bin).expect("empty bin");
+            let home = root.join("home");
+            std::fs::create_dir_all(&home).expect("home");
+            Self {
+                prefix,
+                empty_bin,
+                home,
+                new_version: new_version.to_string(),
+            }
+        }
+
+        /// 装**后**的 `package.json`（装前版本 → 装后版本）。
+        fn package_manifest(&self) -> PathBuf {
+            self.prefix
+                .join("lib")
+                .join("node_modules")
+                .join("@openai")
+                .join("codex")
+                .join("package.json")
+        }
+
+        /// 假安装的副作用：npm 装成功 ⇒ 新版本真的落盘（模拟真实安装）。
+        fn install_side_effect(&self) -> Arc<dyn Fn(&BoundedCommandRequest) + Send + Sync> {
+            let env = self.clone();
+            Arc::new(move |request: &BoundedCommandRequest| {
+                // 只有真正的安装命令才落盘（`--version` / `--help` 探测不落盘）。
+                let is_install = request.executable == "npm"
+                    && request.argv.first().is_some_and(|arg| arg == "install");
+                if !is_install {
+                    return;
+                }
+                std::fs::write(
+                    env.package_manifest(),
+                    format!(
+                        r#"{{"name":"@openai/codex","version":"{}"}}"#,
+                        env.new_version
+                    ),
+                )
+                .expect("write installed package.json");
+            })
+        }
+
+        /// 隔离执行器装配器：临时前缀 + 空 PATH + 临时 HOME + 不探测 npm
+        /// 全局前缀（宿主 `npm prefix -g` 一律不参与）。
+        fn builder(&self) -> TestInstallExecutionBuilder {
+            let prefix = self.prefix.clone();
+            let empty_bin = self.empty_bin.clone();
+            let home = self.home.clone();
+            Arc::new(move |store, state| {
+                let mut execution = InstallJobExecution::production(
+                    store,
+                    state.command_runner.clone(),
+                    state.workspace_root.clone(),
+                    state.provider_health.clone(),
+                );
+                execution.path_value = Some(empty_bin.to_string_lossy().into_owned());
+                execution.npm_prefix = prefix.clone();
+                execution.npm_prefix_probe = None;
+                execution.home_dir = Some(home.clone());
+                execution
+            })
+        }
+    }
+
+    /// 隔离执行器的登记凭证：测试结束（含 panic 展开）自动摘除登记。
+    struct IsolatedInstallEnvGuard {
+        workspace_root: PathBuf,
+    }
+
+    impl Drop for IsolatedInstallEnvGuard {
+        fn drop(&mut self) {
+            if let Ok(mut registry) = TEST_INSTALL_EXECUTIONS.lock() {
+                registry.retain(|(root, _)| *root != self.workspace_root);
+            }
+        }
+    }
+
+    /// 把隔离执行器挂到该 workspace_root 上（按根路径命中 ⇒ 并行用例不串味）。
+    fn isolate_install_env(
+        env: &IsolatedInstallEnv,
+        workspace_root: &Path,
+    ) -> IsolatedInstallEnvGuard {
+        let mut registry = TEST_INSTALL_EXECUTIONS.lock().expect("registry lock");
+        registry.retain(|(root, _)| *root != workspace_root);
+        registry.push((workspace_root.to_path_buf(), env.builder()));
+        IsolatedInstallEnvGuard {
+            workspace_root: workspace_root.to_path_buf(),
+        }
     }
 
     /// 预置 24h durable 版本缓存，避免 handler 测试触网。
@@ -752,6 +937,9 @@ mod tests {
     #[tokio::test]
     async fn install_target_post_returns_immediately_and_polls_to_completed() {
         let root = tempdir().expect("root");
+        // 隔离宿主环境：装前 2.0.0 ⇒ 假安装写入 2.1.7（装前装后版本不同 ⇒
+        // 不触发「命令仍是旧版」），断言只认隔离前缀里的 `package.json`。
+        let env = IsolatedInstallEnv::new(root.path(), "2.0.0", "2.1.7");
         let health = health_service(
             root.path(),
             vec![
@@ -765,8 +953,13 @@ mod tests {
         let state = state(
             root.path(),
             health.clone(),
-            ScriptedRunner::new(vec![install_success()], Duration::from_millis(300)),
+            ScriptedRunner::with_side_effect(
+                vec![install_success()],
+                Duration::from_millis(300),
+                env.install_side_effect(),
+            ),
         );
+        let _isolation = isolate_install_env(&env, root.path());
 
         let response = post_provider_install(
             State(state.clone()),
@@ -930,6 +1123,9 @@ mod tests {
         };
 
         let root = tempdir().expect("root");
+        // 隔离宿主环境（宿主真装了 codex 时，作业会落到宿主前缀 ⇒ 版本读宿主
+        // 真实包、装前装后同版本 ⇒ 作业被判 failed）。
+        let env = IsolatedInstallEnv::new(root.path(), "2.0.0", "2.1.7");
         let health = health_service(
             root.path(),
             vec![
@@ -967,9 +1163,14 @@ mod tests {
         .with_provider_health(
             health.clone(),
             gate,
-            ScriptedRunner::new(vec![install_success()], Duration::ZERO),
+            ScriptedRunner::with_side_effect(
+                vec![install_success()],
+                Duration::ZERO,
+                env.install_side_effect(),
+            ),
         )
         .with_capability_revalidate_service(capability_service);
+        let _isolation = isolate_install_env(&env, root.path());
 
         let response = post_provider_install(
             State(state.clone()),
