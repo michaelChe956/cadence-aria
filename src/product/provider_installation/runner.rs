@@ -781,9 +781,20 @@ impl InstallJobExecution {
             }
         }
         let repair = install_repair_command(row, &self.registry, prefix);
+        // 2.8③ 三种失败语义：**没装上**（产物里没有该命令）vs **装上但缺
+        // 平台包**（命令在但跑不起来）——提示要能区分。
+        let installed = bin_dir.is_some_and(|dir| dir.join(row.command).exists());
+        let message = if installed {
+            format!("装上了但跑不起来（装完探测未通过，可能缺平台包）。请手动运行：{repair}")
+        } else {
+            format!(
+                "没装上（安装产物里没有 `{}` 命令）。请手动运行：{repair}",
+                row.command
+            )
+        };
         let failure = InstallJobFailure {
             kind: InstallFailureKind::Other,
-            message: format!("装上了但跑不起来（装完探测未通过）。请手动运行：{repair}"),
+            message,
             manual_command: repair,
         };
         let _ = self.store.fail(job_id, failure, self.clock.now());
