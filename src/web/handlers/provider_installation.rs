@@ -13,6 +13,7 @@
 //! 不实现 version-cache 查询端点：24h 缓存是 `registry_version` 的内部
 //! 实现细节（tasks.md 82 条契约不含该端点）。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,10 +26,12 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::bounded_command_runner::{BoundedCommandError, BoundedCommandRequest};
+use crate::cross_cutting::path_overlay;
 use crate::cross_cutting::provider_health::ProviderHealthReasonCode;
 use crate::cross_cutting::semver::compare_semver;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::provider_installation::InstallTarget;
+use crate::product::provider_installation::effective_prefix::same_dir;
 use crate::product::provider_installation::expose::expose_to_terminal_path;
 use crate::product::provider_installation::job_store::InstallJobStore;
 use crate::product::provider_installation::registry_version::{
@@ -56,6 +59,9 @@ pub struct InstallTargetStatusDto {
     pub install_source: String,
     /// install / update / none / verify（REQ-PCI-02 按钮规则）。
     pub action: &'static str,
+    /// 已安装但所在目录不在登录 shell PATH 上（REQ-PCI-08；仅提示，指向
+    /// 既有「暴露到终端 PATH」入口，未安装恒 false）。
+    pub off_path: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +162,89 @@ fn resolve_install_action(
     "none"
 }
 
+/// off_path 判定查询（REQ-PCI-08；测试 seam：搜索目录与登录 PATH 注入）。
+#[derive(Debug, Clone)]
+struct OffPathQuery {
+    /// 已安装二进制的搜索目录（与 expose 生产查询同口径：overlay 登记目录
+    /// → 登录 shell PATH → 已知落点）。
+    install_search_dirs: Vec<PathBuf>,
+    /// 登录 shell PATH 的目录列表（PATH 顺序）；空 = 探测不可用。
+    login_path_dirs: Vec<PathBuf>,
+}
+
+/// 生产查询构建：overlay 登记目录 → 登录 shell PATH 快照 → `~/.npm-global/bin`
+/// → `/usr/local/bin`（与 `expose` 的生产查询同口径；本面**只读**——不建链、
+/// 不做可写探测）。
+fn off_path_query() -> OffPathQuery {
+    let login_path_dirs: Vec<PathBuf> = path_overlay::login_shell_path()
+        .as_deref()
+        .map(split_login_path_dirs)
+        .unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    let mut install_search_dirs = path_overlay::snapshot();
+    extend_unique_dirs(&mut install_search_dirs, login_path_dirs.iter().cloned());
+    if let Some(home) = &home {
+        extend_unique_dirs(
+            &mut install_search_dirs,
+            std::iter::once(home.join(".npm-global/bin")),
+        );
+    }
+    extend_unique_dirs(
+        &mut install_search_dirs,
+        std::iter::once(PathBuf::from("/usr/local/bin")),
+    );
+    OffPathQuery {
+        install_search_dirs,
+        login_path_dirs,
+    }
+}
+
+/// 登录 shell PATH 原始串 → 目录列表（保序、去空段；与 `expose` 侧私有
+/// `split_path_dirs` 同口径的对齐实现）。
+fn split_login_path_dirs(value: &str) -> Vec<PathBuf> {
+    std::env::split_paths(value)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect()
+}
+
+/// 去重追加（首现优先；与 `expose` 侧私有 `extend_unique` 同口径）。
+fn extend_unique_dirs(target: &mut Vec<PathBuf>, items: impl IntoIterator<Item = PathBuf>) {
+    for item in items {
+        if !target.contains(&item) {
+            target.push(item);
+        }
+    }
+}
+
+/// 判定 off_path（REQ-PCI-08）：已安装（搜索目录里找得到二进制）但其所在
+/// 目录**不在登录 shell PATH** 上 ⇒ 用户在自己终端里可能敲不出来。
+///
+/// 只做提示，不改变安装/更新动作语义；未安装或登录 shell PATH 快照不可用
+/// （服务启动 ≤2s / 探测失败）⇒ `false`（宁缺毋滥，不给误导性徽标）。
+fn resolve_off_path(command: &str, query: &OffPathQuery) -> bool {
+    // 未安装（搜索目录里找不到二进制）⇒ 无从谈 PATH（断链不算已安装，
+    // 与 expose::find_installed 同口径）。
+    let Some(installed) = query
+        .install_search_dirs
+        .iter()
+        .map(|dir| dir.join(command))
+        .find(|path| path.exists())
+    else {
+        return false;
+    };
+    if query.login_path_dirs.is_empty() {
+        return false;
+    }
+    let installed_dir = installed.parent().unwrap_or(installed.as_path());
+    // 目录成员语义（规范化比较）：登录 shell PATH 任一目录命中即「在 PATH 上」。
+    !query
+        .login_path_dirs
+        .iter()
+        .any(|login_dir| same_dir(login_dir, installed_dir))
+}
+
 /// codegraph 不在 provider health 矩阵内：本地状态用 `codegraph --version`
 /// 现场探测（与建索引用的 CLI 同名同口径）。
 struct CodegraphProbe {
@@ -223,6 +312,9 @@ pub async fn get_install_targets(State(state): State<WebAppState>) -> Json<Insta
     );
     let now = Utc::now();
     let codegraph = probe_codegraph(&state).await;
+    // off_path 判定（REQ-PCI-08）：登录 shell PATH 快照 + overlay 登记目录
+    // 一次构建，五类对象共用（只读，不建链）。
+    let off_path_probe = off_path_query();
 
     let mut targets = Vec::with_capacity(INSTALL_SOURCE_TABLE.len());
     for row in INSTALL_SOURCE_TABLE.iter() {
@@ -280,6 +372,7 @@ pub async fn get_install_targets(State(state): State<WebAppState>) -> Json<Insta
             latest_checked_at,
             install_source: install_source_label(row),
             action,
+            off_path: cli_available && resolve_off_path(row.command, &off_path_probe),
         });
     }
     Json(InstallTargetsResponse { targets })
@@ -431,13 +524,17 @@ mod tests {
 
     // ---- 测试基建（与 providers.rs 测试同款脚本 runner） ----
 
+    /// 命令执行副作用钩子（模拟 npm 安装真的落盘）：type alias 收敛签名
+    /// 复杂度（clippy::type_complexity；语义不变，不用 #[allow] 压制）。
+    type OnRunHook = Arc<dyn Fn(&BoundedCommandRequest) + Send + Sync>;
+
     struct ScriptedRunner {
         results: Mutex<VecDeque<Result<BoundedCommandResult, BoundedCommandError>>>,
         /// 脚本原件：脚本用尽时**回放一轮**（见 `run` 的说明）。
         script: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
         delay: Duration,
         /// 可选副作用：命令执行时的宿主侧效果（模拟 npm **真的装上了**）。
-        on_run: Option<Arc<dyn Fn(&BoundedCommandRequest) + Send + Sync>>,
+        on_run: Option<OnRunHook>,
     }
 
     impl ScriptedRunner {
@@ -457,7 +554,7 @@ mod tests {
         fn with_side_effect(
             results: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
             delay: Duration,
-            on_run: Arc<dyn Fn(&BoundedCommandRequest) + Send + Sync>,
+            on_run: OnRunHook,
         ) -> Arc<Self> {
             Arc::new(Self {
                 results: Mutex::new(VecDeque::from(results.clone())),
@@ -611,7 +708,7 @@ mod tests {
         }
 
         /// 假安装的副作用：npm 装成功 ⇒ 新版本真的落盘（模拟真实安装）。
-        fn install_side_effect(&self) -> Arc<dyn Fn(&BoundedCommandRequest) + Send + Sync> {
+        fn install_side_effect(&self) -> OnRunHook {
             let env = self.clone();
             Arc::new(move |request: &BoundedCommandRequest| {
                 // 只有真正的安装命令才落盘（`--version` / `--help` 探测不落盘）。
