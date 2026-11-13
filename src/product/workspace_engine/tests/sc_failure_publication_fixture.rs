@@ -150,8 +150,8 @@ pub(super) fn publication_fixture() -> PublicationFixture {
                 repair_instructions: vec!["先修 A 再修 B".to_string()],
                 raw: available(&locator, RAW),
                 source: available(&locator, SOURCE),
-                existing_failure_id: None,
-                attempt_key: None,
+                existing_failure_id: Some("failure_0001".to_string()),
+                attempt_key: Some("attempt_0001".to_string()),
             },
         )
         .expect("observe failure");
