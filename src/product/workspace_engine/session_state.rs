@@ -252,13 +252,20 @@ impl WorkspaceEngine {
                 }
             }
         }
-        let artifact_version_summaries = self
-            .artifact_versions
+        // A4（SC 失败修复包）只在严格发布回执通过后进入公开视图：pending
+        // （缺回执）不出现，坏回执/摘要显式投影为 policy_diagnostics——不吞成
+        // 空列表成功，普通 entries 保留。内存 raw 版本表不被过滤结果覆盖。
+        let (published_versions, publication_diagnostic) = self.sc_published_versions();
+        let mut policy_diagnostics = self.session.policy_diagnostics.clone();
+        if let Some(diagnostic) = publication_diagnostic {
+            policy_diagnostics.push(diagnostic);
+        }
+        let artifact_version_summaries = published_versions
             .iter()
             .map(build_artifact_version_summary)
             .collect();
         let artifact_versions = if self.session.workspace_type == WorkspaceType::WorkItemPlan {
-            self.artifact_versions
+            published_versions
                 .iter()
                 .filter(|version| {
                     matches!(
@@ -268,6 +275,7 @@ impl WorkspaceEngine {
                             | ArtifactPayload::WorkItemRevisionHistory { .. }
                             | ArtifactPayload::ProjectionValidation { .. }
                             | ArtifactPayload::PlanAmendmentManifest { .. }
+                            | ArtifactPayload::ScFailureRepairPackage { .. }
                     )
                 })
                 .cloned()
@@ -313,7 +321,7 @@ impl WorkspaceEngine {
             human_gate_turn_rejection: self.latest_human_gate_turn_rejection_projection(),
             candidate_compile_failure: self.candidate_compile_failure_projection(),
             repair_reservation: self.session.repair_reservation.clone().map(Box::new),
-            policy_diagnostics: self.session.policy_diagnostics.clone(),
+            policy_diagnostics,
             provider_start_ledger: self.session.provider_start_ledger.clone(),
             single_candidate_phase: self.session.single_candidate_phase.clone(),
             work_item_plan_source_revision_ref: self

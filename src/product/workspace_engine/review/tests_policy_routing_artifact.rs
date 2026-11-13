@@ -26,5 +26,6 @@ pub(super) fn artifact_variant(engine: &WorkspaceEngine) -> Option<&'static str>
             ArtifactPayload::WorkItemRevisionHistory { .. } => "work_item_revision_history",
             ArtifactPayload::ProjectionValidation { .. } => "projection_validation",
             ArtifactPayload::PlanAmendmentManifest { .. } => "plan_amendment_manifest",
+            ArtifactPayload::ScFailureRepairPackage { .. } => "sc_failure_repair_package",
         })
 }
