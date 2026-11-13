@@ -17,9 +17,11 @@
   6. **置换检验 = 精确枚举 C(8,4)=70 个分组**（n=4/臂），分辨率下限 1/70；
      只作方向性参考，不作显著性判定，不做多重检验校正。
   7. **输入来源 digest 直接取自 manifest**（`issue_input_sha256` /
-     `story_markdown_sha256` / `story_version_ref` / `seed_manifest_sha256`）；
-     全臂不一致 ⇒ 显式打印「不可归因」，不静默混算。判等口径是 confirmed 版本
-     正文的 markdown 字节，不是带可变时间戳的 story spec 记录。
+     `story_markdown_sha256` / `story_version_ref` / `design_markdown_sha256` /
+     `design_version_ref` / `seed_manifest_sha256`）；全臂不一致 ⇒ 显式打印
+     「不可归因」，不静默混算。判等口径是 confirmed 版本正文的 markdown 字节，
+     不是带可变时间戳的 spec 记录。缺 design 字段的旧 run 记 not_observed，
+     不据此声称「同一输入」。
 
 用法：python3 harvest_by_role.py <run根目录> [sequence.log ...]
 """
@@ -115,6 +117,8 @@ def collect(run_dir, manifest):
         "story_version_ref": manifest.get("story_version_ref"),
         "issue_input_sha256": manifest.get("issue_input_sha256"),
         "story_markdown_sha256": manifest.get("story_markdown_sha256"),
+        "design_version_ref": manifest.get("design_version_ref"),
+        "design_markdown_sha256": manifest.get("design_markdown_sha256"),
         "seed_manifest_sha256": manifest.get("seed_manifest_sha256"),
         "scratch_home": manifest.get("scratch_home"),
         "author_rounds": 0, "author_seconds": 0.0, "author_cmds": 0, "author_codegraph": 0,
@@ -295,13 +299,17 @@ def summarize(tag, rs):
           ", ".join(sorted({r["binary_sha256"] for r in rs})) )
     # 输入来源 digest：来自 run-manifest（seed 冻结），全臂应完全一致
     inputs = sorted({(r.get("issue_input_sha256"), r.get("story_markdown_sha256"),
-                      r.get("story_version_ref"), r.get("seed_manifest_sha256"))
+                      r.get("story_version_ref"), r.get("design_markdown_sha256"),
+                      r.get("design_version_ref"), r.get("seed_manifest_sha256"))
                      for r in rs})
     if len(inputs) == 1:
-        i_sha, s_sha, vref, seed_sha = inputs[0]
-        print("  输入 digest: issue_input=%s story_markdown=%s seed_manifest=%s (%s)"
-              % (str(i_sha)[:12] or "not_observed", str(s_sha)[:12] or "not_observed",
-                 str(seed_sha)[:12] or "not_observed", vref))
+        i_sha, s_sha, vref, d_sha, dref, seed_sha = inputs[0]
+        print("  输入 digest: issue_input=%s story_markdown=%s design_markdown=%s "
+              "seed_manifest=%s (story=%s design=%s)"
+              % (str(i_sha)[:12] or "not_observed",
+                 str(s_sha)[:12] or "not_observed",
+                 str(d_sha)[:12] or "not_observed",
+                 str(seed_sha)[:12] or "not_observed", vref, dref))
     else:
         print("  !! 输入 digest 不一致（%d 组）：这些样本不可归因，检查 seed 复制/重指向"
               % len(inputs))
@@ -392,15 +400,19 @@ def main():
     summarize("改后（after 二进制）", a)
 
     digests = {(r.get("issue_input_sha256"), r.get("story_markdown_sha256"),
-                r.get("story_version_ref"), r.get("seed_manifest_sha256"))
+                r.get("story_version_ref"), r.get("design_markdown_sha256"),
+                r.get("design_version_ref"), r.get("seed_manifest_sha256"))
                for r in b + a}
     if len(digests) != 1:
         print("\n!! before/after 的输入来源 digest 不一致（%d 组）："
               "这些 run 不是同一输入，对照不可归因" % len(digests))
     else:
-        i_sha, s_sha, vref, seed_sha = next(iter(digests))
-        print("\n输入来源（全臂一致）：issue_input=%s story_markdown=%s %s seed_manifest=%s"
-              % (str(i_sha)[:12], str(s_sha)[:12], vref, str(seed_sha)[:12]))
+        i_sha, s_sha, vref, d_sha, dref, seed_sha = next(iter(digests))
+        print("\n输入来源（全臂一致）：issue_input=%s story_markdown=%s %s "
+              "design_markdown=%s %s seed_manifest=%s"
+              % (str(i_sha)[:12], str(s_sha)[:12], vref,
+                 str(d_sha)[:12] or "not_observed", dref or "not_observed",
+                 str(seed_sha)[:12]))
 
     print("\n" + "=" * 96)
     print("改前 → 改后 方向性对照（同一 seed 输入 × 同装置 × ABBA 串行；"

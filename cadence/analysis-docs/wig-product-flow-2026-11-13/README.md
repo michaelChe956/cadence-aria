@@ -37,12 +37,25 @@ create_story_spec + create_workspace_session）。真机冒烟证据
    Running 会被 F-31 守卫 409 拒收，装置带 6×5s 小步重试只覆盖 durable 残留窗口。
 5. durable 验证：story spec `confirmation_status=confirmed`、`current_version`
    非空、session `provider_start_ledger` 非空（**真实 provider 启动证据**）。
+6. **design seed（prepare 必填前置）**：`--complete-design <既有seed out根>
+   <binary> [端口]` 在**同一已 confirmed story**上调用
+   `POST .../design-specs:generate`（`{title, story_spec_ids:[story],
+   author/reviewer_provider}`；产品侧先 `validate_confirmed_story_specs`，只
+   create_design_spec + create_workspace_session，**不启动 provider**），再用
+   **同一份** WS 驱动函数（`drive_entity_to_confirmed(kind="design")`，不复制
+   第二份 WS 循环）到 `author_confirm` → HTTP confirm → durable 验证
+   `design-specs/<id>.json` confirmed + `versions/<design_id>/version_%04d.json`
+   的 markdown digest + design session `provider_start_ledger` 非空。
+   完成后只向 `seed-manifest.json` 追加 `design_*` 冻结字段（原子写），并断言
+   story 正文 digest 与补 design 前**逐字节一致**（不重建 story）。
 
 plan 阶段沿用 2026-11-09 装置已验证语义：`automation-target` → `prepare`
-（`run_policy=auto_if_valid`）→ 等 `automation-enrollment.json` 的
-`terminated_at`（fresh seed 克隆无 enrollment 时直接过）→ `enable`（带
-`command_id`，`plan_approval=auto`，stories 引用 seed 的 `{id, version}`）→
-等 `workspace_session_auto_*` 终态。
+（`run_policy=auto_if_valid`，`story_spec_ids:[story]` +
+`design_spec_ids:[design]`；空 design 会被产品 500 `design_spec_required`）→
+等 `automation-enrollment.json` 的 `terminated_at`（fresh seed 克隆无 enrollment
+时直接过）→ `enable`（带 `command_id`，`plan_approval=auto`，`source.stories` /
+`source.designs` 分别引用 seed 冻结的 `{id, version}`）→ 等
+`workspace_session_auto_*` 终态。
 
 ## 原案例证据现状（不可恢复项，如实列出）
 
@@ -119,6 +132,15 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
   非 0 退出。
 - 每臂克隆后、开 daemon 前，就把克隆体的快照与 seed 冻结快照逐字段比对；漂移
   直接判 invalid（不再白跑一小时才发现污染）。
+- **design seed 与 story 同权**：`--complete-design` 在既有 seed 的现 confirmed
+  story 上只补 ONE design（不新建 issue/story/session），并把 `design_spec_id` /
+  `design_version` / `design_version_ref` / `design_markdown_sha256` /
+  `design_session_id` / `design_provider_start_ledger` 冻结进同一
+  `seed-manifest.json`；已冻结/已存在 design spec 时拒绝第二次。
+- **batch preflight（缺 design 即失败，零副作用）**：8 臂模式在读 manifest 后、
+  **建任何 `run-*` 目录或发任何 HTTP 调用之前**校验 design 冻结字段非空、
+  `design_confirmation_status=confirmed`，并在 seed 工作区只读复核 story/design
+  的 confirmed 状态与 markdown digest；缺一项 ⇒ rc=1 且不产生 run 目录。
 
 ### 输入身份：只认 durable 事实
 
@@ -137,6 +159,11 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
    **HEAD 没动但 dirty 内容变了 ⇒ 判不稳定**，该臂 invalid。
 3. 固定案例 = 精确 3 成员 `busi/frontend/gateway`，且每个成员
    `canonical_path` 必须仍在固定案例根之下（见下节「状态根重指向」）。
+4. **design 输入 = confirmed design 版本正文**，判等口径与 story 相同
+   （`versions/<design_spec_id>/version_%04d.json` 的 `markdown` UTF-8 bytes
+   sha256 → `design_markdown_sha256`，附 `design_version_ref`）；开臂前后各复核
+   一次，不一致 ⇒ invalid（design 被重生成/被改）。同时复核 story digest 未变，
+   即两个输入 digest 都要与 seed 冻结值一致。
 
 ### 状态根重指向（只改该改的）
 
@@ -187,12 +214,13 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
   严格串行，唯一变量 = 二进制。两件二进制内嵌 UI 资源同为 `index-CD_NhB8M.js`；
   即便如此，性能结论**仍只按后端 binary 差异解释**（前端不参与驱动）。
 - 每 run 写 `run-manifest.json`：tag/arm/port、binary 路径 + sha256、
-  seed-manifest sha256、issue/story/version + `story_version_ref`、
-  `issue_input_sha256` / `story_markdown_sha256`（输入来源 digest）、
-  `scratch_home`、`observed`（provider/model/effort 及其来源）、
-  plan_session_id、终态、provider_start_ledger、输入身份复核
-  （`checks.member_snapshot_*` / `checks.story_markdown_identical`）、
-  valid/invalid_reason。
+  seed-manifest sha256、issue/story/version + `story_version_ref`、design 冻结
+  身份（`design_spec_id` / `design_version` / `design_version_ref`）、
+  `issue_input_sha256` / `story_markdown_sha256` / `design_markdown_sha256`
+  （输入来源 digest）、`scratch_home`、`observed`（provider/model/effort 及其
+  来源）、plan_session_id、终态、provider_start_ledger、输入身份复核
+  （`checks.member_snapshot_*` / `checks.story_markdown_identical` /
+  `checks.design_markdown_identical`）、valid/invalid_reason。
 - 产物纪律：已存在的 run/seed 目录**拒绝覆盖**（失败证据不删除）；任一臂
   超时/异常/未终态/正文 digest 不符/成员快照漂移 ⇒ 该臂 invalid 且进程退出码
   非 0；收割器显式列排除清单。error/timeout/inconclusive 一律不是有效样本。
@@ -255,15 +283,28 @@ python3 $D/run_arms.py --seed /tmp/aria-wig-pinned/after-07a0df79 \
   --case-root "$WIG_CASE_ROOT" \
   --issue-input $SETUP/issue_input.md
 
+# 1b) 在既有 seed 的现 confirmed story 上只补 ONE design（不重建 story）
+#     同一命令完成：design prepare → WS 真实启动 → author_confirm → HTTP confirm
+#     → durable 验证 → design_* 冻结进同一 seed-manifest.json（原子写）。
+#     已冻结 design / 已存在 design spec ⇒ 拒绝第二次。
+#     多仓 Design 确认门要求 involved 非空（REQ-PLN-04），involved>1 还需
+#     change_order（REQ-PLN-05）；若 provider 没有自决，controller 显式给
+#     --design-involved a,b / --design-change-order a,b（不猜业务范围）。
+python3 $D/run_arms.py --complete-design /tmp/aria-wig/out-seed \
+  /tmp/aria-wig-pinned/after-07a0df79 4710 \
+  --design-involved <repo_id[,repo_id...]> --design-change-order <repo_id[,repo_id...]>
+
 # 2) 8 臂 ABBA（唯一变量 = 二进制；任一臂失败 ⇒ 退出码非 0）
-#    装置只按参数跑这 8 臂，不会自行追加 baseline/初始化 run
+#    装置只按参数跑这 8 臂，不会自行追加 baseline/初始化 run。
+#    必须用**新的 batch out 根**：旧 out 的 run-* 行是失败证据，不可覆盖/复用；
+#    batch preflight 缺 design 时在建任何 run 目录之前 rc=1。
 python3 $D/run_arms.py \
   /tmp/aria-wig-pinned/before-a953327d \
   /tmp/aria-wig-pinned/after-07a0df79 \
-  /tmp/aria-wig/out-seed/seed-workspace /tmp/aria-wig/out-seed 2 4701
+  /tmp/aria-wig/out-seed/seed-workspace /tmp/aria-wig/out-batch 2 4701
 
-# 3) 收割 + 精确置换（只出方向性对照；排除清单与输入 digest 一并打印）
-python3 $D/harvest_by_role.py /tmp/aria-wig/out-seed /tmp/aria-wig/out-seed/sequence.log
+# 3) 收割 + 精确置换（只出方向性对照；排除清单与两个输入 digest 一并打印）
+python3 $D/harvest_by_role.py /tmp/aria-wig/out-batch /tmp/aria-wig/out-batch/sequence.log
 ```
 
 全部测试产物只写 `/tmp`（装置不写仓库、不写 HOME、不动原案例目录）。
@@ -295,10 +336,14 @@ python3 $D/run_arms.py --seed /tmp/aria-wig-pinned/after-07a0df79 \
   "$WIG_STATE_ROOT" /tmp/aria-wig/out-seed2 4709 \
   --case-root "$WIG_CASE_ROOT" --issue-input $SETUP/issue_input.md
 
-# 8 臂随后指向新 out 的 seed 快照
+# 新 seed 同样必须先补 ONE design（否则 batch preflight rc=1，不建 run 目录）
+python3 $D/run_arms.py --complete-design /tmp/aria-wig/out-seed2 \
+  /tmp/aria-wig-pinned/after-07a0df79 4710
+
+# 8 臂指向新 seed 快照 + **另一个新的 batch out 根**
 python3 $D/run_arms.py /tmp/aria-wig-pinned/before-a953327d \
   /tmp/aria-wig-pinned/after-07a0df79 \
-  /tmp/aria-wig/out-seed2/seed-workspace /tmp/aria-wig/out-seed2 2 4701
+  /tmp/aria-wig/out-seed2/seed-workspace /tmp/aria-wig/out-batch2 2 4701
 ```
 
 ## 本次修复的验证状态（如实）
@@ -312,13 +357,20 @@ python3 $D/run_arms.py /tmp/aria-wig-pinned/before-a953327d \
      `<member>.status`（判不稳定）；
   ④ trust 门：缺项未授权只报片段；授权后登记 2 条并 0600、幂等；既有
      `untrusted` 条目拒绝覆盖；授权但 HOME 非 `/tmp` 拒绝写；
-  ⑤ `story_version_digest` 在 version 记录时间戳变化时 markdown 字节 digest
-     不变；缺版本文件非 0；
-  ⑥ harvester 在合成 manifests 上打印 issue/story/seed digest、排除 timeout
-     臂、token 缺值呈 `n/a`。
-- **未验证（notrun）**：真实 provider 的 seed 生成、8 臂真机执行、trust 登记在
-  真实 codex 会话中的实际生效、任何耗时/token 数值结论。这些都必须由
-  controller 执行时观察；本目录脚本不会自行启动 provider 或追加 run。
+  ⑤ `entity_version_digest`（story/design 同形）在 version 记录时间戳变化时
+     markdown 字节 digest 不变；缺版本文件非 0（story 夹具沿用上一版观测；
+     design 走同一实现，未单独跑夹具）；
+  ⑥ harvester 在合成 manifests 上打印 issue/story/**design**/seed digest、
+     排除 timeout 臂、token 缺值呈 `n/a`；
+  ⑦ 真机 8 臂首跑失败根因 = prepare 缺 design（产品返回 500
+     `design_spec_required`），已由「`--complete-design` + batch design
+     preflight」闭合；该结论来自既有 run-manifest/sequence.log 证据，**新路径
+     本身未经真机执行**。
+- **未验证（notrun，必须由 controller 执行时观察）**：真实 provider 的 seed
+  生成、`--complete-design` 的真实 design 生成/确认、缺 design 的 batch
+  preflight 实际拒绝行为、开臂前后 design digest 复核、choice 门显式审批路径、
+  8 臂真机执行、trust 登记在真实 codex 会话中的实际生效、任何耗时/token 数值
+  结论。本目录脚本不会自行启动 provider 或追加 run。
 
 ### 真机 seed 首次失败的根因（已修）
 
@@ -336,28 +388,45 @@ error 且前两种先落 `valid=false` 的 seed-manifest 并保留 `seed-workspa
 ```bash
 D=/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-wig-optimize-11-08/cadence/analysis-docs/wig-product-flow-2026-11-13
 SETUP=/tmp/wig-measurement-setup
+# scratch HOME 必须是 /tmp 下的**专属子目录**（/tmp 本身与真实 HOME 都被拒绝）
+H=/tmp/wig-probe-home
+mkdir -p "$H"
 
 # 0) 语法（不是验收，只挡低级错误）
 python3 -m py_compile $D/run_arms.py $D/harvest_by_role.py && echo COMPILE_OK
 
 # 1) 缺 issue 输入 ⇒ rc=1，且不创建产物目录
-HOME=/tmp python3 $D/run_arms.py --seed /bin/true /tmp/no-case /tmp/wig-probe-out; echo "rc=$?"
+HOME="$H" python3 $D/run_arms.py --seed /bin/true /tmp/no-case /tmp/wig-probe-out; echo "rc=$?"
 
 # 2) 空输入 / 错案例输入 ⇒ rc=1
 : > /tmp/wig-probe-empty.md
-HOME=/tmp python3 $D/run_arms.py --seed /bin/true /tmp/no-case /tmp/wig-probe-out \
+HOME="$H" python3 $D/run_arms.py --seed /bin/true /tmp/no-case /tmp/wig-probe-out \
   --issue-input /tmp/wig-probe-empty.md; echo "rc=$?"
 
 # 2b) 缺 case root（既无 --case-root 也无 WIG_CASE_ROOT）⇒ rc=1「缺少固定案例根」
-env -u WIG_CASE_ROOT HOME=/tmp python3 $D/run_arms.py --seed /bin/true /tmp/no-case \
+env -u WIG_CASE_ROOT HOME="$H" python3 $D/run_arms.py --seed /bin/true /tmp/no-case \
   /tmp/wig-probe-out --issue-input $SETUP/issue_input.md; echo "rc=$?"
 
 # 3) 臂模式：伪造 seed-manifest（valid=false）⇒ rc=1「拒绝开臂」，不开 daemon
 mkdir -p /tmp/wig-probe
 printf '{"schema":"wig-seed-manifest/1","valid":false,"invalid_reason":"probe"}\n' \
   > /tmp/wig-probe/seed-manifest.json
-HOME=/tmp python3 $D/run_arms.py /bin/true /bin/true /tmp/wig-probe/seed-workspace /tmp/wig-probe 1
+HOME="$H" python3 $D/run_arms.py /bin/true /bin/true /tmp/wig-probe/seed-workspace /tmp/wig-probe 1
 echo "rc=$?"
+
+# 4) 臂模式：seed valid 但**缺 design 冻结字段** ⇒ rc=1「缺 confirmed design
+#    seed」，且不创建任何 run-* 目录（preflight 先于建目录/发调用）
+mkdir -p /tmp/wig-probe2
+printf '{"schema":"wig-seed-manifest/1","valid":true,"issue_id":"issue_0001",'\
+'"story_spec_id":"story_spec_0001","story_version":1,'\
+'"story_version_ref":"story_spec_0001@version_0001",'\
+'"story_markdown_sha256":"%s","provider_start_ledger":1,'\
+'"member_snapshot":{"members":{}},"fixed_case_root":"/tmp"}\n' \
+  "$(printf 'a%.0s' {1..64})" > /tmp/wig-probe2/seed-manifest.json
+env -u WIG_CASE_ROOT -u WIG_ISSUE_INPUT_FILE HOME="$H" \
+  python3 $D/run_arms.py /bin/true /bin/true /tmp/wig-probe2/seed-workspace \
+  /tmp/wig-probe2-out 1; echo "rc=$?"
+ls -d /tmp/wig-probe2-out/run-* 2>/dev/null || echo "no run dirs（符合预期）"
 ```
 
-四条门禁都不接触 provider、不写 HOME、只在 `/tmp` 下留探针文件。
+以上门禁都不接触 provider、不写 HOME、只在 `/tmp` 下留探针文件。

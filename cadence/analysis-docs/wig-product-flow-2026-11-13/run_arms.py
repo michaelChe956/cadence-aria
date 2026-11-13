@@ -45,7 +45,9 @@ cadence/reports/provider-validation-round/wave2-2c/story_terminate.mjs 同形）
   * seed 完成时冻结整份成员快照，臂前/臂后都按它判等。
 
 权限/信任门纪律：permission_modes 取 auto；permission_request / choice_request
-等未知门 ⇒ **明确报阻塞并判该臂失败**，绝不自动批准。trust 缺项单独处理：
+等未知门 ⇒ **明确报阻塞并判该臂失败**，绝不自动批准。choice_request 例外细节：
+整帧落盘，只有 controller 显式审批（WIG_CHOICE_APPROVALS）且 option id 精确
+命中、label 唯一时才回填答案。trust 缺项单独处理：
 装置只读观测（$CODEX_HOME 或 $HOME/.codex/config.toml 的 [projects."<root>"]
 trust_level），缺项时默认**只报 controller 需登记的命令片段并失败**；仅当
 controller 显式置 WIG_TRUST_AUTHORIZED=1 且 scratch HOME 真实位于 /tmp 时，
@@ -64,7 +66,19 @@ controller 显式置 WIG_TRUST_AUTHORIZED=1 且 scratch HOME 真实位于 /tmp �
       --issue-input /tmp/wig-measurement-setup/issue_input.md
   # 8 臂 ABBA（4 before + 4 after），唯一变量 = 二进制
   python3 run_arms.py <before二进制> <after二进制> <seed工作区> <out根> 2 [起始端口]
+  #   开臂前强制 preflight：seed-manifest 必须已冻结 confirmed design
+  #   （design_spec_id/version/version_ref/markdown_sha256/ledger），缺一项即在
+  #   建任何 run 目录/发 prepare 之前失败（产品 prepare 空 design ⇒ 500
+  #   design_spec_required）。
+  # 在既有 seed 的现 confirmed story 上只补 ONE design（不重建 story）：
+  python3 run_arms.py --complete-design <既有seed out根> <aria二进制> [端口=4709]
+  #   完成后 design 身份/正文 sha256/provider 启动账目冻结进同一个
+  #   seed-manifest.json（原子写），story 正文 digest 必须逐字节未变。
   # issue 输入/案例根也可走环境变量：WIG_ISSUE_INPUT_FILE / WIG_CASE_ROOT
+  # choice 门：未知 choice_request 整帧落盘并阻塞；仅当 controller 显式给
+  #   WIG_CHOICE_APPROVALS='{"<request_id>":{"<question_id>":"<option_id>"}}'
+  #   （或旧平坦帧 '{"<request_id>":"<option_id>"}'）且 option id 精确命中、
+  #   label 唯一时才作答；permission 门永不自动批准。
 """
 import base64
 import hashlib
@@ -697,6 +711,7 @@ def issue_paths(run, issue_id):
         "enrollment": os.path.join(root, "automation-enrollment.json"),
         "sessions": os.path.join(root, "workspace-sessions"),
         "story": lambda sid: os.path.join(root, "story-specs", "%s.json" % sid),
+        "design": lambda sid: os.path.join(root, "design-specs", "%s.json" % sid),
     }
 
 
@@ -752,6 +767,48 @@ def generate_story_session(port, issue_id):
         raise SystemExit("prepare 响应缺 story_spec_id/workspace_session: %s"
                          % str(body)[:300])
     return story_id, session_id
+
+
+def generate_design_session(port, issue_id, story_id, involved=None, change_order=None):
+    """design-specs:generate = prepare（draft design + open session，无 provider 启动）。
+
+    协议取自 src/web/handlers/lifecycle.rs generate_design_specs：入口先用
+    validate_confirmed_story_specs 校验**已 confirmed 的 story**，再
+    create_design_spec + create_workspace_session（不启动 provider）。
+    多仓 Design 的确认门（lifecycle_store/spec.rs validate_confirm_aggregate_spec）
+    要求 involved 非空（REQ-PLN-04）、involved>1 需 change_order（REQ-PLN-05）；
+    `involved` / `change_order` 只由 controller 显式给（无默认、不猜业务范围）。
+    """
+    url = "http://127.0.0.1:%d/api/projects/%s/issues/%s/design-specs:generate" % (
+        port, PROJECT, issue_id)
+    body = {
+        "title": TITLE,
+        "story_spec_ids": [story_id],
+        "author_provider": PROVIDER,
+        "reviewer_provider": PROVIDER,
+        "review_rounds": 1,
+        "superpowers_enabled": True,
+        "openspec_enabled": True,
+    }
+    if involved:
+        body["involved_repository_ids"] = list(involved)
+    if change_order:
+        body["change_order"] = list(change_order)
+    st, body = http("POST", url, body)
+    log("  design-specs:generate(prepare): %s %s" % (st, str(body)[:200]))
+    if st not in (200, 201):
+        raise SystemExit("design spec prepare 失败: %s %s" % (st, str(body)[:300]))
+    specs = (body or {}).get("design_specs") or []
+    if not specs:
+        raise SystemExit("design spec prepare 返回为空")
+    design_id = specs[0].get("design_spec_id") or specs[0].get("id")
+    sess = (body or {}).get("workspace_session") or {}
+    session_id = (sess.get("workspace_session_id") or sess.get("session_id")
+                  or sess.get("id"))
+    if not design_id or not session_id:
+        raise SystemExit("prepare 响应缺 design_spec_id/workspace_session: %s"
+                         % str(body)[:300])
+    return design_id, session_id
 
 
 # ───────────────────────── trust 门（只读观测 + 授权登记） ─────────────────────────
@@ -874,14 +931,16 @@ def resolve_trust_gate(roots):
     return "registered", missing
 
 
-def story_version_digest(run, issue_id, story_id, version):
+def entity_version_digest(run, issue_id, entity_id, version):
     """confirmed 版本正文的逐字节 digest（判等只认 markdown，不认 spec 记录）。
 
-    story spec 记录带可变时间戳/指针，同一正文两次落盘也可能不同字节；
-    version json 的 markdown 字段才是「输入」本身。
+    story/design 共用同一 durable 布局（lifecycle_store/paths.rs versions_root）：
+    `issues/<issue>/versions/<entity_id>/version_%04d.json`。spec 记录带可变
+    时间戳/指针，同一正文两次落盘也可能不同字节；version json 的 markdown
+    字段才是「输入」本身。
     """
     vdir = os.path.join(run, ".aria", "projects", PROJECT, "issues", issue_id,
-                        "versions", story_id)
+                        "versions", entity_id)
     vpath = os.path.join(vdir, "version_%04d.json" % int(version))
     if not os.path.isfile(vpath):
         raise SystemExit("确认版版本文件缺失: %s" % vpath)
@@ -891,7 +950,7 @@ def story_version_digest(run, issue_id, story_id, version):
         raise SystemExit("确认版版本文件无 markdown 正文: %s" % vpath)
     body = markdown.encode("utf-8")
     return {
-        "story_version_ref": "%s@version_%04d" % (story_id, int(version)),
+        "version_ref": "%s@version_%04d" % (entity_id, int(version)),
         "version_file": vpath,
         "version_file_sha256": sha256_file(vpath),
         "markdown_sha256": hashlib.sha256(body).hexdigest(),
@@ -916,10 +975,97 @@ def observed_provider_fields(session_rec, sent_cfg):
     return out
 
 
-def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
-                             frames_path, budget_s=ARM_TIMEOUT_S,
-                             allow_start=True):
+CHOICE_APPROVALS_ENV = "WIG_CHOICE_APPROVALS"
+
+
+def load_choice_approvals():
+    """controller 显式审批表；缺省空表（= 任何 choice_request 都阻塞）。
+
+    形状：`{"<request_id>": {"<question_id>": "<option_id>"}}`（按问题作答），
+    兼容无 questions 的平坦旧帧：`{"<request_id>": "<option_id>"}`。
+    只从环境变量读；装置不内置任何审批。
+    """
+    raw = (os.environ.get(CHOICE_APPROVALS_ENV) or "").strip()
+    if not raw:
+        return {}
+    try:
+        table = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise SystemExit("%s 不是合法 JSON：%s" % (CHOICE_APPROVALS_ENV, e))
+    if not isinstance(table, dict):
+        raise SystemExit("%s 必须是 {request_id: 审批} 对象" % CHOICE_APPROVALS_ENV)
+    return table
+
+
+def _unique_label_option(options, option_id):
+    """显式审批的 option id ⇒ **label 在候选内唯一**的选项；否则 None。
+
+    只允许「id 精确命中 + label 唯一」的作答路径：不做模糊匹配、不把多义
+    label 当成可自动批准。
+    """
+    if not isinstance(option_id, str) or not option_id:
+        return None
+    hits = [o for o in (options or []) if o.get("id") == option_id]
+    if len(hits) != 1:
+        return None
+    label = hits[0].get("label")
+    if not label:
+        return None
+    if sum(1 for o in (options or []) if o.get("label") == label) != 1:
+        return None
+    return hits[0]
+
+
+def answer_choice_from_approvals(msg):
+    """显式审批 → WS `choice_response` 帧；无法唯一确定 ⇒ None（调用方阻塞）。
+
+    未知门由调用方整帧记录 + halt；本函数不读默认值、不自动批准。
+    """
+    request_id = msg.get("id")
+    approval = (load_choice_approvals().get(request_id)
+                if isinstance(request_id, str) else None)
+    if approval is None:
+        return None
+    questions = msg.get("questions") or []
+    if questions:
+        if not isinstance(approval, dict):
+            return None
+        answers, selected = [], []
+        for q in questions:
+            qid = q.get("id")
+            if not isinstance(qid, str):
+                return None
+            option = _unique_label_option(q.get("options"), approval.get(qid))
+            if option is None:
+                return None
+            answers.append({"question_id": qid,
+                            "selected_option_ids": [option["id"]],
+                            "free_text": None})
+            selected.append(option["id"])
+        if len(answers) != len(questions):
+            return None
+        return {"type": "choice_response", "id": request_id,
+                "selected_option_ids": selected, "free_text": None,
+                "answers": answers}
+    if not isinstance(approval, str):
+        return None
+    option = _unique_label_option(msg.get("options"), approval)
+    if option is None:
+        return None
+    # 平坦旧帧无 questions：answers 是 #[serde(default)]，省略保持旧协议兼容
+    return {"type": "choice_response", "id": request_id,
+            "selected_option_ids": [option["id"]], "free_text": None}
+
+
+def drive_entity_to_confirmed(run, port, issue_id, session_id, entity_id, kind,
+                              frames_path, budget_s=ARM_TIMEOUT_S,
+                              allow_start=True):
     """WS hello → start_generation → 等确认门 → HTTP confirm → durable 验证。
+
+    kind = "story" | "design"：只决定 durable spec 目录（`story-specs` /
+    `design-specs`）与日志措辞；WS 协议、确认门、HTTP confirm 路径对两者同形
+    （src/web/workspace_ws_handler/protocol.rs AuthorConfirm：story/design 的
+    approve 都走 HTTP confirm，WS Confirm 帧不放行）。不复制第二份 WS 循环。
 
     返回证据 dict；任何未知权限/信任/选择门 ⇒ SystemExit（明确阻塞，不自动批准）。
     trust 门是一次性事务：缺项已授权则登记并**重试一次** start；之后服务端可能
@@ -982,7 +1128,7 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
             try:
                 raw = cli.recv_text(30)
             except WsClosed as e:
-                raise SystemExit("story WS 被服务端关闭: %s" % e)
+                raise SystemExit("%s WS 被服务端关闭: %s" % (kind, e))
             if raw is None:
                 continue
             try:
@@ -1040,10 +1186,17 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
                         "tool_name": msg.get("tool_name"), "id": msg.get("id")})
                 break
             elif t == "choice_request":
-                blocked = ("choice_request(id=%s) 到达：装置不自动作答未知选择门"
-                           % msg.get("id"))
-                record({"event": "choice_request", "id": msg.get("id")})
-                break
+                # 未知选择门：先把**整帧**落盘（不是只记 id），再按 controller
+                # 显式审批表尝试唯一作答；无审批/无法唯一确定 ⇒ halt。
+                record({"event": "choice_request", "payload": msg})
+                answer = answer_choice_from_approvals(msg)
+                if answer is None:
+                    blocked = ("choice_request(id=%s) 到达且无 controller 显式审批："
+                               "整帧已记录，装置阻塞（不自动作答）" % msg.get("id"))
+                    break
+                cli.send_text(json.dumps(answer))
+                record({"event": "choice_response_sent", "payload": answer,
+                        "approval_source": CHOICE_APPROVALS_ENV})
             elif t and "trust" in str(t).lower():
                 record({"event": "trust_frame", "type": t})
                 res = handle_trust("frame:%s" % t)
@@ -1057,10 +1210,10 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
             else:
                 record({"event": "frame", "type": t})
         if blocked:
-            raise SystemExit("story 驱动被阻塞: %s" % blocked)
+            raise SystemExit("%s 驱动被阻塞: %s" % (kind, blocked))
         if gate_stage is None:
-            raise SystemExit("story 生成未到确认门（%ds 预算耗尽，最后 stage=%s）"
-                             % (budget_s, stage_seq[-1] if stage_seq else "无"))
+            raise SystemExit("%s 生成未到确认门（%ds 预算耗尽，最后 stage=%s）"
+                             % (kind, budget_s, stage_seq[-1] if stage_seq else "无"))
         log("  确认门: stage=%s" % gate_stage)
 
         # approve 走 HTTP confirm（story 门上 WS Confirm 帧不放行）
@@ -1085,7 +1238,7 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
 
     # durable 验证：spec confirmed + 版本 + 真实 provider 启动账目
     spec_path = os.path.join(run, ".aria", "projects", PROJECT, "issues",
-                             issue_id, "story-specs", "%s.json" % story_id)
+                             issue_id, "%s-specs" % kind, "%s.json" % entity_id)
     spec = None
     end = time.time() + 120
     while time.time() < end:
@@ -1096,25 +1249,25 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
         time.sleep(2)
     if not spec or spec.get("confirmation_status") != "confirmed" \
             or not spec.get("current_version"):
-        raise SystemExit("story spec 未进入 confirmed（durable 验证失败）")
+        raise SystemExit("%s spec 未进入 confirmed（durable 验证失败）" % kind)
     session_json = os.path.join(run, ".aria", "projects", PROJECT, "issues",
                                 issue_id, "workspace-sessions",
                                 "%s.json" % session_id)
     rec = read_json(session_json) or {}
     ledger = rec.get("provider_start_ledger") or []
     version = spec.get("current_version")
-    digest = story_version_digest(run, issue_id, story_id, version)
-    log("  story 正文 digest: %s（%d bytes，%s）"
-        % (digest["markdown_sha256"][:12], digest["markdown_bytes"],
-           digest["story_version_ref"]))
-    return {"session_id": session_id, "story_spec_id": story_id,
-            "story_version": version,
+    digest = entity_version_digest(run, issue_id, entity_id, version)
+    log("  %s 正文 digest: %s（%d bytes，%s）"
+        % (kind, digest["markdown_sha256"][:12], digest["markdown_bytes"],
+           digest["version_ref"]))
+    return {"session_id": session_id, "spec_id": entity_id, "kind": kind,
+            "version": version,
             "gate_stage": gate_stage, "stage_seq": stage_seq,
             "provider_start_ledger": len(ledger),
             "session_status": rec.get("status"),
             # spec 记录只作参考（含可变时间戳），判等一律用下面的正文 digest
-            "story_record_sha256": sha256_file(spec_path),
-            "story_version_ref": digest["story_version_ref"],
+            "record_sha256": sha256_file(spec_path),
+            "version_ref": digest["version_ref"],
             "version_file_sha256": digest["version_file_sha256"],
             "markdown_sha256": digest["markdown_sha256"],
             "markdown_bytes": digest["markdown_bytes"],
@@ -1184,6 +1337,252 @@ def resolve_case_root(cli_value):
     if not os.path.isdir(root):
         raise SystemExit("固定案例根不存在: %s" % root)
     return root
+
+
+DESIGN_SEED_KEYS = ("design_spec_id", "design_version", "design_version_ref",
+                    "design_markdown_sha256", "design_provider_start_ledger")
+
+
+def design_seed_fields(seed_manifest, where=""):
+    """取 seed 冻结的 design 身份；缺失/空 ⇒ SystemExit（不猜、不降级）。
+
+    design 是 prepare 的**必填**前置（src/web/handlers/lifecycle_aggregate_scope.inc.rs
+    validate_confirmed_design_specs：空 ids ⇒ 500 `design_spec_required`）；缺 design
+    seed 时 8 臂全部失败，所以 batch 必须在**建任何 run 目录/发任何调用之前**失败。
+    """
+    m = seed_manifest or {}
+    missing = [k for k in DESIGN_SEED_KEYS if m.get(k) in (None, "", [], 0)]
+    if m.get("design_confirmation_status") != "confirmed":
+        missing.append("design_confirmation_status=confirmed")
+    if missing:
+        raise SystemExit(
+            "%s 缺 confirmed design seed（%s）：先跑 `--complete-design <out根> "
+            "<binary> [端口]` 在现 confirmed story 上生成并确认 ONE design；"
+            "装置拒绝在缺 design 时建 run 目录或发 prepare" % (where or "seed", missing))
+    return {
+        "design_spec_id": m["design_spec_id"],
+        "design_version": int(m["design_version"]),
+        "design_version_ref": m["design_version_ref"],
+        "design_markdown_sha256": m["design_markdown_sha256"],
+        "design_markdown_bytes": m.get("design_markdown_bytes"),
+        "design_session_id": m.get("design_session_id"),
+        "design_record_sha256": m.get("design_record_sha256"),
+        "design_provider_start_ledger": int(m.get("design_provider_start_ledger") or 0),
+    }
+
+
+def verify_frozen_seed(seed_ws, seed_manifest, where):
+    """只读复核冻结身份（零模型调用）：confirmed story + confirmed design + 正文 digest。
+
+    任一不符 ⇒ SystemExit（输入身份被污染，样本不可归因）。
+    """
+    issue_id = seed_manifest.get("issue_id")
+    story_id = seed_manifest.get("story_spec_id")
+    story_version = seed_manifest.get("story_version")
+    design = design_seed_fields(seed_manifest, where)
+    root = os.path.join(seed_ws, ".aria", "projects", PROJECT, "issues", issue_id)
+    story_spec = read_json(os.path.join(root, "story-specs",
+                                        "%s.json" % story_id)) or {}
+    if story_spec.get("confirmation_status") != "confirmed":
+        raise SystemExit("%s: story spec 未 confirmed（%s）" % (where, story_id))
+    sd = entity_version_digest(seed_ws, issue_id, story_id, story_version)
+    if sd["markdown_sha256"] != seed_manifest.get("story_markdown_sha256"):
+        raise SystemExit("%s: story 正文 digest 与 seed 冻结值不一致" % where)
+    dspec = read_json(os.path.join(root, "design-specs",
+                                   "%s.json" % design["design_spec_id"])) or {}
+    if dspec.get("confirmation_status") != "confirmed" \
+            or dspec.get("current_version") != design["design_version"]:
+        raise SystemExit("%s: design spec 未 confirmed 或版本不符（%s）"
+                         % (where, design["design_spec_id"]))
+    dd = entity_version_digest(seed_ws, issue_id, design["design_spec_id"],
+                               design["design_version"])
+    if dd["markdown_sha256"] != design["design_markdown_sha256"]:
+        raise SystemExit("%s: design 正文 digest 与 seed 冻结值不一致" % where)
+    return {"story": sd, "design": dd}
+
+
+def discover_design(seed_ws, issue_id):
+    """发现既有 design spec + design session；无则 (None, None)，>1 ⇒ 拒绝。
+
+    只读；用于「上一次 complete-design 失败后不生成第二个 design」——
+    draft 续跑同一 session，confirmed 则零模型调用只补 manifest。
+    产品 durable：`design-specs/<id>.json` + `workspace-sessions/<sid>.json`
+    （rec.workspace_type="design", rec.entity_id=<design_id>）。
+    """
+    root = os.path.join(seed_ws, ".aria", "projects", PROJECT, "issues", issue_id)
+    ddir = os.path.join(root, "design-specs")
+    specs = sorted(n[:-5] for n in os.listdir(ddir) if n.endswith(".json")) \
+        if os.path.isdir(ddir) else []
+    if len(specs) > 1:
+        raise SystemExit("seed 工作区存在多个 design spec（%s）：拒绝（ONE design 不变量）"
+                         % specs)
+    if not specs:
+        return None, None
+    design_id = specs[0]
+    sess_dir = os.path.join(root, "workspace-sessions")
+    sessions = []
+    for name in sorted(os.listdir(sess_dir)) if os.path.isdir(sess_dir) else []:
+        if not name.endswith(".json") or "auto_" in name:
+            continue
+        rec = read_json(os.path.join(sess_dir, name)) or {}
+        if rec.get("entity_id") == design_id \
+                and rec.get("workspace_type") == "design":
+            sessions.append(name[:-5])
+    if len(sessions) > 1:
+        raise SystemExit("design %s 有多个 session（%s）：无法唯一续跑"
+                         % (design_id, sessions))
+    return design_id, (sessions[0] if sessions else None)
+
+
+def complete_design(binary, seed_out, port, involved=None, change_order=None):
+    """在既有 seed 的**现 confirmed story** 上生成并确认 ONE design（不重建 story）。
+
+    只新增 design（design-spec + design session + versions）；story 的 durable
+    记录/正文一律不动。完成后把 design 身份/正文 digest/真实启动账目冻结进
+    seed-manifest.json（原子写），供 batch 的 design preflight 读取。
+    """
+    home = assert_scratch_home()
+    seed_out = os.path.abspath(seed_out).rstrip("/")
+    seed_ws = os.path.join(seed_out, "seed-workspace")
+    mpath = os.path.join(seed_out, "seed-manifest.json")
+    if not os.path.isdir(seed_ws):
+        raise SystemExit("complete-design 需要既有 seed 工作区: %s" % seed_ws)
+    prev = read_json(mpath)
+    if not prev or prev.get("schema") != "wig-seed-manifest/1":
+        raise SystemExit("seed-manifest.json 缺失或 schema 不符: %s" % mpath)
+    if not prev.get("valid"):
+        raise SystemExit("seed-manifest 未标记 valid（%s）：拒绝在此 seed 上补 design"
+                         % prev.get("invalid_reason"))
+    if (prev.get("provider_start_ledger") or 0) <= 0:
+        raise SystemExit("seed 无真实 story provider 启动证据，拒绝补 design")
+    if not prev.get("story_markdown_sha256"):
+        raise SystemExit("seed 缺 confirmed story 正文 digest，拒绝补 design")
+    if prev.get("design_spec_id") or prev.get("design_confirmation_status"):
+        raise SystemExit("seed 已冻结 design（id=%s）：--complete-design 只补 ONE "
+                         "design，拒绝第二个" % prev.get("design_spec_id"))
+    issue_id = prev["issue_id"]
+    story_id = prev["story_spec_id"]
+    story_version = prev.get("story_version")
+    root = os.path.join(seed_ws, ".aria", "projects", PROJECT, "issues", issue_id)
+    snap = prev.get("member_snapshot")
+    if not snap:
+        raise SystemExit("seed-manifest 缺冻结成员快照，拒绝补 design")
+    drift = snapshot_diff(snap, member_snapshot(seed_ws))
+    if drift:
+        raise SystemExit("补 design 前成员快照已漂移（%s）：拒绝（不是同一输入）"
+                         % drift[:6])
+    story_spec = read_json(os.path.join(root, "story-specs",
+                                        "%s.json" % story_id)) or {}
+    if story_spec.get("confirmation_status") != "confirmed":
+        raise SystemExit("现 story 未 confirmed（%s）：先完成 --seed/--resume" % story_id)
+    before = entity_version_digest(seed_ws, issue_id, story_id, story_version)
+    if before["markdown_sha256"] != prev["story_markdown_sha256"]:
+        raise SystemExit("现 story 正文 digest 与 manifest 不一致：拒绝补 design")
+
+    frames = os.path.join(seed_out, "design-ws-frames.jsonl")
+    log("=== complete-design: issue=%s story=%s（只读） out=%s"
+        % (issue_id, story_id, seed_out))
+    design_id, session_id = discover_design(seed_ws, issue_id)
+    if design_id:
+        # 上一次尝试留下的**同一 design**：绝不生成第二个，按 durable 状态续跑
+        spec_path = os.path.join(root, "design-specs", "%s.json" % design_id)
+        spec = read_json(spec_path) or {}
+        if not session_id:
+            raise SystemExit("既有 design spec（%s）无 session：拒绝（无法证明真实 run）"
+                             % design_id)
+        sess_path = os.path.join(root, "workspace-sessions", "%s.json" % session_id)
+        rec = read_json(sess_path) or {}
+        ledger = len(rec.get("provider_start_ledger") or [])
+        if spec.get("confirmation_status") == "confirmed" \
+                and spec.get("current_version"):
+            if ledger <= 0:
+                raise SystemExit("既有 confirmed design 无 provider 启动账目：拒绝冻结")
+            version = spec["current_version"]
+            dd = entity_version_digest(seed_ws, issue_id, design_id, version)
+            ev = {"spec_id": design_id, "version": version,
+                  "version_ref": dd["version_ref"],
+                  "markdown_sha256": dd["markdown_sha256"],
+                  "markdown_bytes": dd["markdown_bytes"],
+                  "version_file_sha256": dd["version_file_sha256"],
+                  "record_sha256": sha256_file(spec_path),
+                  "session_id": session_id,
+                  "gate_stage": rec.get("stage"),
+                  "provider_start_ledger": ledger,
+                  "observed": observed_provider_fields(rec, None)}
+            log("  既有 design 已 confirmed（%s v%s）：零模型调用，只冻结 manifest"
+                % (design_id, version))
+        else:
+            log("  续跑既有 design session=%s（status=%s, ledger=%d）：不新建 spec/session"
+                % (session_id, rec.get("status"), ledger))
+            proc = start_daemon(binary, seed_ws, port)
+            try:
+                wait_health(port, proc)
+                ev = drive_entity_to_confirmed(
+                    seed_ws, port, issue_id, session_id, design_id, "design",
+                    frames, allow_start=(ledger == 0))
+            finally:
+                stop_daemon(proc)
+            if ev["provider_start_ledger"] <= 0:
+                raise SystemExit("design provider_start_ledger 为空：非真实 provider run")
+    else:
+        proc = start_daemon(binary, seed_ws, port)
+        try:
+            wait_health(port, proc)
+            design_id, session_id = generate_design_session(
+                port, issue_id, story_id, involved=involved,
+                change_order=change_order)
+            log("  design_spec_id=%s design_session=%s（prepare 完成，尚未启动 provider）"
+                % (design_id, session_id))
+            ev = drive_entity_to_confirmed(seed_ws, port, issue_id, session_id,
+                                           design_id, "design", frames)
+            if ev["provider_start_ledger"] <= 0:
+                raise SystemExit("design provider_start_ledger 为空：非真实 provider run")
+        finally:
+            stop_daemon(proc)
+
+    # NoStoryRegen 硬证据：story 正文逐字节未变 + 成员快照未漂移
+    after = entity_version_digest(seed_ws, issue_id, story_id, story_version)
+    if after["markdown_sha256"] != before["markdown_sha256"]:
+        raise SystemExit("补 design 后 story 正文 digest 变化：拒绝写 manifest")
+    drift2 = snapshot_diff(snap, member_snapshot(seed_ws))
+    if drift2:
+        raise SystemExit("补 design 后成员快照漂移（%s）：拒绝写 manifest" % drift2[:6])
+
+    manifest = dict(prev)
+    manifest.update({
+        "design_completed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "design_binary": binary,
+        "design_binary_sha256": sha256_bin(binary),
+        "design_scratch_home": home,
+        "design_spec_id": ev["spec_id"],
+        "design_version": ev["version"],
+        "design_version_ref": ev["version_ref"],
+        "design_session_id": ev["session_id"],
+        "design_markdown_sha256": ev["markdown_sha256"],
+        "design_markdown_bytes": ev["markdown_bytes"],
+        "design_version_file_sha256": ev["version_file_sha256"],
+        "design_record_sha256": ev["record_sha256"],
+        "design_gate_stage": ev["gate_stage"],
+        "design_provider_start_ledger": ev["provider_start_ledger"],
+        "design_observed": ev["observed"],
+        "design_confirmation_status": "confirmed",
+        "design_involved_repository_ids": list(involved or []),
+        "design_change_order": list(change_order or []),
+    })
+    tmp = mpath + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, mpath)
+    log("design 完成并冻结：%s（story 正文未变）" % mpath)
+    print(json.dumps({k: manifest[k] for k in
+                      ("issue_id", "story_spec_id", "story_version_ref",
+                       "story_markdown_sha256", "design_spec_id",
+                       "design_version", "design_version_ref",
+                       "design_markdown_sha256", "design_session_id",
+                       "design_provider_start_ledger",
+                       "design_confirmation_status", "valid")},
+                     ensure_ascii=False, indent=1))
+    return manifest
 
 
 def make_seed(binary, src, out_root, port, issue_input, case_root):
@@ -1282,24 +1681,24 @@ def make_seed(binary, src, out_root, port, issue_input, case_root):
             story_id, session_id = generate_story_session(port, issue_id)
             log("  story_spec_id=%s story_session=%s（prepare 完成，尚未启动 provider）"
                 % (story_id, session_id))
-            ev = drive_story_to_confirmed(
-                seed_ws, port, issue_id, session_id, story_id,
+            ev = drive_entity_to_confirmed(
+                seed_ws, port, issue_id, session_id, story_id, "story",
                 os.path.join(seed_ws, "story-ws-frames.jsonl"))
             log("  story confirmed: version=%s provider_start_ledger=%d"
-                % (ev["story_version"], ev["provider_start_ledger"]))
+                % (ev["version"], ev["provider_start_ledger"]))
             if ev["provider_start_ledger"] <= 0:
                 raise SystemExit("provider_start_ledger 为空：story 未发生真实 provider 启动")
         finally:
             stop_daemon(proc)
         manifest.update({
-            "story_spec_id": ev["story_spec_id"],
-            "story_version": ev["story_version"],
-            "story_version_ref": ev["story_version_ref"],
+            "story_spec_id": ev["spec_id"],
+            "story_version": ev["version"],
+            "story_version_ref": ev["version_ref"],
             "story_session_id": ev["session_id"],
             "story_markdown_sha256": ev["markdown_sha256"],
             "story_markdown_bytes": ev["markdown_bytes"],
             "story_version_file_sha256": ev["version_file_sha256"],
-            "story_record_sha256": ev["story_record_sha256"],
+            "story_record_sha256": ev["record_sha256"],
             "gate_stage": ev["gate_stage"],
             "provider_start_ledger": ev["provider_start_ledger"],
             "observed": ev["observed"],
@@ -1340,6 +1739,7 @@ def run_arm(binary, tag, arm, port, seed_ws, seed_manifest, out_root):
     seed_snapshot = seed_manifest.get("member_snapshot")
     if not seed_snapshot:
         raise SystemExit("seed-manifest 缺冻结成员快照：拒绝开臂（输入身份无法复核）")
+    design = design_seed_fields(seed_manifest, "arm:%s" % arm)
     fixed_case_root = (seed_manifest.get("fixed_case_root")
                        or seed_snapshot.get("aggregate_root"))
     manifest = {
@@ -1358,6 +1758,14 @@ def run_arm(binary, tag, arm, port, seed_ws, seed_manifest, out_root):
         "issue_input_path": seed_manifest.get("issue_input_path"),
         "issue_input_sha256": seed_manifest.get("issue_input_sha256"),
         "story_markdown_sha256": seed_manifest.get("story_markdown_sha256"),
+        # 冻结 design 身份（prepare 必填；空 design 会被产品 500 design_spec_required）
+        "design_spec_id": design["design_spec_id"],
+        "design_version": design["design_version"],
+        "design_version_ref": design["design_version_ref"],
+        "design_markdown_sha256": design["design_markdown_sha256"],
+        "design_session_id": seed_manifest.get("design_session_id"),
+        "design_provider_start_ledger":
+            seed_manifest.get("design_provider_start_ledger"),
         "fixed_case_root": fixed_case_root,
         "scratch_home": home,
         "observed": {"seed": seed_manifest.get("observed"), "arm_session": None},
@@ -1387,6 +1795,8 @@ def run_arm(binary, tag, arm, port, seed_ws, seed_manifest, out_root):
         manifest["invalid_reason"] = ("成员 authority 在克隆/重指向后漂移（%s）："
                                       "不把「HEAD 相同」当稳定" % drift[:6])
         return _finish_arm(manifest, run, tag, arm, port)
+    # 克隆出的输入必须仍与冻结身份逐字节一致（story + design 正文 digest）
+    verify_frozen_seed(run, seed_manifest, "arm:%s 克隆" % arm)
 
     issue_id = manifest["issue_id"]
     story_id = manifest["story_spec_id"]
@@ -1406,7 +1816,7 @@ def run_arm(binary, tag, arm, port, seed_ws, seed_manifest, out_root):
         st, prep = http("POST", "%s/%s/work-item-plans:prepare" % (base, issue_id), {
             "title": TITLE,
             "story_spec_ids": [story_id],
-            "design_spec_ids": [],
+            "design_spec_ids": [design["design_spec_id"]],
             "author_provider": PROVIDER,
             "reviewer_provider": PROVIDER,
             "run_policy": "auto_if_valid",
@@ -1425,7 +1835,8 @@ def run_arm(binary, tag, arm, port, seed_ws, seed_manifest, out_root):
                         "selection_key": "human-choice-1",
                         "source": {"stories": [{"id": story_id,
                                                 "version": manifest["story_version"]}],
-                                   "designs": []},
+                                   "designs": [{"id": design["design_spec_id"],
+                                                "version": design["design_version"]}]},
                         "options": options,
                         "target": target["enrollment_target"]}})
         log("  enable: %s %s" % (st, str(enr)[:200]))
@@ -1447,14 +1858,23 @@ def run_arm(binary, tag, arm, port, seed_ws, seed_manifest, out_root):
 
     # 输入身份复核：confirmed 版本正文 digest + 成员快照（含 dirty）逐字段一致
     try:
-        vdig = story_version_digest(run, issue_id, story_id,
-                                    manifest["story_version"])
+        vdig = entity_version_digest(run, issue_id, story_id,
+                                     manifest["story_version"])
         manifest["checks"]["story_markdown_sha256"] = vdig["markdown_sha256"]
         manifest["checks"]["story_markdown_identical"] = (
             vdig["markdown_sha256"] == manifest["story_markdown_sha256"])
     except SystemExit as e:
         manifest["checks"]["story_markdown_identical"] = False
         manifest["checks"]["story_version_error"] = str(e)
+    try:
+        ddig = entity_version_digest(run, issue_id, design["design_spec_id"],
+                                     design["design_version"])
+        manifest["checks"]["design_markdown_sha256"] = ddig["markdown_sha256"]
+        manifest["checks"]["design_markdown_identical"] = (
+            ddig["markdown_sha256"] == design["design_markdown_sha256"])
+    except SystemExit as e:
+        manifest["checks"]["design_markdown_identical"] = False
+        manifest["checks"]["design_version_error"] = str(e)
     snap_after = member_snapshot(run)
     snapshot_after_diff = snapshot_diff(seed_snapshot, snap_after)
     manifest["checks"]["member_snapshot_diff"] = snapshot_after_diff
@@ -1465,9 +1885,12 @@ def run_arm(binary, tag, arm, port, seed_ws, seed_manifest, out_root):
     elif not manifest["checks"].get("story_markdown_identical"):
         manifest["invalid_reason"] = ("confirmed 版本正文 digest 与 seed 不一致"
                                       "（第二变量污染）")
-    elif not manifest["checks"]["member_snapshot_stable"]:
+    elif manifest["checks"]["member_snapshot_stable"] is False:
         manifest["invalid_reason"] = ("成员快照相对 seed 漂移（%s：HEAD 相同也可能是 "
                                       "dirty 内容被改）" % snapshot_after_diff[:6])
+    elif not manifest["checks"].get("design_markdown_identical"):
+        manifest["invalid_reason"] = ("confirmed design 正文 digest 与 seed 冻结值不一致"
+                                      "（design 输入被改/被重生成）")
     elif manifest["provider_start_ledger"] <= 0:
         manifest["invalid_reason"] = "plan 会话 provider_start_ledger 为空（非真实 provider run）"
     else:
@@ -1575,7 +1998,7 @@ def resume_seed(binary, out_root, port, issue_input, case_root):
     version = spec.get("current_version")
     if spec.get("confirmation_status") == "confirmed" and version and ledger > 0:
         log("  已 confirmed 且 provider 账目=%d：resume 不触发任何模型调用" % ledger)
-        digest = story_version_digest(seed_ws, issue_id, story_id, version)
+        digest = entity_version_digest(seed_ws, issue_id, story_id, version)
         observed = observed_provider_fields(rec, None)
     else:
         # ledger 非空 = 该 session 已启动过 ⇒ 不再发 start（避免重复模型调用），
@@ -1586,14 +2009,14 @@ def resume_seed(binary, out_root, port, issue_input, case_root):
         proc = start_daemon(binary, seed_ws, port)
         try:
             wait_health(port, proc)
-            ev = drive_story_to_confirmed(
-                seed_ws, port, issue_id, session_id, story_id,
+            ev = drive_entity_to_confirmed(
+                seed_ws, port, issue_id, session_id, story_id, "story",
                 os.path.join(seed_ws, "story-ws-frames.jsonl"),
                 allow_start=allow_start)
             if ev["provider_start_ledger"] <= 0:
                 raise SystemExit("provider_start_ledger 为空：story 未发生真实 provider 启动")
-            version = ev["story_version"]
-            digest = {"story_version_ref": ev["story_version_ref"],
+            version = ev["version"]
+            digest = {"version_ref": ev["version_ref"],
                       "version_file_sha256": ev["version_file_sha256"],
                       "markdown_sha256": ev["markdown_sha256"],
                       "markdown_bytes": ev["markdown_bytes"]}
@@ -1614,7 +2037,7 @@ def resume_seed(binary, out_root, port, issue_input, case_root):
         "story_spec_id": story_id,
         "story_session_id": session_id,
         "story_version": version,
-        "story_version_ref": digest["story_version_ref"],
+        "story_version_ref": digest["version_ref"],
         "story_markdown_sha256": digest["markdown_sha256"],
         "story_markdown_bytes": digest["markdown_bytes"],
         "story_version_file_sha256": digest["version_file_sha256"],
@@ -1677,6 +2100,11 @@ def _write_failed_manifest(out_root, arm, tag, port, binary, seed_ws,
         "issue_input_path": (seed_manifest or {}).get("issue_input_path"),
         "issue_input_sha256": (seed_manifest or {}).get("issue_input_sha256"),
         "story_markdown_sha256": (seed_manifest or {}).get("story_markdown_sha256"),
+        "design_spec_id": (seed_manifest or {}).get("design_spec_id"),
+        "design_version": (seed_manifest or {}).get("design_version"),
+        "design_version_ref": (seed_manifest or {}).get("design_version_ref"),
+        "design_markdown_sha256":
+            (seed_manifest or {}).get("design_markdown_sha256"),
         "status": None, "plan_session_id": None, "provider_start_ledger": 0,
         "checks": {}, "valid": False,
         "invalid_reason": "臂执行中断（%s）" % reason,
@@ -1704,6 +2132,22 @@ def main():
     global log_path
     issue_input_path, args = _pop_issue_input(sys.argv[1:])
     case_root_cli, args = _pop_option(args, "--case-root", "WIG_CASE_ROOT")
+    involved_csv, args = _pop_option(args, "--design-involved", "WIG_DESIGN_INVOLVED")
+    change_csv, args = _pop_option(args, "--design-change-order",
+                                   "WIG_DESIGN_CHANGE_ORDER")
+    if args and args[0] == "--complete-design":
+        if len(args) < 3:
+            raise SystemExit("用法: run_arms.py --complete-design <既有seed out根> "
+                             "<binary> [端口=4709] [--design-involved a,b[,c]] "
+                             "[--design-change-order a,b[,c]]")
+        seed_out, binary = args[1], args[2]
+        port = int(args[3]) if len(args) > 3 else 4709
+        involved = [x.strip() for x in involved_csv.split(",") if x.strip()]
+        change_order = [x.strip() for x in change_csv.split(",") if x.strip()]
+        complete_design(binary, seed_out, port,
+                        involved=involved or None,
+                        change_order=change_order or None)
+        return
     if args and args[0] in ("--seed", "--smoke"):  # --smoke = seed 的同义入口
         if len(args) < 4:
             raise SystemExit("用法: run_arms.py --seed <binary> <state根> <out根> "
@@ -1780,6 +2224,10 @@ def main():
             raise SystemExit("给定 issue 输入与 seed 记录的 digest 不一致：%s vs %s"
                              % (given["sha256"],
                                 seed_manifest.get("issue_input_sha256")))
+    # design preflight：产品 prepare 的 design_spec_ids 必填（空 ⇒ 500
+    # design_spec_required）。缺 design 时必须在建 run 目录/开臂之前失败。
+    design_seed_fields(seed_manifest, "batch 开臂前")
+    verify_frozen_seed(seed_ws, seed_manifest, "batch 开臂前")
     os.makedirs(out_root, exist_ok=True)
     log_path = os.path.join(out_root, "sequence.log")
     log("seed 输入: issue=%s story=%s %s members=%d" % (
@@ -1788,6 +2236,10 @@ def main():
     log("输入 digest: issue_input=%s story_markdown=%s"
         % (str(seed_manifest.get("issue_input_sha256"))[:12],
            str(seed_manifest.get("story_markdown_sha256"))[:12]))
+    log("design 输入: design=%s %s digest=%s ledger=%s"
+        % (seed_manifest["design_spec_id"], seed_manifest["design_version_ref"],
+           str(seed_manifest.get("design_markdown_sha256"))[:12],
+           seed_manifest.get("design_provider_start_ledger")))
 
     # ABBA 交替（每对内 after,before,before,after）：抵消顺序效应；
     # 两侧各 n 臂，唯一变量 = 二进制。
