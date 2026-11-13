@@ -148,6 +148,7 @@ impl LifecycleStore {
             sc_failure_log_failure(
                 CODE_LOG_CORRUPT,
                 step,
+                None,
                 &[],
                 &[],
                 format!("证据日志行不是 UTF-8: {failure}"),
@@ -157,6 +158,7 @@ impl LifecycleStore {
             sc_failure_log_failure(
                 CODE_LOG_CORRUPT,
                 step,
+                None,
                 &[],
                 &[],
                 format!("证据日志行不是合法条目: {failure}"),
@@ -166,6 +168,7 @@ impl LifecycleStore {
             return Err(sc_failure_log_failure(
                 CODE_SCOPE_MISMATCH,
                 step,
+                None,
                 &[],
                 &[],
                 "证据日志条目不属于本 chain 分区".to_string(),
@@ -175,6 +178,7 @@ impl LifecycleStore {
             return Err(sc_failure_log_failure(
                 CODE_SCOPE_MISMATCH,
                 step,
+                None,
                 &[],
                 &[],
                 "证据日志条目属于其他 scope（跨 scope 注入）".to_string(),
