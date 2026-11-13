@@ -240,3 +240,7 @@ impl LifecycleStore {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "tests/sc_artifact_version_write.rs"]
+mod sc_artifact_version_write;
