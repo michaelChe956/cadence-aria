@@ -113,7 +113,7 @@ async fn sc_failure_teaching_interrupted_has_started_observation() {
         .any(|item| item["round_id"] == *interrupted && item["kind"] == "provider_output"));
     let versions = durable_sc_package_versions(&run.fixture);
     assert_eq!(versions.len(), 1);
-    let package = &versions[0]["payload"]["sc_failure_repair_package"];
+    let package = &versions[0]["sc_failure_repair_package"];
     assert_eq!(package["terminal_class"], "teaching_interrupted");
     assert_eq!(package["completeness"], "incomplete");
     assert_eq!(package["rounds"].as_array().unwrap().len(), 2);

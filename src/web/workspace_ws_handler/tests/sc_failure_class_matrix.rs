@@ -159,7 +159,7 @@ async fn run_cell(class: Class, first_denied: bool) {
     assert_eq!(terminal[0]["event"]["terminal_class"], class.token());
     let packages = durable_sc_package_versions(&run.fixture);
     assert_eq!(packages.len(), 1);
-    let package = &packages[0]["payload"]["sc_failure_repair_package"];
+    let package = &packages[0]["sc_failure_repair_package"];
     assert_eq!(package["chain_id"], chain_id);
     assert_eq!(package["terminal_class"], terminal[0]["event"]["terminal_class"]);
     assert_eq!(package["completeness"], "complete");
