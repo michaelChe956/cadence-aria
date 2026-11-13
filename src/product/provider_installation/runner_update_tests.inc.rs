@@ -318,3 +318,167 @@ async fn kimi_update_completes_when_script_upgrades_version() {
     assert!(done.failure.is_none(), "升级成功不得落失败载荷: {:?}", done.failure);
     crate::cross_cutting::path_overlay::clear();
 }
+
+/// 更新前后版本**必须同源同口径**（REQ-PCI-10 复审 R10）：装前走
+/// `version_before_update`（`--version` 原始首个非空行），装后 Kimi 走
+/// provider health 的 `parse_version_token`。若装前不解析 token，则
+/// 「`kimi 2.6.1` vs `2.6.1`」**永不相等** ⇒ 脚本 exit 0 但版本没变时仍判
+/// completed。
+///
+/// 本用例**不注入 `SpyProber.before_version`**：before / after 都走生产装配的
+/// `HealthRefreshProber`（真实取数路径），断言的是生产口径而不是调用点。
+struct InstallAwareVersionRunner {
+    before_output: String,
+    after_output: String,
+    installed: AtomicUsize,
+}
+
+impl InstallAwareVersionRunner {
+    fn new(before_output: &str, after_output: &str) -> Arc<Self> {
+        Arc::new(Self {
+            before_output: before_output.to_string(),
+            after_output: after_output.to_string(),
+            installed: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl BoundedCommandRunner for InstallAwareVersionRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        let installing = request.executable == "bash";
+        let argv = request.argv.clone();
+        // 安装脚本（`bash -c 'curl … | bash'`）：装完 ⇒ `--version` 切到新输出。
+        if installing {
+            self.installed.store(1, Ordering::SeqCst);
+            return success("Installed to /tmp/elsewhere/kimi");
+        }
+        if argv == vec!["--version".to_string()] {
+            let output = if self.installed.load(Ordering::SeqCst) == 1 {
+                &self.after_output
+            } else {
+                &self.before_output
+            };
+            return success(output);
+        }
+        // 真实命令验证（`--help`）：跑得起来。
+        success("usage: kimi")
+    }
+}
+
+/// 生产口径：Kimi 脚本 exit 0 但版本没变 ⇒ 作业 failed 且报「命令仍是旧版」。
+#[tokio::test]
+async fn kimi_update_production_probe_reports_still_old_version() {
+    let root = tempdir().expect("root");
+    let home = root.path().join("home");
+    let kimi_bin = home.join(".kimi-code").join("bin");
+    std::fs::create_dir_all(&kimi_bin).expect("kimi bin dir");
+    std::fs::write(kimi_bin.join("kimi"), b"#!/bin/sh\n").expect("kimi stub");
+
+    let runner = InstallAwareVersionRunner::new("kimi 2.6.1\n", "kimi 2.6.1\n");
+    let health = ProviderHealthService::with_dependencies(
+        AriaStatePaths::from_workspace_root(root.path()),
+        runner.clone(),
+        Arc::new(SystemProviderHealthClock),
+        Duration::from_secs(1),
+        4096,
+    );
+    let mut execution = execution(
+        root.path(),
+        runner.clone(),
+        Arc::new(HealthRefreshProber::new(
+            Arc::new(health),
+            runner.clone(),
+            root.path().to_path_buf(),
+            Duration::from_secs(1),
+        )),
+    );
+    execution.home_dir = Some(home);
+
+    let job = execution
+        .store
+        .create("kimi_code", FixedClock.now())
+        .expect("create");
+    execution
+        .run(&job.job_id, InstallTarget::Provider(ProviderName::KimiCode))
+        .await;
+
+    let done = execution
+        .store
+        .get(&job.job_id)
+        .expect("io")
+        .expect("job exists");
+    assert!(
+        done.outcome.is_none(),
+        "生产口径下前后版本相同时不得判成功（R10/REQ-PCI-10）: {:?}",
+        done.outcome
+    );
+    let failure = done
+        .failure
+        .expect("同版本必须落 failed 载荷（生产取数口径）");
+    assert!(
+        failure.message.contains("命令仍是旧版"),
+        "必须明确报「命令仍是旧版」: {}",
+        failure.message
+    );
+    crate::cross_cutting::path_overlay::clear();
+}
+
+/// 生产口径：脚本确实升级了版本 ⇒ completed，且版本取解析后的 token。
+#[tokio::test]
+async fn kimi_update_production_probe_completes_when_version_differs() {
+    let root = tempdir().expect("root");
+    let home = root.path().join("home");
+    let kimi_bin = home.join(".kimi-code").join("bin");
+    std::fs::create_dir_all(&kimi_bin).expect("kimi bin dir");
+    std::fs::write(kimi_bin.join("kimi"), b"#!/bin/sh\n").expect("kimi stub");
+
+    let runner = InstallAwareVersionRunner::new("kimi 2.6.1\n", "kimi 2.7.0\n");
+    let health = ProviderHealthService::with_dependencies(
+        AriaStatePaths::from_workspace_root(root.path()),
+        runner.clone(),
+        Arc::new(SystemProviderHealthClock),
+        Duration::from_secs(1),
+        4096,
+    );
+    let mut execution = execution(
+        root.path(),
+        runner.clone(),
+        Arc::new(HealthRefreshProber::new(
+            Arc::new(health),
+            runner.clone(),
+            root.path().to_path_buf(),
+            Duration::from_secs(1),
+        )),
+    );
+    execution.home_dir = Some(home);
+
+    let job = execution
+        .store
+        .create("kimi_code", FixedClock.now())
+        .expect("create");
+    execution
+        .run(&job.job_id, InstallTarget::Provider(ProviderName::KimiCode))
+        .await;
+
+    let done = execution
+        .store
+        .get(&job.job_id)
+        .expect("io")
+        .expect("job exists");
+    let outcome = done.outcome.expect("版本确实升级 ⇒ completed");
+    assert_eq!(
+        outcome.installed_version.as_deref(),
+        Some("2.7.0"),
+        "装后版本必须是解析后的 token（与 health 同口径）"
+    );
+    assert!(
+        done.failure.is_none(),
+        "升级成功不得落失败载荷: {:?}",
+        done.failure
+    );
+    crate::cross_cutting::path_overlay::clear();
+}
