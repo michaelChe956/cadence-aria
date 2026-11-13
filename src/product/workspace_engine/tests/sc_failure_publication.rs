@@ -23,7 +23,10 @@ use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::models::ArtifactRef;
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
 use crate::web::workspace_ws_types::{ArtifactPayload, ScFailureRepairPackage};
-use super::publication_fixture::*;
+use super::publication_fixture::{
+    NODE_ID, ordinary_version, publication_fixture, receipt_files, receipt_from_disk,
+    seed_timeline_node,
+};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -39,7 +42,7 @@ fn package_payload_json(package: &ScFailureRepairPackage) -> serde_json::Value {
 /// 真实 engine：持久 store + 事件通道（回执落盘后才广播 ArtifactUpdate）。
 /// `pub(super)`：同主模块下的 rebuild 消费者用例模块复用同一助手（不复制装配）。
 pub(super) fn engine_for_fixture(
-    fixture: &PublicationFixture,
+    fixture: &super::publication_fixture::PublicationFixture,
 ) -> (WorkspaceEngine, mpsc::Receiver<EngineEvent>) {
     let (event_tx, event_rx) = mpsc::channel(32);
     let record = fixture
@@ -91,7 +94,12 @@ async fn publish_writes_version_ref_and_receipt_and_replay_reuses_same_version()
         .publish_sc_failure_repair_package(fixture.package.clone())
         .await
         .expect("publish repair package");
-    assert_eq!(published.artifact_id, fixture.package.package_id);
+    // artifact_id 沿用既有 `artifact_version_{version:03}` 约定（package_id 不是
+    // artifact 身份，只活在载荷与发布回执里）。
+    assert_eq!(
+        published.artifact_id,
+        format!("artifact_version_{:03}", published.version)
+    );
     assert!(published.version > 1, "包版本不得覆盖普通 current 版本");
 
     let versions = fixture

@@ -25,7 +25,10 @@ use crate::product::work_item_plan_policy::PolicyDiagnostic;
 use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, ScFailureRepairPackage, WsOutMessage,
 };
-use super::publication_fixture::*;
+use super::publication_fixture::{
+    ORDINARY_MARKDOWN, ordinary_version, publication_fixture, receipt_from_disk, receipt_path,
+    seed_timeline_node,
+};
 use super::publication_tests::engine_for_fixture;
 
 /// 公开视图切片：只取消费者真正读到的字段（版本表 / 摘要 / 当前产物 / 诊断）。
