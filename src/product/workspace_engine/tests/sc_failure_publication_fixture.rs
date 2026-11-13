@@ -1,6 +1,11 @@
 // P11 严格 publisher 用例的共享真实 fixture（2026-11-13）。
 // 落位：src/product/workspace_engine/tests/sc_failure_publication_fixture.rs
-// 挂载：tests/sc_failure_publication.rs 内 `#[path = "sc_failure_publication_fixture.rs"] mod fixture;`
+// 挂载：sc_failure_artifacts.rs 内
+//   #[cfg(test)]
+//   #[path = "tests/sc_failure_publication_fixture.rs"]
+//   mod publication_fixture;
+// 共享实例：后续发布面用例（如 verified-prefix 覆盖用例）直接复用本模块的
+// `super::publication_fixture::*`，不再各自重复装配真实 store/会话/证据。
 //
 // 只碰真实件：真实 LifecycleStore、真实 SC single-candidate 会话、真实 split
 // provider run（只落盘，不调用任何 provider）、真实证据日志、真实 timeline 节点。
@@ -8,7 +13,7 @@
 //
 // 本文件只提供 fixture 与只读助手；断言全部落在 publication 用例文件里。
 
-use super::super::build_sc_failure_repair_package;
+use super::build_sc_failure_repair_package;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceEvent, sc_failure_chain_id, sc_failure_split_locator,

@@ -19,14 +19,11 @@
 // 载荷比较走 serde JSON（不钉 `ArtifactPayload` 的枚举变体名）：变体名由 P11
 // enum 提交与 P12/P17 消费者钉，本文件只钉「落盘载荷就是包本体」这一事实。
 
-#[path = "sc_failure_publication_fixture.rs"]
-mod fixture;
-
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::models::ArtifactRef;
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
 use crate::web::workspace_ws_types::{ArtifactPayload, ScFailureRepairPackage};
-use fixture::{
+use super::publication_fixture::{
     NODE_ID, ordinary_version, publication_fixture, receipt_files, receipt_from_disk,
     seed_timeline_node,
 };
@@ -44,7 +41,7 @@ fn package_payload_json(package: &ScFailureRepairPackage) -> serde_json::Value {
 
 /// 真实 engine：持久 store + 事件通道（回执落盘后才广播 ArtifactUpdate）。
 fn engine_for_fixture(
-    fixture: &fixture::PublicationFixture,
+    fixture: &publication_fixture::PublicationFixture,
 ) -> (WorkspaceEngine, mpsc::Receiver<EngineEvent>) {
     let (event_tx, event_rx) = mpsc::channel(32);
     let record = fixture

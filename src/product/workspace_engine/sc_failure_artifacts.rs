@@ -1091,6 +1091,12 @@ fn publish_error(
 #[path = "tests/sc_failure_artifacts.rs"]
 mod tests;
 
+/// P11 严格 publisher 的共享真实 fixture（真实 store / 真实会话 / 真实证据日志）。
+/// 单一实例，供发布面用例与后续覆盖用例共用，不重复装配。
+#[cfg(test)]
+#[path = "tests/sc_failure_publication_fixture.rs"]
+mod publication_fixture;
+
 /// P11 严格 publisher 行为用例（真实 store / 真实 engine / 真实文件故障）。
 #[cfg(test)]
 #[path = "tests/sc_failure_publication.rs"]
