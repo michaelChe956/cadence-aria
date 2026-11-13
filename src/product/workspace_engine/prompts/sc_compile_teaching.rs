@@ -22,6 +22,11 @@ use crate::product::work_item_plan_compiler::{
     IrFault, IrFaultKind, IrFaultLocator, LoweringFault,
 };
 
+/// A1（REQ-WSC-32）：parse 诊断事实块的有界投影预算（UTF-8 字节）——只
+/// 约束新增的 parse 事实块（多行：首行三段逐字 + field/example 行），超限
+/// 整条省略不切半；旧 lowering/IR/registered IDs 与单行呈现原文不在此列。
+const MAX_PARSE_FACT_BLOCK_BYTES: usize = 32_000;
+
 /// Task 4（MODIFIED REQ-WSC-09）：教学重驱 prompt 的 typed 事实载体。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TeachingReredriveFacts<'a> {
@@ -89,13 +94,42 @@ fn render_teaching_reredrive_prompt(
     );
     if !facts.parse_reasons.is_empty() {
         prompt.push_str("\n具体失败原因:\n");
+        // A1（REQ-WSC-32）：仅新增的 parse 事实块（多行：首行逐字三段 +
+        // field/example 行）受 ≤32,000 B 预算约束——整条省略、顺序稳定、
+        // 显式记账；单行呈现原文（IR 预检 failure_reasons 等旧材料）不截断。
+        let mut fact_block_bytes = 0usize;
+        let mut total = 0usize;
+        let mut shown = 0usize;
+        let mut omitted = 0usize;
         for reason in facts.parse_reasons {
+            if !reason.contains('\n') {
+                prompt.push_str("- ");
+                prompt.push_str(reason);
+                prompt.push('\n');
+                continue;
+            }
+            total += 1;
+            // "- " 前缀 + 块本体 + 换行 = 该块在 prompt 中的 UTF-8 字节数。
+            let rendered_bytes = reason.len() + "- ".len() + 1;
+            if fact_block_bytes + rendered_bytes > MAX_PARSE_FACT_BLOCK_BYTES {
+                omitted += 1;
+                continue;
+            }
+            fact_block_bytes += rendered_bytes;
+            shown += 1;
             prompt.push_str("- ");
             prompt.push_str(reason);
             prompt.push('\n');
         }
+        if omitted > 0 {
+            prompt.push_str(&format!(
+                "- parse 事实块预算 {MAX_PARSE_FACT_BLOCK_BYTES} B 已超出:共 {total} 条 / 呈现 {shown} 条 / 省略 {omitted} 条(整条省略,不切半条诊断)。\n"
+            ));
+        }
         // r41 B1(诊断增强):unknown_structured_key 类失败附「合法 section/key
         // 白名单 + 具体动作」——错误码单行不足以让 AI 自纠(它不知道合法集)。
+        // A1（REQ-WSC-32）:该分支再附 40 个合法 STRUCTURED_KEYS(仅此分支,
+        // 不重发完整结构契约大包)。
         if facts
             .parse_reasons
             .iter()
@@ -105,8 +139,9 @@ fn render_teaching_reredrive_prompt(
                 crate::product::work_item_plan_compiler::grammar::STRUCTURED_SECTIONS.join("、");
             let free =
                 crate::product::work_item_plan_compiler::grammar::FREE_TEXT_SECTIONS.join("、");
+            let keys = crate::product::work_item_plan_compiler::grammar::STRUCTURED_KEYS.join("、");
             prompt.push_str(&format!(
-                "\n结构化 section/key 白名单(结构化段只允许这些 key):\n- 结构化: {sections}\n- 自由文本: {free}\n\
+                "\n结构化 section/key 白名单(结构化段只允许这些 key):\n- 结构化: {sections}\n- 自由文本: {free}\n- 合法 key: {keys}\n\
                  动作:删除违例 section,或将其内容并入语义最近的合法 section 后重新输出完整 plan。\n"
             ));
         }
@@ -352,6 +387,128 @@ mod reredrive_prompt_tests {
         assert!(
             !prompt.contains("共 5 条"),
             "摘要不得报告截断后长度: {prompt}"
+        );
+    }
+    /// A1（REQ-WSC-32）：parse 事实块（首行逐字三段 + field/example 行）逐条
+    /// 渲染——同 message 不同 field 的条目在最终 prompt 逐条可区分；预算内
+    /// 不出现省略记账。
+    #[test]
+    fn parse_fact_blocks_carry_field_and_example_per_entry() {
+        let parse_reasons = vec![
+            "missing_section:5:结构化 section 缺少必需字段。\n  缺失字段: Goal\n  正确形状: - Goal: value".to_string(),
+            "missing_section:9:结构化 section 缺少必需字段。\n  缺失字段: role\n  正确形状: - role: value".to_string(),
+        ];
+        let prompt = plain_prompt(&parse_reasons, &[]);
+        for (line, field) in [(5usize, "Goal"), (9, "role")] {
+            assert!(
+                prompt.contains(&format!(
+                    "- missing_section:{line}:结构化 section 缺少必需字段。\n  缺失字段: {field}\n  正确形状: - {field}: value\n"
+                )),
+                "parse 事实块必须逐条带齐三段+精确 field+正确形状: {prompt}"
+            );
+        }
+        assert!(!prompt.contains("省略"), "预算内不得出现省略记账: {prompt}");
+    }
+
+    /// A1：事实块超预算 ⇒ 整条省略 + 显式记账（总数/呈现数/省略数），顺序
+    /// 稳定，不切半条（被省略条目的任何片段都不得出现）。
+    #[test]
+    fn parse_fact_block_over_budget_omits_whole_entries_and_reports_counts() {
+        // 每块固定 380 B ⇒ 渲染 383 B/条；32,000 B 预算内恰容 83 条
+        //（83×383=31,789；84×383=32,172 超出）。
+        let parse_reasons: Vec<String> = (0..100)
+            .map(|index| {
+                let mut block = format!(
+                    "missing_section:{index:03}:m\n  缺失字段: f{index:03}\n  正确形状: - f{index:03}: value"
+                );
+                block.push_str(&"x".repeat(380 - block.len()));
+                block
+            })
+            .collect();
+        let prompt = plain_prompt(&parse_reasons, &[]);
+        assert!(
+            prompt.contains("共 100 条 / 呈现 83 条 / 省略 17 条"),
+            "超预算必须显式记账总数/呈现数/省略数: {prompt}"
+        );
+        // 整条省略：第 84 条（0-based 83）的任何片段（首行/field/形状）不得出现。
+        assert!(
+            !prompt.contains("f083"),
+            "被省略条目不得残留半条片段: {prompt}"
+        );
+        assert!(
+            !prompt.contains("missing_section:083:"),
+            "被省略条目的首行一并省略: {prompt}"
+        );
+        // 预算内条目完整在场且顺序稳定。
+        let first = prompt.find("f000").expect("首条必须在场");
+        let last = prompt.find("f082").expect("预算内末条必须在场");
+        assert!(first < last, "呈现顺序必须稳定");
+    }
+
+    /// A1：单条超大（自身即超 32,000 B）也整条省略，不得切半；其余小条
+    /// 不受牵连。
+    #[test]
+    fn single_oversized_parse_fact_block_omitted_whole() {
+        let oversized = format!(
+            "missing_section:1:m\n  缺失字段: big\n  正确形状: {}",
+            "v".repeat(40_000)
+        );
+        let parse_reasons = vec![
+            oversized,
+            "missing_section:2:m\n  缺失字段: ok\n  正确形状: - ok: value".to_string(),
+        ];
+        let prompt = plain_prompt(&parse_reasons, &[]);
+        assert!(
+            prompt.contains("共 2 条 / 呈现 1 条 / 省略 1 条"),
+            "单条超大必须整条省略并记账: {prompt}"
+        );
+        assert!(prompt.contains("缺失字段: ok"), "小条完整在场: {prompt}");
+        assert!(
+            !prompt.contains("缺失字段: big"),
+            "超大条不得切半残留: {prompt}"
+        );
+        assert!(
+            !prompt.contains("missing_section:1:"),
+            "超大条首行一并省略: {prompt}"
+        );
+    }
+
+    /// A1 边界：单行呈现原文（IR 预检 failure_reasons 等旧材料）不受新预算
+    /// 约束——总量超 32,000 B 仍逐条全量在场，无省略记账。
+    #[test]
+    fn plain_single_line_reasons_are_not_budget_truncated() {
+        let parse_reasons: Vec<String> = (0..200)
+            .map(|index| format!("unknown_requirement_ref:{index}:{}", "e".repeat(380)))
+            .collect();
+        let prompt = plain_prompt(&parse_reasons, &[]);
+        assert!(
+            prompt.contains("unknown_requirement_ref:0:"),
+            "首条在场: {prompt}"
+        );
+        assert!(
+            prompt.contains("unknown_requirement_ref:199:"),
+            "末条在场（旧材料不截断）: {prompt}"
+        );
+        assert!(!prompt.contains("省略"), "旧材料无省略记账: {prompt}");
+    }
+
+    /// A1（REQ-WSC-32）：unknown_structured_key 类失败附 40 个合法
+    /// STRUCTURED_KEYS（仅此分支）；其它失败码不附键集。
+    #[test]
+    fn unknown_structured_key_failure_lists_legal_key_set() {
+        let keys = crate::product::work_item_plan_compiler::grammar::STRUCTURED_KEYS.join("、");
+        let prompt = plain_prompt(
+            &["unknown_structured_key:7:未知结构化 key 必须拒绝。".to_string()],
+            &[],
+        );
+        assert!(
+            prompt.contains(&keys),
+            "unknown_structured_key 必须附全部合法 key: {prompt}"
+        );
+        let plain = plain_prompt(&["missing_section:7:缺 Identity".to_string()], &[]);
+        assert!(
+            !plain.contains(&keys),
+            "非 unknown_structured_key 失败不得附带键集: {plain}"
         );
     }
 }

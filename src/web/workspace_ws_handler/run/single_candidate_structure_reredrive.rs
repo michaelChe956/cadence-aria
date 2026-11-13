@@ -484,6 +484,37 @@ fn generate_segment_failure_stage(
 /// 引用恒 None + 行内带缺失原因（generate 段失败产物不落 durable source，
 /// 不提升 current refs）。幂等键由构造器按尝试身份派生；失败身份掺入世代
 /// 业务键，不同世代（re-arm）同内容失败不互吃幂等键。
+
+/// A1（REQ-WSC-32）：parse 语法类诊断的完整五字段审计文本——**不进
+/// prompt、不拼入被哈希的 `detail`**（`failure_id`/attempt 身份逐字不变），
+/// 落流水行 `source_missing_reason` 的显式标记分区、原缺失说明保留在前。
+/// 教学面预算内被省略条目的完整事实由此可回取（runner 侧接线见 C2）。
+fn parse_fact_audit_partition(
+    diagnostics: &[crate::product::work_item_plan_compiler::CompilerDiagnostic],
+) -> Option<String> {
+    use super::single_candidate::single_candidate_compile_preflight::is_teachable_parse_failure;
+
+    let parse_diagnostics: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| is_teachable_parse_failure(&diagnostic.code))
+        .collect();
+    let mut partition = format!(
+        "[sc_parse_fact_audit total={} 五字段完整,不进 prompt]",
+        parse_diagnostics.len()
+    );
+    for diagnostic in &parse_diagnostics {
+        partition.push_str(&format!(
+            "\n{}|{}|{}|{}|{}",
+            diagnostic.code,
+            diagnostic.line,
+            diagnostic.field,
+            diagnostic.message,
+            diagnostic.repair_example
+        ));
+    }
+    (!parse_diagnostics.is_empty()).then_some(partition)
+}
+
 fn record_generate_segment_failure(
     engine: &mut WorkspaceEngine,
     lifecycle: &LifecycleStore,
@@ -491,6 +522,8 @@ fn record_generate_segment_failure(
     code: &str,
     kinds: Vec<PlanningFailureKind>,
     detail: &str,
+    // A1：parse 五字段审计分区（仅进 source_missing_reason，不进被哈希 detail）。
+    parse_fact_audit: Option<String>,
 ) {
     use crate::product::lifecycle_store::candidate_attempts::{
         CandidateAttemptFailure, candidate_attempt_record_from_generate_segment,
@@ -513,7 +546,10 @@ fn record_generate_segment_failure(
         stage,
         Some(failure),
         None,
-        Some(detail.to_string()),
+        Some(match parse_fact_audit {
+            Some(audit) => format!("{detail}\n{audit}"),
+            None => detail.to_string(),
+        }),
         provider_attempt,
     );
     if let Err(error) = lifecycle.append_candidate_attempt(&session_id, &attempt) {
@@ -545,6 +581,7 @@ pub(super) fn record_generate_segment_compile_failure(
         &code,
         compile_typed_kinds(diagnostics),
         detail,
+        parse_fact_audit_partition(diagnostics),
     );
 }
 
@@ -563,6 +600,7 @@ pub(super) fn record_generate_segment_ir_validation_failure(
         "typed_ir_validation",
         vec![stable_code_kind("typed_ir_validation")],
         detail,
+        None,
     );
 }
 
@@ -674,6 +712,154 @@ mod task8_review_fixes {
         assert_eq!(
             persisted.status, status_before,
             "新写点流水写失败不得阻断生成（会话状态零变化）"
+        );
+    }
+}
+
+/// A1（REQ-WSC-32）：parse 事实审计与身份中性——完整五字段落
+/// `source_missing_reason` 的标记分区（不进 prompt、不进被哈希的 detail），
+/// `failure_id` 对同一诊断集逐字不变；非 parse 类失败保持改前形态。
+#[cfg(test)]
+mod a1_parse_fact_audit {
+    use super::*;
+    use crate::product::work_item_plan_compiler::CompilerDiagnostic;
+
+    fn parse_diagnostic(field: &str, line: usize) -> CompilerDiagnostic {
+        CompilerDiagnostic {
+            code: "missing_section".to_string(),
+            line,
+            field: field.to_string(),
+            message: "结构化 section 缺少必需字段。".to_string(),
+            repair_example: format!("- {field}: value"),
+            kind: None,
+            lowering_fault: None,
+            ir_fault: None,
+        }
+    }
+
+    fn last_attempt_row(
+        lifecycle: &LifecycleStore,
+        session_id: &str,
+    ) -> crate::product::lifecycle_store::candidate_attempts::CandidateAttemptRecord {
+        lifecycle
+            .list_candidate_attempts(session_id)
+            .expect("读回流水行")
+            .last()
+            .expect("一行失败流水")
+            .clone()
+    }
+
+    /// 临时目录 + store + engine（事件 rx 以 forget 保活，通道不得先关）。
+    fn fixture() -> (
+        tempfile::TempDir,
+        LifecycleStore,
+        crate::product::workspace_engine::WorkspaceEngine,
+    ) {
+        let tmp = tempfile::TempDir::new().expect("fixture tempdir");
+        let lifecycle = LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+            tmp.path().join(".aria"),
+        ));
+        let record = lifecycle
+            .create_workspace_session(
+                crate::product::lifecycle_store::CreateWorkspaceSessionInput {
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    entity_id: "work_item_plan_0001".to_string(),
+                    workspace_type: crate::product::models::WorkspaceType::WorkItemPlan,
+                    author_provider: crate::product::models::ProviderName::Codex,
+                    reviewer_provider: Some(crate::product::models::ProviderName::ClaudeCode),
+                    review_rounds: 2,
+                    superpowers_enabled: true,
+                    openspec_enabled: true,
+                    work_item_plan_options: None,
+                },
+            )
+            .expect("fixture session");
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(8);
+        std::mem::forget(event_rx); // 通道保活：rx 关闭会使引擎事件发送面失效
+        let engine = WorkspaceEngine::new_persistent(
+            std::sync::Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+                tmp.path().join("checkpoints"),
+            )),
+            lifecycle.clone(),
+            event_tx,
+            crate::product::workspace_engine::WorkspaceSession::from_record(record),
+        );
+        (tmp, lifecycle, engine)
+    }
+
+    /// 完整五字段审计在标记分区在场、原缺失说明保留在前，且 `failure_id`
+    /// 仍按 detail（不含审计文本）哈希——身份中性逐字可证。
+    #[test]
+    fn parse_fact_audit_lands_in_source_missing_reason_and_keeps_failure_identity() {
+        let (_tmp, lifecycle, mut engine) = fixture();
+        let detail = "missing_section:5:结构化 section 缺少必需字段。; missing_section:9:结构化 section 缺少必需字段。";
+        record_generate_segment_compile_failure(
+            &mut engine,
+            &lifecycle,
+            &[parse_diagnostic("Goal", 5), parse_diagnostic("role", 9)],
+            detail,
+        );
+        let row = last_attempt_row(&lifecycle, &engine.session().session_id);
+        let reason = row.source_missing_reason.as_deref().expect("缺失说明在场");
+        assert!(
+            reason.starts_with(detail),
+            "原缺失说明必须保留在前: {reason}"
+        );
+        assert!(
+            reason.contains("[sc_parse_fact_audit"),
+            "审计分区必须显式标记: {reason}"
+        );
+        for (field, line) in [("Goal", 5), ("role", 9)] {
+            assert!(
+                reason.contains(&format!(
+                    "missing_section|{line}|{field}|结构化 section 缺少必需字段。|- {field}: value"
+                )),
+                "同 message 不同 field 的五字段必须在审计面逐条可取回: {reason}"
+            );
+        }
+        // 身份中性：failure_id 仍按 detail（不含审计）哈希，逐字不变。
+        let series = lifecycle
+            .get_workspace_session(&engine.session().session_id)
+            .ok()
+            .and_then(|session| {
+                crate::product::workspace_engine::current_sc_author_business_key(&session)
+            })
+            .unwrap_or_else(|| "no-launch".to_string());
+        assert_eq!(
+            row.failure.as_ref().expect("失败事实").failure_id,
+            sc_sha256(&format!("{series}/Parse/missing_section/{detail}")),
+            "审计文本不得进入被哈希的 detail"
+        );
+    }
+
+    /// 非 parse 类失败不落审计分区——`source_missing_reason` 保持改前形态
+    /// （仅 detail 本体）。
+    #[test]
+    fn compile_failure_without_parse_diagnostics_keeps_plain_missing_reason() {
+        let (_tmp, lifecycle, mut engine) = fixture();
+        let detail =
+            "unknown_requirement_ref:30:task references unknown design requirement REQ-002";
+        record_generate_segment_compile_failure(
+            &mut engine,
+            &lifecycle,
+            &[CompilerDiagnostic {
+                code: "unknown_requirement_ref".to_string(),
+                line: 30,
+                field: "Tasks.requirement_refs".to_string(),
+                message: "task references unknown design requirement REQ-002".to_string(),
+                repair_example: "- requirement_refs: REQ-001".to_string(),
+                kind: None,
+                lowering_fault: None,
+                ir_fault: None,
+            }],
+            detail,
+        );
+        let row = last_attempt_row(&lifecycle, &engine.session().session_id);
+        assert_eq!(
+            row.source_missing_reason.as_deref(),
+            Some(detail),
+            "非 parse 类失败不落审计分区，保持改前形态"
         );
     }
 }
