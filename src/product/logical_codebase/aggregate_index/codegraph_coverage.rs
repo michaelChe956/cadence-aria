@@ -106,9 +106,10 @@ pub struct CoveragePaths {
     pub bundled_nodes: Vec<PathBuf>,
     /// node 候选2：PATH 上的 node 可执行（需版本 ≥ 22.5 才采用）。
     pub path_node: Option<PathBuf>,
-    /// node 候选3 的来源：宿主 HOME（`~/.codegraph/bundles/<target>-<ver>/` 是
-    /// codegraph 的**自愈缓存**布局）。`None` ⇒ 不扫缓存（测试默认关闭，
-    /// 否则会读到开发机真实缓存）。
+    /// node 候选3 的来源：自愈缓存根 —— `CODEGRAPH_INSTALL_DIR` 优先，否则
+    /// 宿主 HOME 下的 `~/.codegraph`（`<缓存根>/bundles/<target>-<ver>/` 是
+    /// codegraph 的**自愈缓存**布局，口径同上游 `npm-shim.js:113`）。`None` ⇒
+    /// 不扫缓存（测试默认关闭，否则会读到开发机真实缓存）。
     pub home_dir: Option<PathBuf>,
 }
 
