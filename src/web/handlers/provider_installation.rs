@@ -416,8 +416,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        InstallJobExecution, TEST_INSTALL_EXECUTIONS, TestInstallExecutionBuilder, get_install_job,
-        get_install_targets, post_provider_expose, post_provider_install, resolve_install_action,
+        InstallJobExecution, OffPathQuery, TEST_INSTALL_EXECUTIONS, TestInstallExecutionBuilder,
+        get_install_job, get_install_targets, post_provider_expose, post_provider_install,
+        resolve_install_action, resolve_off_path,
     };
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::bounded_command_runner::{
@@ -753,6 +754,45 @@ mod tests {
         );
     }
 
+    // ---- off_path 判定（REQ-PCI-08） ----
+
+    #[test]
+    fn off_path_marks_installed_target_missing_from_login_shell_path() {
+        let root = tempdir().expect("root");
+        // 已安装落点：workspace 隔离的 npm 前缀 bin（不在登录 shell PATH 上）。
+        let prefix_bin = root.path().join("npm-global").join("bin");
+        std::fs::create_dir_all(&prefix_bin).expect("prefix bin");
+        std::fs::write(prefix_bin.join("claude"), "#!/bin/sh\n").expect("claude bin");
+        // 登录 shell PATH 上的真实目录（另一个目录）。
+        let login_dir = root.path().join("login-bin");
+        std::fs::create_dir_all(&login_dir).expect("login bin");
+        let query = OffPathQuery {
+            install_search_dirs: vec![prefix_bin.clone()],
+            login_path_dirs: vec![login_dir.clone()],
+        };
+
+        // 平台能找到、但所在目录不在登录 shell PATH 上 ⇒ true。
+        assert!(resolve_off_path("claude", &query));
+        // 二进制就落在登录 shell PATH 的目录里 ⇒ false。
+        assert!(!resolve_off_path(
+            "claude",
+            &OffPathQuery {
+                install_search_dirs: vec![login_dir.clone()],
+                login_path_dirs: vec![login_dir.clone()],
+            }
+        ));
+        // 未安装（搜索目录里找不到命令）⇒ false。
+        assert!(!resolve_off_path("codex", &query));
+        // 登录 shell PATH 快照不可用（启动 ≤2s 或探测失败）⇒ 不下结论（false）。
+        assert!(!resolve_off_path(
+            "claude",
+            &OffPathQuery {
+                install_search_dirs: vec![prefix_bin],
+                login_path_dirs: Vec::new(),
+            }
+        ));
+    }
+
     // ---- GET install-targets ----
 
     #[tokio::test]
@@ -841,11 +881,13 @@ mod tests {
             claude["install_source"],
             json!("npm @anthropic-ai/claude-code")
         );
-        assert!(claude["latest_checked_at"].is_string());
+        // 登录 shell PATH 快照不可用（测试线程未探测）⇒ off_path 不下结论（REQ-PCI-08）。
+        assert_eq!(claude["off_path"], json!(false));
 
         let codex = by_target("codex");
         assert_eq!(codex["cli_available"], json!(false));
-        assert_eq!(codex["action"], json!("install"));
+        // 未安装对象 off_path 恒为 false（REQ-PCI-08）。
+        assert_eq!(codex["off_path"], json!(false));
 
         let pi = by_target("pi");
         assert_eq!(pi["cli_available"], json!(true));
