@@ -10,6 +10,7 @@ pub mod plan;
 pub mod review;
 pub mod run_scratch;
 pub(crate) mod sc_failure_evidence;
+pub(crate) mod sc_failure_publication;
 pub mod spec;
 pub mod tool_policy_run_audit;
 mod usage_diagnostics;
