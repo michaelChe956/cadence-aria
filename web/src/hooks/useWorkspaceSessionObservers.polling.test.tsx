@@ -283,4 +283,87 @@ describe("catalog polling pacing (P2/P3 runaway fixes)", () => {
       view.unmount();
     });
   });
+
+  // F9（终审 2026-11-13）：dirty 补跑的**最小间隔**曾与普通 250ms 防抖共用
+  // 同一个定时器槽位 ⇒ 补跑等待期内再来一个唤醒会把 1s 的补跑取消、改排
+  // 250ms ⇒ 350ms 就跑了，最小间隔被完全绕过（连续档回归）。
+  // 断言：补跑等待期内的再次唤醒**不得**让补跑提前（实际执行时间不早于最小
+  // 间隔）；普通防抖（没有补跑等待时）仍按 250ms 触发。
+  it("keeps the dirty rerun at its minimum gap when another wake-up arrives (F9)", async () => {
+    vi.useFakeTimers();
+    const startedAt: number[] = [];
+    let releaseFirst: (() => void) | undefined;
+    let calls = 0;
+    const getIssueLifecycle = vi.fn(() => {
+      startedAt.push(Date.now());
+      calls += 1;
+      if (calls === 1) {
+        return new Promise<{
+          workspace_sessions: WorkspaceSessionSummary[];
+          coding_attempts: never[];
+        }>((resolve) => {
+          releaseFirst = () =>
+            resolve({ workspace_sessions: [summary("s1")], coding_attempts: [] });
+        });
+      }
+      return Promise.resolve({
+        workspace_sessions: [summary("s1")],
+        coding_attempts: [],
+      });
+    });
+
+    const view = renderObserverHook(
+      observerOptions({
+        refreshIntervalMs: 15_000,
+        getIssueLifecycle,
+        createController: stubController,
+      }),
+    );
+
+    // 第 1 轮在途时收到唤醒 ⇒ 只标 dirty。
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    // 第 1 轮收敛 ⇒ 排 dirty 补跑（最小间隔 1s）。
+    await act(async () => {
+      releaseFirst?.();
+    });
+    expect(startedAt).toHaveLength(1);
+
+    // 补跑等待期内再来一个唤醒（失效 / snapshot hint）。
+    await act(async () => {
+      vi.advanceTimersByTime(100);
+      notifyLifecycleInvalidated("issue_1");
+    });
+
+    // 旧的 250ms 防抖档（t0+350ms）不得触发新一轮：最小间隔必须守住。
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+    });
+    expect(startedAt).toHaveLength(1);
+
+    // 到 1s 档 ⇒ dirty 补跑执行，且实际执行时间不早于最小间隔。
+    await act(async () => {
+      vi.advanceTimersByTime(650);
+    });
+    expect(startedAt).toHaveLength(2);
+    expect(startedAt[1] - startedAt[0]).toBeGreaterThanOrEqual(1_000);
+
+    // 普通防抖仍按 250ms（此时没有补跑等待）：唤醒 ⇒ 250ms 后开新一轮。
+    await act(async () => {
+      notifyLifecycleInvalidated("issue_1");
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(249);
+    });
+    expect(startedAt).toHaveLength(2);
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(startedAt).toHaveLength(3);
+
+    await act(async () => {
+      view.unmount();
+    });
+  });
 });
