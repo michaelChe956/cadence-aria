@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::product::coding_attempt_store::locking::ExclusiveFileLock;
-use crate::product::entity_deletion_store::{EntityDeletionStore, EntityScope};
+use crate::product::entity_deletion_store::EntityScope;
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{WorkspaceSessionRecord, WorkspaceType};
@@ -658,50 +658,6 @@ impl LifecycleStore {
             .ok_or_else(|| session_not_live_error(step, "会话无法归属实体，拒绝写证据"))
     }
 
-    /// 把整个写体放进所属实体的 live-write lease（仓库既有 scope 准入闸）：lease
-    /// 取得失败/墓碑在位 → Conflict → sc_failure_session_not_live；写体自身的严格
-    /// 错误原样透出。锁序：scope lease → 日志锁（写体内部）。
-    fn sc_failure_with_live_write<T>(
-        &self,
-        scope: &EntityScope,
-        step: &str,
-        body: impl FnOnce() -> Result<T, ScFailureEvidenceError>,
-    ) -> Result<T, ScFailureEvidenceError> {
-        let mut outcome: Option<Result<T, ScFailureEvidenceError>> = None;
-        self.with_entity_live_write(scope, || {
-            outcome = Some(body());
-            Ok(())
-        })
-        .map_err(|failure| match failure {
-            ProductStoreError::Conflict { .. } => session_not_live_error(
-                step,
-                "所属实体处于删除墓碑（purging/deleted）或删除独占进行中",
-            ),
-            other => io_error(step, None, format!("写准入失败: {other}")),
-        })?;
-        let outcome = outcome.ok_or_else(|| io_error(step, None, "写准入未执行写体"))?;
-        outcome
-    }
-
-    /// 存活准入：所属实体存在删除墓碑（purging/deleted）时拒绝写。
-    fn sc_failure_live_admission(
-        &self,
-        session: &WorkspaceSessionRecord,
-        step: &str,
-    ) -> Result<(), ScFailureEvidenceError> {
-        let scope = self.sc_failure_entity_scope(session, step)?;
-        let tombstone = EntityDeletionStore::new(self.app_paths())
-            .get(&scope)
-            .map_err(|failure| io_error(step, None, format!("读取删除事实失败: {failure}")))?;
-        if tombstone.is_some() {
-            return Err(session_not_live_error(
-                step,
-                "所属实体处于删除墓碑（purging/deleted）",
-            ));
-        }
-        Ok(())
-    }
-
     /// chain 身份自洽：`chain_id` 必须等于身份四元组的长度前缀哈希。
     fn sc_failure_chain_consistent(
         &self,
@@ -979,8 +935,7 @@ fn append_sc_failure_log_line(
         .map_err(|failure| io_error(step, None, format!("回读证据日志失败: {failure}")))?;
     let last = readback
         .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .next_back()
+        .rfind(|line| !line.is_empty())
         .ok_or_else(|| io_error(step, None, "回读证据日志为空"))?;
     let parsed: ScFailureEvidenceEntry = serde_json::from_slice(last)
         .map_err(|failure| io_error(step, None, format!("回读证据日志条目不可解析: {failure}")))?;

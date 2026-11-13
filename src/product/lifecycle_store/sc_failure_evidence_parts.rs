@@ -5,6 +5,7 @@
 //! 私有子模块：`use super::*` 取同域私有项，不新增对外接口、不改 wire。
 
 use super::*;
+use crate::product::entity_deletion_store::EntityDeletionStore;
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 
 /// 事件准入：round 必须先 RoundBound；raw/source locator 必须绑定该 round。
@@ -236,4 +237,52 @@ pub(super) fn sc_failure_log_failure(
         }],
     }));
     failure
+}
+
+/// 写前 live-write 准入（scope lease + 存活准入）：与上方事件校验同属"写前拒什么"
+/// 的准入职责。从 sc_failure_evidence.rs 整块搬移（主模块已近行数上限，按职责搬移、
+/// 不压行）：函数体逐字未改，仅按子模块可见性加 `pub(super)`。
+impl LifecycleStore {
+    /// 把整个写体放进所属实体的 live-write lease（仓库既有 scope 准入闸）：lease
+    /// 取得失败/墓碑在位 → Conflict → sc_failure_session_not_live；写体自身的严格
+    /// 错误原样透出。锁序：scope lease → 日志锁（写体内部）。
+    pub(super) fn sc_failure_with_live_write<T>(
+        &self,
+        scope: &EntityScope,
+        step: &str,
+        body: impl FnOnce() -> Result<T, ScFailureEvidenceError>,
+    ) -> Result<T, ScFailureEvidenceError> {
+        let mut outcome: Option<Result<T, ScFailureEvidenceError>> = None;
+        self.with_entity_live_write(scope, || {
+            outcome = Some(body());
+            Ok(())
+        })
+        .map_err(|failure| match failure {
+            ProductStoreError::Conflict { .. } => session_not_live_error(
+                step,
+                "所属实体处于删除墓碑（purging/deleted）或删除独占进行中",
+            ),
+            other => io_error(step, None, format!("写准入失败: {other}")),
+        })?;
+        outcome.ok_or_else(|| io_error(step, None, "写准入未执行写体"))?
+    }
+
+    /// 存活准入：所属实体存在删除墓碑（purging/deleted）时拒绝写。
+    pub(super) fn sc_failure_live_admission(
+        &self,
+        session: &WorkspaceSessionRecord,
+        step: &str,
+    ) -> Result<(), ScFailureEvidenceError> {
+        let scope = self.sc_failure_entity_scope(session, step)?;
+        let tombstone = EntityDeletionStore::new(self.app_paths())
+            .get(&scope)
+            .map_err(|failure| io_error(step, None, format!("读取删除事实失败: {failure}")))?;
+        if tombstone.is_some() {
+            return Err(session_not_live_error(
+                step,
+                "所属实体处于删除墓碑（purging/deleted）",
+            ));
+        }
+        Ok(())
+    }
 }

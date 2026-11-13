@@ -41,7 +41,7 @@ fn available(locator: &str, body: &str) -> ScEvidenceRef {
     ScEvidenceRef::Available {
         locator: locator.into(),
         sha256: sha_hex(body.as_bytes()),
-        bytes: body.as_bytes().len() as u64,
+        bytes: body.len() as u64,
     }
 }
 
@@ -112,6 +112,7 @@ fn bound(seq: u64, chain: &ScFailureChainIdentity, r: &ScRoundIdentity) -> ScFai
     )
 }
 
+#[allow(clippy::too_many_arguments)] // 夹具构造器：每个参数是一个独立且必须显式的证据字段。
 fn failure(
     seq: u64,
     chain: &ScFailureChainIdentity,
@@ -169,6 +170,7 @@ fn sent_prompt(r: &ScRoundIdentity, target_ordinal: u32) -> ScTeachingPromptEvid
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 夹具构造器：终局事实的每个字段都必须显式给出。
 fn terminal(
     seq: u64,
     chain: &ScFailureChainIdentity,
