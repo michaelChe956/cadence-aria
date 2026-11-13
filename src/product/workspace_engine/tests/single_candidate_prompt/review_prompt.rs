@@ -37,6 +37,10 @@ fn assert_section_compact_deep_equal(prompt: &str, title: &str, expected: &serde
         "section `{title}` must be single-line compact JSON, got: {payload}"
     );
     let pretty = serde_json::to_string_pretty(&value).expect("pretty baseline");
+    // 口径事实（M-1）：严格小于断言隐含「顶层为固定键数的非空对象/数组、
+    // 数组恒有元素」——serde_json 对顶层 `[]` / 标量 compact 与 pretty 同长，
+    // 届时会假阳性失败；当前 9 段顶层均为非空对象（candidates 数组在受审
+    // 流程中恒 ≥1 项，IR 编译产物），该退化现实不可达。
     assert!(
         payload.len() < pretty.len(),
         "section `{title}` compact {} bytes must be strictly smaller than pretty {} bytes",
@@ -1027,29 +1031,37 @@ mod sg3a1_structure_input {
             }),
         );
 
-        // 9 段顺序稳定（本体六段在前、结构三段在后）。
-        let mut cursor = 0usize;
-        for title in [
-            "Canonical Contract Candidates",
-            "Dependency Contract Graph",
-            "Reviewer Capability Coverage Projection",
-            "Cross-Item Contract Supply / Demand",
-            "Projection Validation Report",
-            "Immutable Candidate Artifact Refs",
-            "Deterministic Structure Report",
-            "Structure Context Identity",
-            "Structural Repair Audit",
-        ] {
-            let position = input
-                .prompt
-                .find(&format!("\n### {title}\n"))
-                .unwrap_or_else(|| panic!("section `{title}` missing"));
-            assert!(
-                position >= cursor,
-                "section order must stay stable at `{title}`"
-            );
-            cursor = position;
-        }
+        // 9 段序列**精确**断言（数量 + 次序）：扫描 Plan Review Context
+        // 区间内全部「### 」标题（截至「审核边界」标记前）——重复段、
+        // 插入段、段丢失或乱序都会红（首现式 find 循环放走过重复段）。
+        let context_start = input
+            .prompt
+            .find("## Plan Review Context\n")
+            .expect("plan review context heading");
+        let context_end = input.prompt[context_start..]
+            .find("\n审核边界")
+            .map(|offset| context_start + offset)
+            .expect("review boundary after context sections");
+        let headings: Vec<&str> = input.prompt[context_start..context_end]
+            .split("\n### ")
+            .skip(1)
+            .map(|section| section.split('\n').next().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            headings,
+            [
+                "Canonical Contract Candidates",
+                "Dependency Contract Graph",
+                "Reviewer Capability Coverage Projection",
+                "Cross-Item Contract Supply / Demand",
+                "Projection Validation Report",
+                "Immutable Candidate Artifact Refs",
+                "Deterministic Structure Report",
+                "Structure Context Identity",
+                "Structural Repair Audit",
+            ],
+            "Plan Review Context 必须恰为这 9 段（数量 + 次序精确匹配）"
+        );
 
         // 标题、refs、nonce/scope 事实与结构修复审计说明完整在场。
         assert!(input.prompt.contains("## Plan Review Context"));
