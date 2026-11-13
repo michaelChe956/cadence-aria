@@ -366,13 +366,24 @@ python3 $D/run_arms.py /tmp/aria-wig-pinned/before-a953327d \
      排除 timeout 臂、token 缺值呈 `n/a`；
   ⑦ 真机 8 臂首跑失败根因 = prepare 缺 design（产品返回 500
      `design_spec_required`），已由「`--complete-design` + batch design
-     preflight」闭合；该结论来自既有 run-manifest/sequence.log 证据，**新路径
-     本身未经真机执行**。
-- **未验证（notrun，必须由 controller 执行时观察）**：真实 provider 的 seed
-  生成、`--complete-design` 的真实 design 生成/确认、缺 design 的 batch
-  preflight 实际拒绝行为、开臂前后 design digest 复核、choice 门显式审批路径、
-  8 臂真机执行、trust 登记在真实 codex 会话中的实际生效、任何耗时/token 数值
-  结论。本目录脚本不会自行启动 provider 或追加 run。
+     preflight」闭合。**原 out-seed5 的 8 个 preflight-invalid run 只作根因证据，
+     不进入 effect 统计**。
+- **真机 design seed（controller `bg_677` 执行，已按 durable 只读核对）**：
+  `design_spec_0001@version_0001` confirmed，`design_markdown_sha256=
+  58ac15ad6fac74ea561b0ba98a2bcc3ff7b8a7731f81cf610e13ea7124566128`
+  （17199 bytes），design session `workspace_session_0002` 的
+  `provider_start_ledger=1`、`gate_stage=author_confirm`；story 正文
+  `b3934f68…a2a7f`（8962 B）**未变**；成员快照未漂移。二者已冻结进
+  `out-seed5/seed-manifest.json`。
+  该 design 的 involved/change_order 由 provider 自决（durable design 记录为
+  3 成员 + `busi→gateway→frontend` 序），manifest 的
+  `design_involved_repository_ids` / `design_change_order` 是**显式 CLI 传参**
+  记录，本次为空 = 未传显式 scope，不代表 design 无 scope（真实 metadata 以
+  durable design 记录为准）。
+- **未验证/进行中（controller 执行，不由本目录脚本自起）**：8 臂 batch
+  （controller `bg_683` 在其自己的 out 根执行，本目录脚本 core 已冻结不再改）、
+  choice 门显式审批路径、trust 登记在真实 codex 会话中的实际生效、耗时/token
+  数值结论。原始 seed 生成与 design seed 已真机成功（上文），不再列为 notrun。
 
 ### 真机 seed 首次失败的根因（已修）
 
