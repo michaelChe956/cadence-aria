@@ -13,8 +13,7 @@ fn compact_section_payload<'a>(prompt: &'a str, title: &str) -> (&'a str, serde_
         .find(&heading)
         .unwrap_or_else(|| panic!("review prompt section `{title}` missing"));
     let rest = &prompt[start + heading.len()..];
-    let mut stream =
-        serde_json::Deserializer::from_str(rest).into_iter::<serde_json::Value>();
+    let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<serde_json::Value>();
     let value = stream
         .next()
         .unwrap_or_else(|| panic!("review prompt section `{title}` carries no JSON"))
@@ -718,8 +717,8 @@ mod sg3a1_structure_input {
             "missing structure section: {}",
             &input.prompt[input.prompt.len().saturating_sub(400)..]
         );
-        assert!(input.prompt.contains("\"from\": \"wi-a\""));
-        assert!(input.prompt.contains("\"to\": \"wi-b\""));
+        assert!(input.prompt.contains("\"from\":\"wi-a\""));
+        assert!(input.prompt.contains("\"to\":\"wi-b\""));
         assert!(
             input.prompt.contains("canonical_input"),
             "canonical input source must be visible"
@@ -899,8 +898,7 @@ mod sg3a1_structure_input {
     /// 既有上限内（compact 只降字节，不承诺 token 同比或质量必升）。
     #[test]
     fn sg_03a_1_review_prompt_sections_compact_deep_equal_and_smaller() {
-        let (_tmp, lifecycle, engine, report_ref) =
-            sg3a1_sealed_session("d1_compact", |_| {});
+        let (_tmp, lifecycle, engine, report_ref) = sg3a1_sealed_session("d1_compact", |_| {});
         let input = engine
             .build_work_item_plan_review_input()
             .expect("compact single-candidate review input");
@@ -943,12 +941,17 @@ mod sg3a1_structure_input {
         assert_section_compact_deep_equal(
             &input.prompt,
             "Canonical Contract Candidates",
-            &serde_json::json!(ir_record
-                .ir
-                .items
-                .iter()
-                .map(|item| expected_contract_candidate(&item.target_repository_id, &item.contract))
-                .collect::<Vec<_>>()),
+            &serde_json::json!(
+                ir_record
+                    .ir
+                    .items
+                    .iter()
+                    .map(|item| expected_contract_candidate(
+                        &item.target_repository_id,
+                        &item.contract
+                    ))
+                    .collect::<Vec<_>>()
+            ),
         );
         assert_section_compact_deep_equal(
             &input.prompt,
