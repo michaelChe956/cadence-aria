@@ -34,7 +34,8 @@ use super::failure_classify::{
 };
 use super::job_store::{InstallJobOutcome, InstallJobStore};
 use super::source_table::{
-    InstallSourceRow, manual_install_command, npm_prefix, npm_registry, row_for_wire,
+    InstallSourceRow, kimi_install_bin_dir, manual_install_command, npm_prefix, npm_registry,
+    row_for_wire,
 };
 
 /// 安装命令默认超时：npm 全局安装可能要几分钟（设计决策 9 未验证项 4）。
@@ -264,10 +265,22 @@ impl HealthRefreshProber {
         }
     }
 
-    /// 跑一次 `--version`（PATH 口径）。
-    async fn probe_version(&self, command: &str) -> Option<String> {
+    /// 跑一次 `--version`（`absolute` = 用 `<bin>/<cmd>` 绝对路径兜底）。
+    ///
+    /// **必须经 `BoundedCommandRunner`**：否则 PATH 覆盖层（overlay）不生效，
+    /// 装完的 CLI 在平台自身探测里仍是「找不到」。
+    async fn probe_version(
+        &self,
+        command: &str,
+        bin_dir: Option<&Path>,
+        absolute: bool,
+    ) -> Option<String> {
+        let executable = match (absolute, bin_dir) {
+            (true, Some(dir)) => dir.join(command).to_string_lossy().into_owned(),
+            _ => command.to_string(),
+        };
         let request = BoundedCommandRequest {
-            executable: command.to_string(),
+            executable,
             argv: vec!["--version".to_string()],
             working_dir: self.working_dir.clone(),
             timeout: self.timeout,
@@ -286,6 +299,54 @@ impl HealthRefreshProber {
             _ => None,
         }
     }
+
+    /// 真实命令验证（2.8②）：跑一个**非 `--version`** 的子命令，证明 CLI
+    /// 真能用（`--version` 在平台 bundle 缺失时也 exit 0 ⇒ 不可作唯一依据）。
+    async fn probe_real_command(&self, target: InstallTarget, bin_dir: Option<&Path>) -> bool {
+        let Some(row) = row_for_wire(target.wire_label()) else {
+            return false;
+        };
+        let argv = post_install_verification_argv(target.wire_label());
+        let mut executables = Vec::new();
+        if let Some(dir) = bin_dir {
+            executables.push(dir.join(row.command).to_string_lossy().into_owned());
+        }
+        executables.push(row.command.to_string());
+        for executable in executables {
+            let request = BoundedCommandRequest {
+                executable,
+                argv: argv.clone(),
+                working_dir: self.working_dir.clone(),
+                timeout: self.timeout,
+                cancellation: CancellationToken::new(),
+                environment: host_environment(),
+                stdout_limit: 4096,
+                stderr_limit: 4096,
+            };
+            if let Ok(result) = self.command_runner.run(request).await
+                && result.exit_code == Some(0)
+                && !result.timed_out
+            {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// 装后验证用的**真实命令**（不能只 `--version`）。
+fn post_install_verification_argv(target_wire: &str) -> Vec<String> {
+    match target_wire {
+        // codegraph：`files` 会真正加载平台 native 包（bundle 缺失即失败）；
+        // 未建索引时它输出提示并 exit 0 ⇒ 可作为「装上且真能用」的证据。
+        "codegraph" => vec![
+            "files".to_string(),
+            "--json".to_string(),
+            "--no-metadata".to_string(),
+        ],
+        // provider CLI：`--help` 会真正加载入口与依赖（缺依赖即非零退出）。
+        _ => vec!["--help".to_string()],
+    }
 }
 
 #[async_trait::async_trait]
@@ -293,33 +354,47 @@ impl PostInstallProber for HealthRefreshProber {
     async fn refresh_after_install(
         &self,
         target: InstallTarget,
-        _install_bin_dir: Option<&Path>,
+        install_bin_dir: Option<&Path>,
     ) -> Result<PostInstallProbeOutcome, String> {
         let health = self.health.refresh(CancellationToken::new()).await;
         let row = row_for_wire(target.wire_label());
-        // provider 版本走 health 快照（PATH ∪ overlay 口径）。
-        let mut version = match &target {
-            InstallTarget::Provider(provider) => self
-                .health
-                .latest_diagnostic()
-                .entry(provider)
-                .and_then(|entry| entry.version.clone()),
-            InstallTarget::CodeGraph => None,
-        };
-        // 读不到版本 ⇒ 跑 `--version`（PATH 口径）。
+        // ① 版本**优先读 npm 包的 `package.json`**（不执行进程、更快更稳；
+        //    magpie `proc.Version` 同款）——读不到才回落 `--version`。
+        let mut version = row.and_then(|row| {
+            let package = row.npm_package?;
+            let prefix = install_bin_dir?.parent()?;
+            npm_package_json_version(prefix, package)
+        });
+        // ② provider 版本走 health 快照（PATH ∪ overlay 口径）。
+        if version.is_none() {
+            if let InstallTarget::Provider(provider) = &target {
+                version = self
+                    .health
+                    .latest_diagnostic()
+                    .entry(provider)
+                    .and_then(|entry| entry.version.clone());
+            }
+        }
+        // 读不到版本 ⇒ 跑 `--version`：先 PATH 口径，再**绝对路径**兜底
+        // （装到 PATH 之外时 PATH 口径必然 127）。
         if version.is_none() {
             let command = row.map(|row| row.command).unwrap_or("codegraph");
-            version = self.probe_version(command).await;
+            version = self
+                .probe_version(command, install_bin_dir, false)
+                .await
+                .or(self.probe_version(command, install_bin_dir, true).await);
         }
+        // 真实命令验证（独立于版本读取：版本可来自 package.json）。
+        let real_command_ok = self.probe_real_command(target, install_bin_dir).await;
         match (version, health) {
             (Some(version), _) => Ok(PostInstallProbeOutcome {
                 installed_version: Some(version),
-                real_command_ok: false,
+                real_command_ok,
             }),
             (None, Err(error)) => Err(error.to_string()),
             (None, Ok(_)) => Ok(PostInstallProbeOutcome {
                 installed_version: None,
-                real_command_ok: false,
+                real_command_ok,
             }),
         }
     }
@@ -351,6 +426,35 @@ pub fn npm_path_hint(command: &str, prefix: &Path, path_value: Option<&str>) -> 
     }
 }
 
+/// npm 包版本（读 `<prefix>/lib/node_modules/<pkg>/package.json` 的
+/// `version`；读不到返回 `None` ⇒ 回落 `--version`）。
+///
+/// 不执行进程（magpie `proc.Version` 同款）⇒ 更快更稳，也不会因为 CLI
+/// 本身跑不起来而读不到版本。
+pub fn npm_package_json_version(prefix: &Path, package: &str) -> Option<String> {
+    let manifest = prefix
+        .join("lib")
+        .join("node_modules")
+        .join(package)
+        .join("package.json");
+    let content = std::fs::read_to_string(manifest).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+/// 脚本安装源（Kimi）的 PATH 提示：官方脚本只改 shell rc ⇒ **运行中的
+/// 平台进程 PATH 不变** ⇒ 探测必然 127（根因 C）。文案点名安装目录。
+pub fn script_path_hint(command: &str, bin_dir: &Path) -> String {
+    format!(
+        "已安装到 {}；若 `{command}` 不在 PATH 上，请把 {} 加入 PATH 后重试",
+        bin_dir.display(),
+        bin_dir.display()
+    )
+}
+
 /// 修复命令（2.7③ / 2.8③）：npm 类带 `--prefix` 与 `--include=optional`
 /// （「装上但缺平台包」的修复句式，magpie `mendHint` 同款）；脚本类给官方
 /// 脚本命令。**永不 sudo**。
@@ -365,12 +469,30 @@ pub fn install_repair_command(row: &InstallSourceRow, registry: &str, prefix: &P
 }
 
 /// 安装产物的 bin 目录：npm 类 = `<prefix>/bin`；脚本类（Kimi）= **脚本实际
-/// 输出**的目录（登记条件以实际存在的文件为准，不依赖目录名假设）。
-fn install_bin_dir(row: &InstallSourceRow, prefix: &Path, script_stdout: &str) -> Option<PathBuf> {
+/// 输出**的目录，否则 `<home>/.kimi-code/bin`（**假设**，见 source_table）。
+///
+/// 登记条件以**实际存在的文件**为准：候选里取确实含该可执行文件的那个。
+fn install_bin_dir(
+    row: &InstallSourceRow,
+    prefix: &Path,
+    script_stdout: &str,
+    home_dir: Option<&Path>,
+) -> Option<PathBuf> {
     if row.npm_package.is_some() {
         return Some(prefix.join("bin"));
     }
-    script_installed_bin_dir(script_stdout, row.command)
+    let mut candidates = Vec::new();
+    if let Some(dir) = script_installed_bin_dir(script_stdout, row.command) {
+        candidates.push(dir);
+    }
+    if let Some(home) = home_dir {
+        candidates.push(kimi_install_bin_dir(home));
+    }
+    let containing = candidates
+        .iter()
+        .find(|dir| dir.join(row.command).exists())
+        .cloned();
+    containing.or_else(|| candidates.into_iter().next())
 }
 
 /// 从脚本输出里找安装产物路径（Kimi 官方脚本输出
@@ -481,6 +603,8 @@ pub struct InstallJobExecution {
     pub path_value: Option<String>,
     /// npm 自身全局前缀的探测（可选；`None` = 不探测）。
     pub npm_prefix_probe: Option<Arc<dyn NpmGlobalPrefixProbe>>,
+    /// 宿主 HOME（脚本类安装源落点推断用；`None` = 运行时读进程环境）。
+    pub home_dir: Option<PathBuf>,
     pub clock: Arc<dyn InstallClock>,
 }
 
@@ -514,8 +638,16 @@ impl InstallJobExecution {
                 working_dir,
                 Duration::from_secs(10),
             ))),
+            home_dir: std::env::var_os("HOME").map(PathBuf::from),
             clock: Arc::new(SystemInstallClock),
         }
+    }
+
+    /// 宿主 HOME（脚本类安装源落点；测试可注入）。
+    fn home_dir(&self) -> Option<PathBuf> {
+        self.home_dir
+            .clone()
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
     }
 
     /// 宿主 PATH（测试可注入；生产 = 进程环境）。
@@ -547,6 +679,35 @@ impl InstallJobExecution {
             .filter(|prefix| is_writable_dir(prefix) && prefix_bin_is_on_path(prefix, path_value));
         // ① visible（真实可写）→ ② npm 全局前缀 → ③ 兜底。
         choose_effective_prefix(visible.as_deref(), npm_global.as_deref(), &self.npm_prefix)
+    }
+
+    /// 装完提示（2.5 / 2.8③）：npm 类看 PATH 上生效的命令是不是本次安装的
+    /// 那个；**装上但缺平台包**（真实命令跑不起来）时补上可复制的修复命令。
+    fn path_hint_for(
+        &self,
+        row: &InstallSourceRow,
+        prefix: &Path,
+        bin_dir: Option<&Path>,
+        path_value: Option<&str>,
+        probe: Option<&PostInstallProbeOutcome>,
+    ) -> Option<String> {
+        let base = match (row.npm_package, bin_dir) {
+            (Some(_), _) => npm_path_hint(row.command, prefix, path_value),
+            // 脚本类（Kimi）：官方脚本只改 shell rc ⇒ 平台进程 PATH 不变 ⇒
+            // 必须提示把安装目录加进 PATH。
+            (None, Some(dir)) => Some(script_path_hint(row.command, dir)),
+            (None, None) => None,
+        };
+        if !probe.is_some_and(|outcome| !outcome.real_command_ok) {
+            return base;
+        }
+        let repair = install_repair_command(row, &self.registry, prefix);
+        Some(match base {
+            Some(hint) => format!(
+                "{hint}；装上了但真实命令跑不起来（可能缺平台包），请手动运行：{repair}"
+            ),
+            None => format!("装上了但真实命令跑不起来（可能缺平台包），请手动运行：{repair}"),
+        })
     }
 
     /// 装上但探针未过 ⇒ npm 类以 `--include=optional` **重试一次**（npm 会
@@ -625,19 +786,29 @@ impl InstallJobExecution {
             Ok(result) if result.exit_code == Some(0) && !result.timed_out && !result.cancelled => {
                 // 装后登记 overlay（**仅当**目录里确实有刚装好的可执行文件）
                 // ⇒ 平台自身的命令可见 PATH 立刻包含新装的 CLI（D1/D2）。
-                let bin_dir = install_bin_dir(row, &prefix, &result.stdout);
+                let bin_dir = install_bin_dir(
+                    row,
+                    &prefix,
+                    &result.stdout,
+                    self.home_dir().as_deref(),
+                );
                 register_install_bin_dir(bin_dir.as_deref(), row.command);
                 // overlay 登记**之后**再探测（平台自身探测立即可见）。
-                let detected = self
+                let probe = self
                     .prober
                     .refresh_after_install(target.clone(), bin_dir.as_deref())
                     .await
-                    .ok()
-                    .and_then(|outcome| outcome.installed_version);
-                let path_hint = match row.npm_package {
-                    Some(_) => npm_path_hint(row.command, &prefix, path_value.as_deref()),
-                    None => None,
-                };
+                    .ok();
+                let detected = probe
+                    .as_ref()
+                    .and_then(|outcome| outcome.installed_version.clone());
+                let path_hint = self.path_hint_for(
+                    row,
+                    &prefix,
+                    bin_dir.as_deref(),
+                    path_value.as_deref(),
+                    probe.as_ref(),
+                );
                 match detected {
                     Some(version) => {
                         let outcome = InstallJobOutcome {
