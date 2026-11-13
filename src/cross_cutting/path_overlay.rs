@@ -105,6 +105,78 @@ pub fn clear() {
     lock_registry().clear();
 }
 
+/// 登录 shell 探测输出的行标记（rc 文件 banner 污染由「只认标记行」兜底）。
+const SHELL_PROBE_MARKER: &str = "__aria_shell_probe__";
+
+/// 计划 2.12：随登录 shell PATH 一并取回的 agent 专属环境变量（本仓四家
+/// provider 实际消费的收敛清单；扩展只需在此追加）。
+const SHELL_PROBE_VARS: [&str; 3] = [
+    "PI_CODING_AGENT_DIR",
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+];
+
+/// 登录 shell 探测结果：PATH 原值 + agent 专属环境变量。
+#[derive(Debug, Default, Clone)]
+struct ShellEnvProbe {
+    path: Option<String>,
+    vars: std::collections::BTreeMap<String, String>,
+}
+
+fn shell_probe_state() -> &'static Mutex<ShellEnvProbe> {
+    static STATE: LazyLock<Mutex<ShellEnvProbe>> =
+        LazyLock::new(|| Mutex::new(ShellEnvProbe::default()));
+    &STATE
+}
+
+fn lock_shell_probe() -> std::sync::MutexGuard<'static, ShellEnvProbe> {
+    shell_probe_state()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 最近一次登录 shell 探测的 PATH 原值（未与 overlay 合并）。
+pub fn login_shell_path() -> Option<String> {
+    None
+}
+
+/// 最近一次登录 shell 探测回的 agent 专属环境变量（如 `PI_CODING_AGENT_DIR`）。
+pub fn shell_env(name: &str) -> Option<String> {
+    let _ = name;
+    None
+}
+
+/// 把探测到的 agent 专属环境变量补进子进程 env（计划 2.12）：平台已有的
+/// 值（进程 env 或调用方显式覆盖层）优先，缺失才补。返回待注入的键值对。
+pub fn shell_env_overrides(
+    environment: Option<&std::collections::BTreeMap<String, String>>,
+) -> Vec<(String, String)> {
+    let _ = environment;
+    Vec::new()
+}
+
+fn shell_env_overrides_with(
+    environment: Option<&std::collections::BTreeMap<String, String>>,
+    platform_env: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Vec<(String, String)> {
+    let _ = (environment, platform_env);
+    Vec::new()
+}
+
+fn parse_shell_probe_stdout(stdout: &str) -> ShellEnvProbe {
+    let _ = stdout;
+    ShellEnvProbe::default()
+}
+
+/// 测试用：直接安装一份探测结果（绕过真实登录 shell 探测）。
+#[cfg(test)]
+pub(crate) fn set_shell_probe_for_test(
+    path: Option<String>,
+    vars: Vec<(String, String)>,
+) {
+    let _ = (path, vars);
+}
+
 /// 登录 shell PATH 探测的硬上限（计划 2.4c：2s，超时不阻塞启动）。
 const LOGIN_SHELL_PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -477,6 +549,71 @@ mod tests {
             effective_path(Some("/usr/bin:/bin")),
             "/usr/bin:/bin",
             "清空后合并退化为 base 原值"
+        );
+    }
+
+    /// 计划 2.12：登录 shell 探测输出解析——只认标记行，PATH 与 agent 变量
+    /// 都取末次出现，空值跳过，banner 噪声行忽略。
+    #[test]
+    fn parse_shell_probe_output_extracts_path_and_agent_vars() {
+        let stdout = "zsh banner noise\n\
+                      __aria_shell_probe__PATH=/shell/path/a:/shell/path/b\n\
+                      __aria_shell_probe__PI_CODING_AGENT_DIR=/home/u/.pi/agent\n\
+                      __aria_shell_probe__CODEX_HOME=\n\
+                      __aria_shell_probe__CLAUDE_CONFIG_DIR=/home/u/.claude\n\
+                      trailing noise\n";
+        let probe = parse_shell_probe_stdout(stdout);
+        assert_eq!(probe.path.as_deref(), Some("/shell/path/a:/shell/path/b"));
+        assert_eq!(
+            probe.vars.get("PI_CODING_AGENT_DIR").map(String::as_str),
+            Some("/home/u/.pi/agent")
+        );
+        assert_eq!(
+            probe.vars.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/home/u/.claude")
+        );
+        assert!(
+            !probe.vars.contains_key("CODEX_HOME"),
+            "空值变量不得进入补入清单"
+        );
+    }
+
+    /// 计划 2.12：补入清单「平台已有值优先」——进程 env 或显式覆盖层已有
+    /// 的变量不补，缺失才补；getter 返回已安装的探测值。
+    #[test]
+    fn shell_env_overrides_skip_platform_owned_values() {
+        let _state = OverlayStateGuard::acquire();
+
+        set_shell_probe_for_test(
+            Some("/shell/path".to_string()),
+            vec![
+                ("PI_CODING_AGENT_DIR".to_string(), "/probe/pi".to_string()),
+                ("CODEX_HOME".to_string(), "/probe/codex".to_string()),
+            ],
+        );
+        assert_eq!(login_shell_path().as_deref(), Some("/shell/path"));
+        assert_eq!(
+            shell_env("PI_CODING_AGENT_DIR").as_deref(),
+            Some("/probe/pi")
+        );
+
+        // 平台进程 env 已有 CODEX_HOME(platform_env 返回 Some) ⇒ 不补。
+        let platform_env = |name: &str| {
+            (name == "CODEX_HOME").then(|| std::ffi::OsString::from("/host/codex"))
+        };
+        assert_eq!(
+            shell_env_overrides_with(None, platform_env),
+            vec![("PI_CODING_AGENT_DIR".to_string(), "/probe/pi".to_string())]
+        );
+
+        // 显式覆盖层已有 PI_CODING_AGENT_DIR ⇒ 也不补。
+        let environment = std::collections::BTreeMap::from([(
+            "PI_CODING_AGENT_DIR".to_string(),
+            "/explicit/pi".to_string(),
+        )]);
+        assert!(
+            shell_env_overrides_with(Some(&environment), platform_env).is_empty(),
+            "覆盖层已有的变量不得被探测值覆盖"
         );
     }
 }
