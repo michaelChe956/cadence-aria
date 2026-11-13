@@ -32,6 +32,12 @@ pub(in crate::web::workspace_ws_handler::run) enum FreshRoundAnchor {
     /// 当前 operation 已绑定真实物理轮（同 operation crash 重入）：直接返回该轮
     /// 的真实分类（Ready/Completed/Waiting），**绝不**新造 node/seq。
     Bound(ScRoundEntry),
+    /// 当前 operation 尚未进入可运行态（FreshReserved / 预约未完成 / 状态不一致）：
+    /// 真实 CAS 等待，**不得**回落普通 spawn 路径、不得落 Failed。
+    NotLaunched {
+        reason_code: &'static str,
+        detail: String,
+    },
     /// 当前 operation 尚未绑定：沿用旧链身份，新 AuthorRun node + `max(ordinal)+1`。
     Fresh {
         original: ScFailureChainIdentity,
@@ -63,20 +69,33 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
     scope: &ScFailureScope,
     business_key: &str,
     provider: &ProviderName,
-) -> Result<Option<FreshRoundAnchor>, ScFailureEvidenceError> {
+) -> Result<FreshRoundAnchor, ScFailureEvidenceError> {
     const STEP: &str = "fresh_operation_sc_round_anchor";
     let session = engine.session();
     let Some(recovery) = session.lc_resume_recovery.as_ref() else {
-        return Ok(None);
+        return Ok(FreshRoundAnchor::NotLaunched {
+            reason_code: "sc_failure_fresh_operation_not_running",
+            detail: "显式 fresh 入口缺少 recovery 记录：不启动 provider（等 gateway 预约/prepare）"
+                .to_string(),
+        });
     };
     // 显式 fresh 只有**真实 FreshRunning** 才可能携带可 spawn 的物理身份：
     // FreshReserved（claim 已受理、prepare 未完成）不是 spawn 授权，Waiting/
     // Resolved 保持既有路径。预约/受理步骤仍由 gateway 完成，本锚只读。
     if recovery.state != LcResumeRecoveryState::FreshRunning {
-        return Ok(None);
+        return Ok(FreshRoundAnchor::NotLaunched {
+            reason_code: "sc_failure_fresh_operation_not_running",
+            detail: format!(
+                "显式 fresh 恢复状态为 {:?}（非 FreshRunning）：不启动 provider，等 gateway 完成预约/prepare",
+                recovery.state
+            ),
+        });
     }
     let LcRecoveryRunContext::ScAuthor { business, .. } = &recovery.run_context else {
-        return Ok(None);
+        return Ok(FreshRoundAnchor::NotLaunched {
+            reason_code: "sc_failure_fresh_anchor_unavailable",
+            detail: "显式 fresh 恢复的 run_context 不是 SC author：不启动 provider".to_string(),
+        });
     };
     // 旧 original-node 锚：run_context business 与 failed_provider_node_id 必须一致。
     let business_original = business.original_node_id.as_deref().unwrap_or_default().trim();
@@ -191,7 +210,7 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
             failure.step = STEP.to_string();
             failure
         })?;
-        return Ok(Some(FreshRoundAnchor::Bound(entry)));
+        return Ok(FreshRoundAnchor::Bound(entry));
     }
     // 未绑定：新物理轮序号 = 链内真实最大 ordinal + 1（checked）。
     let max_ordinal = rounds
@@ -205,7 +224,7 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
             "旧链轮序号无法推进（零启动）",
         )
     })?;
-    Ok(Some(FreshRoundAnchor::Fresh { original, ordinal }))
+    Ok(FreshRoundAnchor::Fresh { original, ordinal })
 }
 
 /// 原轮入场的唯一入口：node 选择 + 真实绑定 + 启动分类。
@@ -226,11 +245,8 @@ pub(in crate::web::workspace_ws_handler::run) async fn begin_sc_author_round_ent
     provider: &ProviderName,
     is_fresh_context: bool,
 ) -> Result<ScRoundEntry, SingleCandidateProviderRunError> {
-    let outcome = if is_fresh_context
-        && let Some(anchor) =
-            fresh_operation_sc_round_anchor(engine, lifecycle, scope, business_key, provider)?
-    {
-        match anchor {
+    let outcome = if is_fresh_context {
+        match fresh_operation_sc_round_anchor(engine, lifecycle, scope, business_key, provider)? {
             FreshRoundAnchor::Bound(entry) => Ok(entry),
             FreshRoundAnchor::Fresh { original, ordinal } => {
                 let node_id = engine.begin_work_item_plan_author_run().await;
@@ -243,6 +259,15 @@ pub(in crate::web::workspace_ws_handler::run) async fn begin_sc_author_round_ent
                     provider,
                     ordinal,
                 )
+            }
+            FreshRoundAnchor::NotLaunched {
+                reason_code,
+                detail,
+            } => {
+                // 显式 fresh 但当前 operation 尚未进入可运行态（FreshReserved /
+                // 预约未完成）：**不得**回落普通 spawn 路径，也不落 Failed——
+                // 真实 CAS 等待，等 gateway 完成预约/prepare。
+                return Err(wait_sc_author_launch(engine, reason_code, &detail).await);
             }
         }
     } else {
@@ -334,6 +359,39 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_ready_sc_round(
         raw,
         round: bound.round.clone(),
     })
+}
+
+/// 无物理轮绑定时的等待收口（显式 fresh 尚未可运行）：同一既有 CAS，
+/// 不伪造 round 身份、不落 Failed。
+pub(in crate::web::workspace_ws_handler::run) async fn wait_sc_author_launch(
+    engine: &mut WorkspaceEngine,
+    reason_code: &'static str,
+    detail: &str,
+) -> SingleCandidateProviderRunError {
+    let reason = format!("{reason_code}: {detail}");
+    if let Some(existing) = engine.session().lc_resume_recovery.as_ref()
+        && existing.state == crate::product::models::LcResumeRecoveryState::Waiting
+        && existing.reason_code == reason
+    {
+        return SingleCandidateProviderRunError::NativeSupersededWaiting {
+            reason_code: reason_code.to_string(),
+            superseded_native_session_id: existing.superseded_native_session_id.clone(),
+            recovery_id: existing.recovery_id.clone(),
+        };
+    }
+    match engine
+        .persist_single_candidate_author_superseded_wait(&reason)
+        .await
+    {
+        Ok(recovery) => SingleCandidateProviderRunError::NativeSupersededWaiting {
+            reason_code: reason_code.to_string(),
+            superseded_native_session_id: recovery.superseded_native_session_id.clone(),
+            recovery_id: recovery.recovery_id,
+        },
+        Err(error) => SingleCandidateProviderRunError::Message(format!(
+            "{reason_code}: 等待收口持久化失败（{error}）；{detail}"
+        )),
+    }
 }
 
 /// `Waiting` 分支的收口：真实 CAS 既有 `LcResumeRecoveryState::Waiting`（保 SC
