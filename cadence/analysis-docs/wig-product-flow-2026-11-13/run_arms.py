@@ -2128,6 +2128,33 @@ def _pop_issue_input(args):
     return _pop_option(args, "--issue-input", "WIG_ISSUE_INPUT_FILE")
 
 
+def _parse_id_list(value, flag):
+    """`a,b,c` 或 JSON 数组 `["a","b"]` → list[str]（保序、去空白、拒重复）。
+
+    只做格式解析；id 本身是否属于当前 selection 上界由产品在 generate 入口拒
+    （validate_requested_aggregate_scope），装置不猜、不自动补 id。
+    """
+    raw = (value or "").strip()
+    if not raw:
+        return []
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise SystemExit("%s 的 JSON 数组不合法：%s" % (flag, e))
+        if not isinstance(parsed, list) or \
+                not all(isinstance(x, str) for x in parsed):
+            raise SystemExit("%s 的 JSON 必须是字符串数组" % flag)
+        ids = [x.strip() for x in parsed if x.strip()]
+    else:
+        ids = [x.strip() for x in raw.split(",") if x.strip()]
+    dupes = sorted({x for x in ids if ids.count(x) > 1})
+    if dupes:
+        raise SystemExit("%s 含重复 id：%s（产品侧会拒绝；装置不静默去重）"
+                         % (flag, dupes))
+    return ids
+
+
 def main():
     global log_path
     issue_input_path, args = _pop_issue_input(sys.argv[1:])
@@ -2142,8 +2169,8 @@ def main():
                              "[--design-change-order a,b[,c]]")
         seed_out, binary = args[1], args[2]
         port = int(args[3]) if len(args) > 3 else 4709
-        involved = [x.strip() for x in involved_csv.split(",") if x.strip()]
-        change_order = [x.strip() for x in change_csv.split(",") if x.strip()]
+        involved = _parse_id_list(involved_csv, "--design-involved")
+        change_order = _parse_id_list(change_csv, "--design-change-order")
         complete_design(binary, seed_out, port,
                         involved=involved or None,
                         change_order=change_order or None)

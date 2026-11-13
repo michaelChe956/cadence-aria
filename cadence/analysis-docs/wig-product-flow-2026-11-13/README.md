@@ -289,10 +289,12 @@ python3 $D/run_arms.py --seed /tmp/aria-wig-pinned/after-07a0df79 \
 #     已冻结 design / 已存在 design spec ⇒ 拒绝第二次。
 #     多仓 Design 确认门要求 involved 非空（REQ-PLN-04），involved>1 还需
 #     change_order（REQ-PLN-05）；若 provider 没有自决，controller 显式给
-#     --design-involved a,b / --design-change-order a,b（不猜业务范围）。
+#     --design-involved a,b / --design-change-order a,b（逗号或 JSON 字符串数组
+#     均可；保序、不静默去重，id 必须在当前 selection 上界内，不猜业务范围）。
 python3 $D/run_arms.py --complete-design /tmp/aria-wig/out-seed \
   /tmp/aria-wig-pinned/after-07a0df79 4710 \
-  --design-involved <repo_id[,repo_id...]> --design-change-order <repo_id[,repo_id...]>
+  --design-involved <repo_id[,repo_id...]|'["repo_id",...]'> \
+  --design-change-order <repo_id[,repo_id...]|'["repo_id",...]'>
 
 # 2) 8 臂 ABBA（唯一变量 = 二进制；任一臂失败 ⇒ 退出码非 0）
 #    装置只按参数跑这 8 臂，不会自行追加 baseline/初始化 run。
