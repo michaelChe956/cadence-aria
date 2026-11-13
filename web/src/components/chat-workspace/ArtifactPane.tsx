@@ -341,7 +341,7 @@ function ScFailureRepairPackageView({ payload }: { payload: ScFailureRepairPacka
             {complete ? "证据完整" : "证据不完整"}
           </span>
         </div>
-        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs text-[var(--aria-ink-muted)]">
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-[var(--aria-ink-muted)]">
           <dt>终止类别</dt>
           <dd className="text-[var(--aria-ink)]">{payload.terminal_class}</dd>
           <dt>终止原因</dt>
