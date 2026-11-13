@@ -116,6 +116,7 @@ mod prompts;
 mod provider_drive;
 mod review;
 mod run_boundary;
+mod sc_failure_artifact_summary;
 mod session_state;
 mod single_candidate;
 pub(crate) mod single_candidate_structure_failure;
