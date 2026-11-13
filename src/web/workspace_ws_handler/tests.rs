@@ -42,6 +42,7 @@ mod provider_run_events;
 mod register_trust_entry;
 mod sc_failure_driver_fixture;
 mod sc_failure_package;
+mod sc_failure_prompt_sent;
 mod sc_teaching_source;
 mod single_candidate_ir_reredrive;
 mod single_candidate_lc_admission;
