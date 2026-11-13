@@ -1,4 +1,16 @@
 # Proposal
+## ⚠️ 处置声明（归档前落档 · 2026-11-13）
+
+本 change 以 `--skip-specs` 归档：**其 spec delta（MODIFIED REQ-WSC-17、ADDED REQ-TOP-07）不合并进主规格**（行为未实施）。
+
+| 要素 | 内容 |
+|---|---|
+| **事实** | 单候选 WorkItemPlan 评审的**唯一「有效必关闭」谓词** `requires_closure`（D1/D2，新建 `review/closure_policy.rs`）+ 七个消费面同口径（verdict 重开 / owner 再归一 / 必关闭清单 / policy 分类 / 非 advisory 指纹 / 返修轮作者呈现 / 影响闭合）+ D4 两级判定 |
+| **现状** | **未实施**（0/29 工作包）。主 Plan 明确依赖 isolate 的版本化 scope 传递（`Plan:24`）；其 D9 增补 Plan（`WIG闭合资格反向投影增补`，5 Task / 23 Step）**硬依赖**本 change §1–§6 先行落地（`D9 Plan:18`）⇒ 二者均未开工 |
+| **归谁** | 集成 owner |
+| **建议落点** | **D9 的意图由 `repair-wig-fact-projections` 的 B1–B4 以窄口径承接**（落在 **REQ-WSC-12** 的**显式例外**：SC 会话有效投影下，「`severity=Suggestion` + category 明确非契约 + `class_hint=Repairable`」的 finding 不进必关闭清单、不驱返修）。**全口径七面闭合、许可两级分类、契约类 suggestion 重开**留待后续 change，届时**不得**把今天的窄口径投影当作已完成的全口径 |
+| **边界** | **D1–D8 有意重开被误标为建议的真实契约缺口 ⇒ 可能增加人工门**（更严闭合的另一面）。⇒ **不得**把其收益写成「减少人工门」或「提高自动完成率」；今天的窄例外亦**不**放宽契约类、缺 category、must_fix/blocking、机械 Error 与原生 NeedsHuman |
+
 
 ## Why
 

@@ -1,4 +1,16 @@
 # Proposal: 教学重驱反馈完备化（SC compile 结构失败的载荷增强）
+## ⚠️ 处置声明（归档前落档 · 2026-11-13）
+
+本 change 以 `--skip-specs` 归档：**其 spec delta（ADDED REQ-WSC-32）不合并进主规格**（行为未实施）。
+
+| 要素 | 内容 |
+|---|---|
+| **事实** | SC compile 结构失败教学重驱这一次机会「喂什么」补齐：A1 回灌诊断改五段式 / A2 重驱 prompt 的结构契约三件套 / A3 `[previous_source]` 回灌 / A4 预算耗尽后的「SC 结构失败诊断包」；**零新增模型调用** |
+| **现状** | **未实施**（0/30 工作包）。已定位的真实机制：`CompilerDiagnostic` 已带 `field`（缺失字段名）与 `repair_example`（正确形状），但教学投影 `single_candidate_compile_preflight.rs:71-79` 只留 `code:line:message` ⇒ 重驱作者轮**工具调用 0 次、纯盲改** ⇒ 终局 `failed`、无人接手（实测 `missing_section` 类 3/8） |
+| **归谁** | 集成 owner |
+| **建议落点** | **REQ-WSC-32 的所有权移交给 `repair-wig-fact-projections`**：其 **A1**（预算内事实不丢字段 + 有界投影 + 省略记账 + 审计留存）纳入该 requirement；**A3（完整失败 source 自含教学）与 A4（终局失败修复包）明日独立续做**，次序为 **A4 先**（提供可靠的 source/hash/ref 留存）**→ A3 再**（用可靠 ref 构造自含教学） |
+| **边界** | A1 只恢复「**错在哪里、字段应是什么形状**」，**不是完全非盲、也不是自含教学**；完整上一版 source 属 A3、`failure_source_ref` 现恒 None。**A2「结构契约三件套大包」与 A1 高度重叠**（合法集单一来源已在校验器侧 `grammar::STRUCTURED_SECTIONS` / `FREE_TEXT_SECTIONS`），今日不做。**A4 的真正 SC 接点**在 `run/single_candidate.rs` 与 `structure_reredrive` 的现有记录函数，**不是**调研文档写的 `provider_drive.rs:1032`（后者是通用 artifact 选择失败路径） |
+
 
 > 权威来源：主方案 `cadence/designs/2026-11-11_技术方案_WIG三缺陷与多仓事实供给修复_v1.0.md` §4.3（②的根因）、§5.1（包②完整设计）、§6.1（串行序）、§7.3（预算守恒）、§8（实施者事项）、§10.2（已结清项）。
 > 归属裁决：`cadence/designs-reviews/2026-11-09_裁决_WIG四change审阅问题处置_v1.0.md` §2.2（全局串行序）与 §3.7（compile 教学块迁出归属＝决策六）。

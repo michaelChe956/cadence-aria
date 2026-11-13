@@ -1,4 +1,16 @@
 # Proposal
+## ⚠️ 处置声明（归档前落档 · 2026-11-13）
+
+本 change 以 `--skip-specs` 归档：**其 spec delta（ADDED REQ-WSC-30 / REQ-WSC-31、MODIFIED REQ-TOP-04 / REQ-TOP-05）不合并进主规格**（行为未实施）。
+
+| 要素 | 内容 |
+|---|---|
+| **事实** | plan criterion 双前缀（`WIC-`/`AC-`）只读兼容 + 服务端 lineage 命名策略（`WicV1`/`LegacyPreserved`）CAS 冻结 + 三处命名域守卫 + 指纹代际 |
+| **现状** | **未实施**（0/32 工作包）。`work_item_plan_policy/classify.rs` / `fingerprint.rs` 的 `identity_for_finding` 版本传递**未落地** ⇒ 依赖它的 `close-contract-findings-before-pass` 主 Plan 前置亦未满足 |
+| **归谁** | 集成 owner |
+| **建议落点** | 下一批；**不得半迁移** —— 一旦引入新 ID 域，版本链（代际承载 / v2/v3 身份配方 / 消费面显式传版本 / scope 绑定）不可省。若要提前单独修 `forged_done_when` 误判，**须先裁定并修 Plan**，不得偷拆 WIC 教学 |
+| **边界** | `WIC-` 前缀**不编码「属于哪个 WI」** ⇒ 其他 WI 的 `WIC-*` 仍可被错误引用 ⇒ 命名域隔离与守卫能**减少混淆、阻止违规交付**，但「跨 WI 错误不再生成」是**概率性改善，不是结构性保证**；守卫保证「错误产物不被接收」，不保证「错误不被生成」 |
+
 
 > 权威来源：owner 已批准的决策报告
 > `cadence/designs-reviews/2026-11-08_决策_WIG六项owner裁决_v1.0.md` §5（决策五：WIC 命名域隔离 + 指纹代际）。

@@ -1,4 +1,16 @@
 # 提案：Claude SC author 显式 effort 冻结策略
+## ⚠️ 处置声明（归档前落档 · 2026-11-13）
+
+本 change 以 `--skip-specs` 归档：**其 spec delta（ADDED REQ-WSC-29、MODIFIED REQ-ENV-HOST-01、MODIFIED「明确 fresh 只换 native 会话」）不合并进主规格**（行为未实施，合并即宣称已交付）。
+
+| 要素 | 内容 |
+|---|---|
+| **事实** | SC 作者轮努力档位显式化：服务端内部冻结执行策略 `ProviderEffortConfig`（`policy_version`/`provider`/`author_effort` 三元组）+ 实际出口注入 + fresh 准入服务端核验；TTL 本期不启用 |
+| **现状** | **未实施**（0/46 工作包）。Task 1 的类型面/字段面/贯穿面**已写**（`models/sc_launch_policy.rs` 116 行 + `lifecycle_store/tests/sc_launch_policy_freeze_tests.rs` 247 行），**已 park 到 `wip/wig-seq4-t1`（提交 `1a1dd521`）**；8 个文件冻结，**不进入任何实施 lane 的 diff**，不随本归档件进入集成分支 |
+| **归谁** | 集成 owner |
+| **建议落点** | 下一批从 `wip/wig-seq4-t1` 接 Task 1 余项（补齐 17 处字面量构造点 `E0063`、跑绿、行数核验，`lifecycle_store/workspace.rs` 已 1730/1730 顶格 ⇒ 计划书的「净增 +2」必须改为**净零**），再走 Task 2–6；出口注入与 fresh 准入核验**不能半套上线** |
+| **边界** | **effort 冻结不是提速手段**：旧运行若本就是 high，冻结的边际收益为 0；既有实测已把装置级结果降级为方向性观察（n=2/档，无收敛性/质量差异）。⇒ **不得以「high 提速」作为必须立即做的论据**，也**不得**把宿主设置修改当作替代实现 |
+
 
 > 状态：**草案 —— owner 已批准决策三全部推荐**（见 `cadence/designs-reviews/2026-11-08_决策_WIG六项owner裁决_v1.0.md` §3.1–§3.5）。**本 change 只立项，不实施**：`tasks.md` 是待办清单，不是已完成记录。
 > 依据：决策报告 §3（effort 默认 high、独立内部承载、恢复冻结）、主方案 `cadence/designs/2026-11-08_技术方案_WIG生成加速与收敛性加固_v1.0.md` 的 G 工作包。

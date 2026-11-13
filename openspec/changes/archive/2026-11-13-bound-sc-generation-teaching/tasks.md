@@ -62,7 +62,7 @@
 - [x] 8.2 预算验收：一次 C 教学后断言 A=0、B=0、C 已消费 1、实际启动合计 2；不得把「`manual_repairs_used == 0`」单独称为红测（映射 REQ-WSC-28A；验证：四个数值同时断言）
 - [x] 8.3 故障与重放验收：同键重连、并发 claim、启动前后崩溃、Unknown 等待各有一条通过用例；source/context/prompt 漂移时实际启动为 0；旧占位不算实际启动；无 RepairOnce 时零额外；记一次 C 后 A 路径键不变（映射 REQ-WSC-28B、REQ-WSC-28C；验证：每种故障各有一条独立用例与明确期望值）
 - [x] 8.4 失败分流验收：分别注入流水写失败与账本写失败，证明一个不阻断、一个 fail-closed，且 best-effort 流水不被当作授权凭证（映射 REQ-WSC-25、REQ-WSC-28D；验证：两个注入用例的期望结果不同且都通过）
-- [ ] 8.5 归档门禁：`mechanicalize-plan-compile-repair` 的 MODIFIED REQ-WSC-09 完成 typed IR 与 structure 资格扩充之前，本 change 不得归档；REQ-WSC-28 的「资格以 WSC-09 为唯一清单」在该扩充落地前不得实施（映射 REQ-WSC-28；验证：本门禁与 design「归档硬门禁」及 Workflow follow-up 登记一致，未满足时归档被拒）
+- [x] 8.5 归档门禁（**已满足 · 2026-11-13**）：`mechanicalize-plan-compile-repair` 的 MODIFIED REQ-WSC-09 完成 typed IR 与 structure 资格扩充之前，本 change 不得归档；——**该前提已满足**：`mechanicalize-plan-compile-repair` 已先行归档为 `openspec/changes/archive/2026-11-13-mechanicalize-plan-compile-repair/`，其 delta 同步后主规格 REQ-WSC-09 描述段现含「资格 MUST 由 typed 判据决定：parse 语法类、事实完整的 typed lowering fault、四类 typed IR 诊断（unknown_done_when_ref、unknown_reviewer_check_ref、acceptance_criterion_without_reviewer_check、unknown_requirement_ref）与确定性结构拒收；数据库/基线/成员解析失败为 Operational 不获资格；新增类别 MUST 显式进入规格/typed 白名单。资格 MUST NOT 取决于 message 措辞；重驱 prompt MUST 渲染 typed 事实」⇒ REQ-WSC-28 的「资格以 WSC-09 为唯一清单」的实施前提随之满足。本 change 随后归档于 `openspec/changes/archive/2026-11-13-bound-sc-generation-teaching/`；归档后 `openspec validate --specs --strict` 全绿（81 passed, 0 failed），REQ-SG-05 描述段实测 497 字符（门禁 ≤500）。REQ-WSC-28 的「资格以 WSC-09 为唯一清单」在该扩充落地前不得实施（映射 REQ-WSC-28；验证：本门禁与 design「归档硬门禁」及 Workflow follow-up 登记一致，未满足时归档被拒）
 
 ## Workflow follow-up / 授权后
 

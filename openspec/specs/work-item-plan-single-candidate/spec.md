@@ -269,7 +269,7 @@ Work Item Plan 以「单候选计划事务」交付：LLM 与人只接触 markdo
 
 ### Requirement: prompt 分层职责（REQ-WSC-06）
 
-系统 SHALL 使 workitem author/reviewer prompt 仅承载产物规格（任务上下文、输出语法、边界约束、判例 few-shot），SHALL NOT 重复目标仓库已注入的通用行为教学（Superpowers/OpenSpec/项目规则）
+workitem author/reviewer prompt SHALL 仅承载产物规格（任务上下文、输出语法、边界约束、判例 few-shot），SHALL NOT 重复目标仓库已注入的通用行为教学。author 上下文 SHALL 由平台直接注入 plan 基线树可用路径清单（基线树事实直供），该清单 MUST NOT 占用固定规范面预算、MUST 计入上下文面预算。前轮 finding 状态 SHALL 由平台按内容身份机械复算后求交、去重并分区注入（重复判定不靠模型记忆）。
 
 #### Scenario: 弱模型借助判例避免已知矛盾
 
@@ -411,6 +411,46 @@ Work Item Plan 以「单候选计划事务」交付：LLM 与人只接触 markdo
 - **WHEN** reviewer 复评遇到同 identity 重现的 finding
 - **THEN** reviewer SHALL 依据该清单执行重复判定纪律（同 identity 重现须显式标注），SHALL NOT 依赖自由文本记忆
 
+#### Scenario: 越界路径回灌最近候选
+
+- **WHEN** 平台判定某验收标准引用的仓库内路径不存在于 plan 基线树
+- **THEN** 该 Error 级 finding 的 message SHALL 附**基线树中同前缀最近的现存路径**（并列时全部列出；无同前缀候选时如实说明无可用候选）；候选路径 MUST 取自同一棵基线树，MUST NOT 由平台臆造路径
+
+#### Scenario: 基线树事实直供
+
+- **WHEN** 平台构造单候选 author prompt（首轮与返修轮均适用）
+- **THEN** 平台 SHALL 在**作者轮启动前**从校验器同源的 plan 基线树（`git ls-tree -r --name-only refs/heads/<基线分支>`）装载可用路径清单并作为 L1 的一部分注入 prompt；清单 SHALL 按成员仓分组、成员仓优先；**基线树不可得（无仓 issue）时该段 SHALL 缺席**且零回归；**基线树装载失败 SHALL NOT 阻断作者轮**（既有 fail-closed 点仍在 Evaluate 阶段）
+
+#### Scenario: 基线树清单不得占用固定规范面预算
+
+- **WHEN** 注入基线树可用路径清单
+- **THEN** 清单 SHALL 落在**上下文面**（`WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES` = 32,000），MUST NOT 挤占固定规范面质量预算（`WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES` = 23,500，实测余量仅 18~40 B）；**两个预算常量 SHALL NOT 上调**；新增直供内容 SHALL 计入其所属预算面（固定规范面内容计入 23,500、上下文面内容计入 32,000），SHALL NOT 以「动态段」名义规避任一面；清单超上限时 SHALL 按成员仓保底截断，MUST NOT 使上下文面超预算
+
+#### Scenario: 注入前轮结构化清单
+
+- **WHEN** reviewer prompt（单候选复评）组装
+- **THEN** reviewer prompt（单候选复评）SHALL 注入前轮结构化 findings：每轮注入前一轮非 advisory findings 的 canonical identity（结构化 key/fingerprint）、category、required_action 与当前候选 revision；**并 SHALL 附本轮机械复算状态**（该 finding 在当前候选是否仍存在）**且按内容身份去重**（同一内容身份只保留一条，重复条目折叠为计数）
+
+#### Scenario: 重复判定不靠记忆
+
+- **WHEN** reviewer 复评遇到同 identity 重现的 finding
+- **THEN** reviewer SHALL 依据该清单执行重复判定纪律（同 identity 重现须显式标注），SHALL NOT 依赖自由文本记忆；**「该前轮 finding 在本轮是否仍存在」SHALL 以平台给出的复算分区事实为准**，SHALL NOT 由模型依据清单文本自行推断
+
+#### Scenario: 前轮 finding 状态求交按内容身份
+
+- **WHEN** 平台为复评 prompt 计算前轮 findings 的本轮状态
+- **THEN** 求交 SHALL 以**内容身份**（前轮 finding 的 `contract_field` 与当前候选机械报告 finding 的 `code`）为键，MUST NOT 以含 `message` 的指纹为键（机械报告 message 与评审输出 message 不同，按指纹求交恒不相交）；求交数据源 SHALL 为**当前候选**的机械报告（与评审输入同代）
+
+#### Scenario: 前轮 finding 分区注入
+
+- **WHEN** reviewer prompt（单候选复评）注入前轮 findings 清单
+- **THEN** 清单 SHALL 分为**待办**（当前候选机械报告仍存在同内容身份，附 `required_action` 与 `contract_field`）与**已关闭**（当前候选机械报告已无该内容身份，附关闭依据）两区；**已关闭区条目 MUST NOT 要求作者再次修改**，SHALL NOT 触发「无可改对象」式的重复上报
+
+#### Scenario: 前轮清单同身份去重
+
+- **WHEN** 前轮非 advisory findings 含多条同内容身份条目（同一机械码对多个 Work Item 各登记一次）
+- **THEN** 清单 SHALL 只保留一条并折叠为计数；MUST NOT 以多条重复条目呈现（实测同一 preflight 码曾产生 4 条完全相同的待办）
+
 ### Requirement: 旧协议退役与单路径收敛（REQ-WSC-08）
 
 REQ-WSC-07 退役门已按 `legacy-protocol-retirement` REQ-RET-01 全口径重测解锁后(2026-09-19 用户终裁 B:pi 全子项达标=协议质量实证;codex Confirmed 子项登记已知例外——系统性 provider 内容缺陷与协议无关,门文本据此显式修订,属 1c 裁决预留的「后续专项裁决」路径显式行使;**后续义务:codex/claude_code/kimi_code 全部 provider 最终 SHALL 全测通过(DEF-PVR-ALL),在义前不得视为 provider 面收官**),旧协议(generation-mode 决策、逐段确认消息、review_decision 双选项语法、`HumanConfirmDecision` 旧枚举及其消息族、SelectRevisionPath 族及其专属 DTO)SHALL 删除
@@ -477,17 +517,50 @@ REQ-WSC-07 退役门已按 `legacy-protocol-retirement` REQ-RET-01 全口径重�
 
 ### Requirement: generate 段编译语法失败的教学重驱（REQ-WSC-09）
 
-SC 候选编译（generate 段）失败时，系统 SHALL 在会话进入终态前提供恰好一次教学重驱：失败类别为可教学修复的 parse 语法类（至少含 missing_section、invalid_ears、invalid_work_item_id）时，以既有 code:line:message 错误回灌 author prompt 重驱一次；重驱后仍失败则按既有失败路径终态。每 candidate 至多一次额外驱动（既有上限不变）；非 parse 语法类失败不触发重驱、按既有路径处理。
+SC 候选编译（generate 段）失败时，系统 SHALL 在会话进入终态前提供恰好一次教学重驱，该机会以前置授权、合法 provider 与剩余机会为条件，混合 operational 集合 MUST NOT 获驱。资格 MUST 由 typed 判据决定：parse 语法类、事实完整的 typed lowering fault、四类 typed IR 诊断（unknown_done_when_ref、unknown_reviewer_check_ref、acceptance_criterion_without_reviewer_check、unknown_requirement_ref）与确定性结构拒收；数据库/基线/成员解析失败为 Operational 不获资格；新增类别 MUST 显式进入规格/typed 白名单。资格 MUST NOT 取决于 message 措辞；重驱 prompt MUST 渲染 typed 事实，仍失败按既有失败路径终态。每 candidate 总额外驱动 ≤1，既有上限不变。
 
 #### Scenario: invalid_ears 触发一次教学重驱
 
 - **WHEN** 候选编译产出 invalid_ears 且为该 candidate 首次编译失败
 - **THEN** 系统以行号+错误信息回灌 author 重驱一次；重驱交付通过编译则继续既有链路，仍失败则终态（不再二次重驱）
 
+#### Scenario: 事实完整的 lowering fault 获得一次重驱
+
+- **WHEN** 候选因携带字段名与期望形态的 typed lowering fault 编译失败，且为首次编译失败
+- **THEN** 系统 MUST 以 typed 事实回灌 author 重驱一次，MUST NOT 立即终态
+
+#### Scenario: 无 typed fault 的 lowering 失败仍不重驱
+
+- **WHEN** lowering 诊断不携带 typed fault，仅 message 含「缺少」等措辞
+- **THEN** 系统 MUST NOT 授予重驱资格，按既有终态路径处理
+
 #### Scenario: 重驱上限不被突破
 
 - **WHEN** 同一 candidate 的编译失败类别先后命中两个可教学类别
 - **THEN** 教学重驱总共仍至多一次，第二次失败直接按既有失败路径处理
+
+#### Scenario: parse 语法类按码表获驱
+
+- **WHEN** 候选编译产出 missing_section、invalid_ears、invalid_work_item_id 或 unknown_structured_key，且为该 candidate 首次编译失败
+- **THEN** 系统按既有 parse 教学链路以行号与错误信息回灌 author 重驱一次
+
+#### Scenario: 四类 typed IR 诊断获得重驱且载荷完整
+
+- **WHEN** 候选产出 `unknown_done_when_ref`、`unknown_reviewer_check_ref`、`acceptance_criterion_without_reviewer_check` 或 `unknown_requirement_ref` 之一，且每条携带 Work Item、task/check/criterion 定位、错误 ref、本 WI 合法集合或真实 spec 集合、原行（无行即「不可定位」）与所需字段形态
+- **THEN** 系统 MUST 以该 typed 载荷回灌 author 重驱一次；载荷不全或无原行时 MUST NOT 授予资格
+
+#### Scenario: operational 失败混入不获重驱
+
+- **WHEN** 失败集合含数据库、基线或成员解析等 Operational 失败，另含可教类别
+- **THEN** 系统 MUST NOT 以 `any(可教)` 放行，MUST NOT 授予重驱，按既有 Operational 路径处理
+
+#### Scenario: 未入白名单的类别不自动获权
+
+- **WHEN** 某失败 code 带可教前缀或 message 含「缺少」措辞，但未显式进入规格/typed 白名单且事实不完整
+- **THEN** 系统 MUST NOT 授予重驱资格，按既有失败路径处理
+
+<!-- 2026-07-31 owner 裁定「复杂内容先不做」：**本 change 只保留未交付条款**（四层处置 / typed lowering fault / 目标分支等价规范化 / 精确缺口 / prompt 体量闸门 / 教学重驱资格改为 typed 完备）。
+     本轮已交付条款已拆到 `fix-work-item-group-plan-parity` 归档：判定一致（REQ-WSC-23 ≡ REQ-WG-01，重复已删）、环诊断带来源（REQ-WSC-24）、尝试可序列观测（REQ-WSC-25）、owner 回显与一次答完（REQ-CG-08/09）、反查单一来源（REQ-WG-02）、可执行选项（REQ-WG-05）、修复指令携带选项与保护项（REQ-WSC-06 ≡ REQ-WG-06）、取值来源按会话类型唯一（REQ-WG-08）。 -->
 
 ### Requirement: existing/create 计划意图与停等（REQ-C1-PLAN-01）
 
@@ -817,7 +890,7 @@ SC Final Compile 的失败 MUST 以**完整**诊断 durable 落盘（不截断�
 
 ### Requirement: 候选编译类失败首次即提示 owner 并继续自动重写（REQ-WSC-21）
 
-候选自身无效类失败（至少 `final_compile_prepare_failed` / `final_compile_structure_rejected`）首次发生时，平台 MUST 立即向 owner 呈现醒目提示与重写要点（不等重写结果），MUST 同时按剩余预算**真正驱动** author 重写（复用既有机械返修通道，不新造状态机）。预算 MUST 是**author 重写次数预算**（初值 `max_manual_repairs`，门卡上 owner 看到的数字同一口径），**平台自动重写与 owner 反馈触发的重写扣同一个池**，每轮消耗 1；编译成功 MUST 清零。`max_repairs`（机械返修池）MUST NOT 被当作自动重写预算。
+候选自身无效类失败（至少 `final_compile_prepare_failed` / `final_compile_structure_rejected`）首次发生时，平台 MUST 立即向 owner 呈现醒目提示与重写要点（不等重写结果），MUST 同时按剩余预算**真正驱动** author 重写（复用既有返修路由通道，不新造状态机）。预算 MUST 是**author 重写次数预算**（初值 `max_manual_repairs`，门卡上 owner 看到的数字同一口径），**平台自动重写与 owner 反馈触发的重写扣同一个池**，每轮消耗 1；编译成功 MUST 清零**该候选编译链上「平台自动重写」这一段的已计费消费**（同一 logical gate 内已由 owner 反馈消费或已预留的额度 MUST NOT 因此被返还，按 REQ-HGC-01 的同门接续与 REQ-CG-02 的预留 / 结算 / 退款既有语义处理）。`max_repairs`（机械返修池）MUST NOT 被当作自动重写预算。
 
 #### Scenario: 第一次失败就出提示
 
@@ -843,6 +916,26 @@ SC Final Compile 的失败 MUST 以**完整**诊断 durable 落盘（不截断�
 
 - **WHEN** 失败稳定码不属于候选自身无效族（如 store/IO 类 operational 失败）
 - **THEN** 平台 MUST NOT 出现 `auto_rewrite` 字段，MUST NOT 声称已启动自动重写
+
+#### Scenario: 自动重写与反馈互扣同一余额
+
+- **WHEN** 平台自动重写已消耗 1 次 author 重写额度，且 owner 随后在同一 logical gate 内提交一次反馈
+- **THEN** 平台 MUST 从**同一个** author 重写次数预算中再扣 1 次（可用余额如实递减，如 3→2→1）；MUST NOT 为两者各保留一份互不相干的余额；MUST NOT 因 owner 反馈而使自动重写侧的可用额度被重置或另算一份
+
+#### Scenario: 余额只有一个权威事实
+
+- **WHEN** 平台查询 author 重写次数预算的可用余额
+- **THEN** MUST 只有**一个**权威余额（同一预算域、同一扣减序列）；MUST NOT 出现「自动重写侧余量」与「反馈侧余量」两个互不相干的数字；MUST NOT 由展示端对两个计数取 max / min / 相加推算余额；同一 command 重放 MUST NOT 重复扣减
+
+#### Scenario: 编译成功只清编译链上的自动重写消费
+
+- **WHEN** 候选编译成功
+- **THEN** 平台 MUST 清零该候选编译链上「平台自动重写」的已计费消费（其诊断计数随之归零）；MUST NOT 返还同一 logical gate 内已由 owner 反馈消费或已预留的门反馈额度；该门反馈额度 MUST 继续按 REQ-HGC-01（同一 logical gate 内 carry-forward）与 REQ-CG-02（预留 / 结算 / 退款）的既有语义处理
+
+#### Scenario: 平台自动重写不得消耗机械返修池
+
+- **WHEN** 平台因候选编译失败触发一轮 author 重写（平台自动重写）
+- **THEN** 该轮 MUST NOT 递增机械返修池的轮内计数（`repairs_used`）与会话观测计数；MUST NOT 因机械返修池已用尽而阻断平台自动重写；平台自动重写能否继续 MUST 只由 author 重写次数预算的可用余额决定
 
 ### Requirement: 同一依赖环重复出现必须提前停并升级提示（REQ-WSC-22）
 
@@ -884,7 +977,7 @@ SC Final Compile 的失败 MUST 以**完整**诊断 durable 落盘（不截断�
 
 ### Requirement: 候选生成尝试可序列观测（REQ-WSC-25）
 
-平台 MUST 以追加写记录每次候选生成与编译尝试，MUST NOT 只保留最近一次。每条记录 MUST 含尝试序号、source revision 引用、阶段、稳定码、typed 种类、环结构指纹、已应用的自动修复与等价规范化清单、处置结论。由此 MUST 可计算首次通过率、机械自修收敛率与模型重写次数。
+平台 MUST 以追加写记录每次候选生成与编译尝试，MUST NOT 只保留最近一次。每条记录 MUST 含尝试序号、source revision 引用、阶段、稳定码、typed 种类、环结构指纹、已应用的自动修复与等价规范化清单、处置结论。阶段 MUST 能区分 generate、parse、typed lowering、typed IR 校验与结构拒收；每条记录 MUST 关联同一 generation，若本次触发了 provider 启动则 SHALL 记录其 attempt 序号与 attempt key，使教学重驱与原调用出现在同一可追溯序列上，若本次未触发 provider 启动则 SHALL 显式记录「无 provider 启动」，MUST NOT 伪造关联。由此 MUST 可计算首次通过率、机械自修收敛率与模型重写次数。
 
 #### Scenario: 连续失败可逐次追溯
 
@@ -895,6 +988,11 @@ SC Final Compile 的失败 MUST 以**完整**诊断 durable 落盘（不截断�
 
 - **WHEN** 追加记录时发生写入错误
 - **THEN** 平台 MUST 把该错误记入运行日志，MUST NOT 因此使候选生成或确认失败
+
+#### Scenario: 阶段与 attempt 关联可追溯
+
+- **WHEN** 同一 generation 发生原调用与一次教学重驱，且失败阶段跨越 parse 与 typed IR
+- **THEN** 平台 MUST 能在同一流水序列上列出两个 attempt 各自的阶段、稳定码、source 引用与处置结论，MUST NOT 把两者合并为一条无法区分阶段的记录
 
 ### Requirement: 已收口的人工门卡不得再以行动号召形态呈现（REQ-WSC-26）
 
@@ -973,3 +1071,104 @@ SC Final Compile 的失败 MUST 以**完整**诊断 durable 落盘（不截断�
 - **WHEN** store 存在与本卡 `turn_id` 匹配的 open / busy / awaiting_confirm `humanGateTurn`，或活动节点缺失、非 `active`、类型不是 `author_run` / `reviewer_run`，或 `active_run_id` 为空
 - **THEN** 在途态选择器 SHALL 为空，门卡 SHALL 按既有路径渲染，行为不变
 - **AND** 已知边界：`active_run_id` 为进程内字段，服务进程重启后为空，重启丢失的在途 turn 由既有恢复链收口，不属于本 requirement
+
+### Requirement: generate 段教学重驱的统一授权窗口（REQ-WSC-28）
+
+SC generate 段的教学重驱 SHALL 绑定原生成 run/reservation/phase，并使用 REQ-SG-05 的 SC 初轮载体。资格 SHALL 以 REQ-WSC-09 为唯一清单：parse 语法、事实完整的 typed lowering、事实完整的 typed IR 校验和确定性结构拒收均只可消费该同一窗口；MUST NOT 因失败阶段、诊断数量、provider 节点变化或类别变化建立独立机会。mixed Unknown/Operational、事实不完整、权限/上下文/基线不可证明的失败 MUST NOT 授予教学重驱。
+
+同一候选生成链 SHALL 以原生成授权身份为锚，而非以重驱后新 source hash 为锚；每 candidate 至多一次额外教学驱动。只有已批准且耐久绑定的 RepairOnce 才可使用原调用之外的一个物理机会，原调用在内最多两次；无批准时最多一次。原窗口中的运行恢复已使用第二次物理机会时，教学重驱 MUST NOT 再产生第三次。
+
+#### Scenario: 跨类别不乘法
+
+- **WHEN** 同一生成链 attempt1 命中 parse/IR，attempt2 又命中 structure，或顺序相反
+- **THEN** 不产生第三次启动，不新开 structure 槽，按 typed 工程故障停止并保持合法 refs
+
+#### Scenario: 业务或运行错误不借教学
+
+- **WHEN** 失败集合含 Operational/Unknown、基线读取失败、授权缺失或缺少必要 typed 事实
+- **THEN** 零额外 author 调用；按已有等待/失败面回显真实原因，不把其渲染成模型可修语法错误
+
+#### Scenario: 窗口只在初轮新授权建立
+
+- **WHEN** 初轮新授权建立教学窗口后，A 或 B 的合法接力（机械返修、author 重写/反馈）再次进入生成链
+- **THEN** 教学窗口 MUST NOT 被重建或重开；A/B 接力仍消费各自的 repair/turn 载体，不把 handler 再次进入当成新初轮
+
+### Requirement: 通道 C 的独立有界预算归属（REQ-WSC-28A）
+
+通道 C SHALL 是独立有界的生成教学机会，不消耗评审机械池 `max_repairs`，不消耗 author 重写/反馈池 `max_manual_repairs`；MUST NOT 增加 `repairs_used`、`manual_repairs_used` 或伪造用户 turn/hold/receipt。该归属不改变 A/B 池原有触发域、余额或计费语义，也不得由 A/B 池余额为 C 的第三次调用兜底。
+
+#### Scenario: 一次教学不扣 A/B 池余额
+
+- **WHEN** 通道 C 消费了唯一一次教学重驱机会并产生一次真实启动
+- **THEN** 评审机械池 `max_repairs` 与 author 重写/反馈池 `max_manual_repairs` 的已用计数均不递增，不产生用户 turn/hold/receipt；该次教学自身的窗口消费计数递增且实际启动合计为 2
+
+### Requirement: 教学机会的原子 claim 与耐久绑定（REQ-WSC-28B）
+
+每次机会 SHALL 在任何外部启动前原子 claim，耐久绑定 authorization kind、原 generation/node/run 身份、业务请求及材料摘要、失败 source 引用与 hash、context digest、允许修改闭包、机器指令 digest、完整 prompt 引用与 digest、attempt key、物理上限与冻结执行策略摘要（通用字段，值由 explicit-sc-author-effort 填写）。初次调用尚无候选 source 时 SHALL 明确记录该事实并绑定原请求/材料，MUST NOT 伪造候选引用；重驱前失败原文与其 hash 必须可验证。授权、材料、上限或持久 claim 不可证明时 MUST 零额外调用并显式系统故障。RepairOnce 批准状态 SHALL 由初轮新授权在**建立窗口的同一事务内**核验并冻结，随窗口持久化，MUST NOT 因部署升级、重连、恢复、显式 fresh 或改档而变化，MUST NOT 事后补造。
+
+#### Scenario: 旧记录不可补造授权
+
+- **WHEN** 历史会话只有旧 `started` 占位或没有可证明的原授权/窗口
+- **THEN** 读取历史不产生授权，零额外调用并说明证据缺失，不从计数为零推断存在机会
+
+#### Scenario: claim 不可证明即零额外调用
+
+- **WHEN** 授权、材料、上限或持久 claim 中任一项不可证明
+- **THEN** 平台 MUST 零额外调用并显式系统故障，MUST NOT 以「尚未记账」推断仍有剩余机会
+
+#### Scenario: 历史样本不得补造 grant 与 actual-start
+
+- **WHEN** 读取历史旧样本且缺少 grant 或实际启动证据
+- **THEN** MUST NOT 事后补造 grant 或 actual-start 记录；缺失按证据缺失处理，零额外调用
+
+#### Scenario: 批准在窗口建立时一次核验并冻结
+
+- **WHEN** 初轮新授权在同锁/CAS 下建立教学窗口，且原授权可证明、provider 路径合法、剩余物理机会 ≥1、失败事实完整
+- **THEN** 窗口 SHALL 记录 RepairOnce 批准状态为「已批准」并冻结批准规则版本，物理上限为「原调用在内最多两次」；该结论 MUST NOT 因部署升级、重连、恢复、显式 fresh 或改档而改变
+
+#### Scenario: 核验任一不成立即未批准且零额外调用
+
+- **WHEN** 窗口建立时原授权不可证明、provider 路径不具备合法观察/准入、剩余物理机会为 0，或失败事实不完整
+- **THEN** 批准状态 SHALL 为「未批准」、物理上限为「原调用在内最多一次」，MUST 零额外调用并显式系统故障，MUST NOT 以「尚未记账」推断仍有剩余机会
+
+### Requirement: 教学重驱的 claim 与真实启动分账（REQ-WSC-28C）
+
+claim 与 actual start SHALL 分账。该 attempt 的实际启动 MUST 写入既有 provider-start ledger（以 launch 身份为键）并携带 attempt 键关联，可关联真实 provider/run 与启动证据；MUST NOT 为同一次启动另插第二条记录。预留占位、调用前时间戳、WS 事件及旧 `started=true` MUST NOT 冒充真实启动。外部结果 Unknown 时 SHALL 沿原等待/对账，不自动重播。新 source revision、新 native 会话、重连、恢复及同请求重放 MUST NOT 重置窗口。所有允许启动仍须经过原 gateway admission/full fingerprint；显式 fresh 保留原授权/窗口/冻结输入，不获取新 RepairOnce。
+
+#### Scenario: IR 拒收使用唯一额外机会
+
+- **WHEN** 原调用产生事实完整的 typed IR 失败，原生成授权批准 RepairOnce，尚有一个剩余物理机会
+- **THEN** 平台以完整失败 source、typed 定位和允许修改闭包 claim attempt2，原 author 重驱一次，形成两个真实 start 证据；C 消费一次，A/B 池均不扣
+
+#### Scenario: 同键重放与不确定启动
+
+- **WHEN** claim 后崩溃、启动回执未知、重连重投或显式 fresh
+- **THEN** 读取同一 durable 窗口；已启动不重播、Unknown 等待；确定未启动才可在原 key/授权下恢复合法动作，不新增预算或物理机会
+
+### Requirement: 教学尝试流水按 attempt 关联（REQ-WSC-28D）
+
+候选完整输出及每次 compile/IR/structure 判定 SHALL 按 REQ-WSC-25 追加可追溯流水，关联同一 generation 与 provider attempt，包含 source ref/hash、阶段、稳定码、typed 种类、环指纹、规范化/修复事实和处置结论。原始输出无法形成 source 时 SHALL 明确记录缺失原因，不伪造引用。流水只用于审计/度量，不作为启动许可；流水写失败按 WSC-25 记日志且不阻断，授权/ledger 的持久执法失败则按 SG-05 停止或进入 Unknown 等待，二者不得混用。
+
+#### Scenario: 流水与启动账本失败处理不同
+
+- **WHEN** WSC-25 流水追加失败，或者 SG-05 claim/实际启动记录持久化失败
+- **THEN** 前者记运行日志且不阻断；后者不得继续无账启动/重试，已发生外部动作按真实证据进入 Unknown/补偿，不伪装未启动
+
+### Requirement: 第二次交付失败后的停止与越权处置（REQ-WSC-28E）
+
+第二次交付仍失败或出现修复范围越权时 MUST 停止该生成自动链、保留 last-valid refs 与失败历史，MUST NOT 提升坏 candidate、发起 review/confirm 或旁路至另一自动重写入口。后续只有真实新业务授权可按其既有合同继续，MUST NOT 由平台自动制造新 turn、candidate 或 generation 来补机会。本条仅适用于 **generate 段**原生成链的第二次交付；**门段** `final_compile_*` 候选编译类失败不属于本条，其自动重写按 REQ-WSC-21 既有合同处理，REQ-WSC-21 的触发域不因本条收窄或扩张。「修复范围越权」的判据新码 `repair_scope_violation` 由裁决 §7 的 C 包交付，C 包落地前该判据不可判定。
+
+#### Scenario: 第二次仍失败即停止
+
+- **WHEN** 唯一教学机会已消费且第二次交付仍未通过编译或仍未满足结构判据
+- **THEN** 平台停止该生成自动链并保留 last-valid refs 与失败历史；不产生第三次启动、不借 A/B 池余额、不自动制造新 turn 或 candidate 继续
+
+#### Scenario: 门段候选编译失败仍按 REQ-WSC-21 驱动重写
+
+- **WHEN** 门段 `final_compile_*` 候选编译类失败发生
+- **THEN** 其自动重写按 REQ-WSC-21 既有合同处理（提示 owner、扣 author 重写次数预算），本条停止语义不适用于该门段失败
+
+#### Scenario: 越权判据由 C 包交付（占位）
+
+- **WHEN** 修复范围越权判据（新码 `repair_scope_violation`）尚未由裁决 §7 的 C 包交付
+- **THEN** 该越权分支在 C 包落地前不可判定，本条不据此产生可验收断言；第二次交付失败的停止语义不受此占位影响
