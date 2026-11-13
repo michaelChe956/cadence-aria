@@ -18,7 +18,9 @@ import type {
 // watch 候选（REQ-UI37-07）= 活跃集合 {open, running, waiting_for_human, confirmed, change_requested, stopped_needs_human}。
 // 排除项:failed/terminated 为终态,不占 K 槽,历史卡壳走 K 外降级语义;blocked_provider_unavailable 为供给方
 // 临时不可用(非会话卡壳、无可交互动作),同样不占 K 槽。
-const WATCHED_SESSION_STATUSES: ReadonlySet<WorkspaceSessionSummary["status"]> = new Set([
+// 该集合同时作为「会话是否有进行中事实」的判定口径（观察器空闲退避复用，
+// 不另立第二套活跃语义）。
+export const WATCHED_SESSION_STATUSES: ReadonlySet<WorkspaceSessionSummary["status"]> = new Set([
   "open",
   "running",
   "waiting_for_human",
@@ -179,7 +181,8 @@ export function createObserverController(
               snapshots.set(sessionId, state);
               notifyRecordsChanged();
               // P3（REQ-WIGA-07）：durable 业务 snapshot 帧到达——只作合并
-              // 刷新的唤醒（ping/pong 走 onFrame 不触发），事实从 REST 取。
+              // 刷新的唤醒，事实从 REST 取；ping/pong 等未带来状态变化的
+              // 帧只走 onFrame，不触发本回调。
               options.onSnapshotHint?.();
             }
           },
@@ -373,8 +376,16 @@ function createWorkspaceObserverSocket(
         state = observerStateFromSessionState(message as WorkspaceSessionStateMessage);
         callbacks.onSnapshot(state);
       } else if (state) {
-        state = reduceObserverMessage(state, message);
-        callbacks.onSnapshot(state);
+        const next = reduceObserverMessage(state, message);
+        // P1（无限轮询修复）：pong/未识别帧走 reducer default 分支，原样返回
+        // 同一引用——无实质状态变化，不上抛快照、不触发 hint（ping/pong 只经
+        // onFrame 记连接活跃）。reducer 的契约是「变更分支一律返回展开拷贝
+        // （新引用）、无变更分支（default / turn_id 不匹配）返回原引用」，
+        // 因此以 reducer 输出引用是否变化判定内容变化，不会漏报真实变化。
+        if (next !== state) {
+          state = next;
+          callbacks.onSnapshot(state);
+        }
       }
     } catch {
       // observer 仅消费可识别帧，畸形帧不能影响当前工作区连接。
