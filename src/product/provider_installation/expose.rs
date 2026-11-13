@@ -16,6 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use super::effective_prefix::{canonicalize_or_keep, is_writable_dir, same_dir};
+use super::source_table::row_for_wire;
 use crate::cross_cutting::path_overlay;
 
 /// HTTP 错误码（与 handler 的 `{code, message}` 面对齐）。
@@ -63,9 +64,29 @@ pub struct ExposeError {
 
 /// 把 `target`（wire 标识，如 `claude_code`）已安装的 CLI 暴露到用户
 /// 终端 PATH（生产入口；安装与更新共用，任意已安装版本可触发）。
+///
+/// Windows 本轮不支持（不引入新依赖）：明确报错，不静默降级。
 pub fn expose_to_terminal_path(target: &str) -> Result<ExposeOutcome, ExposeError> {
-    let _ = target;
-    todo!()
+    #[cfg(windows)]
+    {
+        let _ = target;
+        return Err(ExposeError {
+            code: EXPOSE_UNSUPPORTED_PLATFORM,
+            message: "当前平台不支持把 CLI 暴露到终端 PATH（Windows 本轮不支持）".to_string(),
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        // 未知 wire 标识（含 fake）按「未安装/未知对象」拒绝；端点侧已先
+        // 用 `InstallTarget::parse_wire` 过滤，这里兜底。
+        let Some(row) = row_for_wire(target) else {
+            return Err(ExposeError {
+                code: EXPOSE_TARGET_NOT_INSTALLED,
+                message: format!("未知安装对象：{target}"),
+            });
+        };
+        expose_with_query(&production_query(row.command))
+    }
 }
 
 /// seam 核心：按 [`ExposeQuery`] 找已安装二进制 → 依序考察候选目录 →
@@ -74,16 +95,210 @@ pub fn expose_to_terminal_path(target: &str) -> Result<ExposeOutcome, ExposeErro
 /// ③ 目录内无同名残留（有同名且已指向同一目标 ⇒ 视为已暴露）。
 /// 全部候选不合格 ⇒ 汇总各自原因返回（不静默、不降级）。
 pub fn expose_with_query(query: &ExposeQuery) -> Result<ExposeOutcome, ExposeError> {
-    let _ = query;
-    todo!()
+    // 1. 找已安装二进制（overlay → 登录 shell PATH → 已知落点，由查询
+    //    给出顺序）；找不到 ⇒ 「未安装，无法暴露」。
+    let installed = find_installed(query).ok_or_else(|| ExposeError {
+        code: EXPOSE_TARGET_NOT_INSTALLED,
+        message: format!(
+            "未找到已安装的 `{}`（已查 PATH overlay、登录 shell PATH 与常见安装落点）；请先安装再暴露",
+            query.command
+        ),
+    })?;
+
+    // 2. 登录 shell PATH 快照不可用（服务刚启动 ≤2s 或探测失败）时无法
+    //    证明任何目录「在终端 PATH 上」⇒ 明确让用户稍后重试，不瞎猜。
+    if query.login_path_dirs.is_empty() {
+        return Err(ExposeError {
+            code: EXPOSE_NO_CANDIDATE_DIR,
+            message: format!(
+                "登录 shell PATH 尚未探测完成（服务启动后 2 秒内或探测失败），无法确认安全的暴露目录；请稍后重试（已安装于 {}）",
+                installed.display()
+            ),
+        });
+    }
+
+    let mut failures: Vec<String> = Vec::new();
+    for dir in &query.candidate_dirs {
+        // ① 确实在登录 shell PATH 上（目录成员语义，规范化比较）。
+        if !on_login_path(dir, query) {
+            failures.push(format!("「{}」不在登录 shell PATH 上", dir.display()));
+            continue;
+        }
+        if !dir.is_dir() {
+            failures.push(format!("「{}」目录不存在", dir.display()));
+            continue;
+        }
+        // ② 真实可写（mode 预筛 + 写入探测，复用 effective_prefix 语义）。
+        if !is_writable_dir(dir) {
+            failures.push(format!("「{}」真实不可写（写入探测失败）", dir.display()));
+            continue;
+        }
+        // ③ 无同名残留；有同名且已指向同一目标 ⇒ 视为已暴露，直接成功。
+        let link = dir.join(&query.command);
+        if link_exists(&link) {
+            if resolves_to(&link, &installed) {
+                return Ok(ExposeOutcome {
+                    command: query.command.clone(),
+                    dir: dir.clone(),
+                    target: installed,
+                    already_exposed: true,
+                });
+            }
+            failures.push(format!(
+                "「{}」已有同名残留 {}（不指向本次安装目标）；为避免覆盖用户文件已跳过",
+                dir.display(),
+                link.display(),
+            ));
+            continue;
+        }
+        // 动作：建软链 <dir>/<command> → 已安装二进制（只建这一个软链）。
+        if let Err(error) = create_symlink(&installed, &link) {
+            failures.push(format!("「{}」创建软链失败（{error}）", dir.display()));
+            continue;
+        }
+        // 事后重验：目录确在登录 shell PATH 上且软链可解析到目标；失败
+        // ⇒ 只清理本次新建的软链（不动用户其它文件）并如实报错。
+        if !on_login_path(dir, query) || !resolves_to(&link, &installed) {
+            let leftover = match std::fs::remove_file(&link) {
+                Ok(()) => String::new(),
+                Err(error) => format!(
+                    "；清理失败软链 {} 失败（{error}），可手动删除",
+                    link.display()
+                ),
+            };
+            return Err(ExposeError {
+                code: EXPOSE_VERIFY_FAILED,
+                message: format!(
+                    "软链 {} 建立后重验失败（目录不在登录 shell PATH 上或软链不可解析）{leftover}",
+                    link.display()
+                ),
+            });
+        }
+        return Ok(ExposeOutcome {
+            command: query.command.clone(),
+            dir: dir.clone(),
+            target: installed,
+            already_exposed: false,
+        });
+    }
+
+    // 3. 所有候选都不合格 ⇒ 列出候选与各自原因（可行动）。
+    Err(ExposeError {
+        code: EXPOSE_NO_CANDIDATE_DIR,
+        message: format!(
+            "没有可用的暴露目录（已安装于 {}）：{}",
+            installed.display(),
+            failures.join("；")
+        ),
+    })
 }
 
 /// 生产查询构建：overlay 登记目录（启动期已并入登录 shell PATH 上实际
 /// 存在的目录）+ 登录 shell PATH 快照 + 已知落点；候选顺序
 /// `~/.local/bin` → `~/bin` → 登录 shell PATH 上其它存在目录。
 fn production_query(command: &str) -> ExposeQuery {
-    let _ = command;
-    todo!()
+    let overlay_dirs = path_overlay::snapshot();
+    let login_path_dirs: Vec<PathBuf> = path_overlay::login_shell_path()
+        .as_deref()
+        .map(split_path_dirs)
+        .unwrap_or_default();
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+
+    // 已安装二进制搜索：overlay 登记（含启动期并入的登录 shell 目录）
+    // → 登录 shell PATH → 已知落点。
+    let mut install_search_dirs = overlay_dirs;
+    extend_unique(&mut install_search_dirs, login_path_dirs.iter().cloned());
+    if let Some(home) = &home {
+        extend_unique(
+            &mut install_search_dirs,
+            std::iter::once(home.join(".npm-global/bin")),
+        );
+    }
+    extend_unique(
+        &mut install_search_dirs,
+        std::iter::once(PathBuf::from("/usr/local/bin")),
+    );
+
+    // 候选：~/.local/bin → ~/bin → 登录 shell PATH 上其它存在目录（按
+    // PATH 顺序）；「确实在登录 shell PATH 上」由 expose_with_query 的
+    // 准入条件①再验（home 候选不在 PATH 上时会被拒并说明）。
+    let mut candidate_dirs = Vec::new();
+    if let Some(home) = &home {
+        candidate_dirs.push(home.join(".local/bin"));
+        candidate_dirs.push(home.join("bin"));
+    }
+    for dir in &login_path_dirs {
+        if dir.is_dir() {
+            extend_unique(&mut candidate_dirs, std::iter::once(dir.clone()));
+        }
+    }
+
+    ExposeQuery {
+        command: command.to_string(),
+        install_search_dirs,
+        login_path_dirs,
+        candidate_dirs,
+    }
+}
+
+/// 登录 shell PATH 原始串（冒号分隔）→ 目录列表（保序、去空段）。
+fn split_path_dirs(value: &str) -> Vec<PathBuf> {
+    std::env::split_paths(value)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect()
+}
+
+/// 去重追加（首次出现优先）。
+fn extend_unique<I>(target: &mut Vec<PathBuf>, items: I)
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    for item in items {
+        if !target.contains(&item) {
+            target.push(item);
+        }
+    }
+}
+
+/// 搜索目录里第一个真实存在的 `<dir>/<command>`（含软链解析后存在；
+/// 断链不算已安装），返回规范化路径。
+fn find_installed(query: &ExposeQuery) -> Option<PathBuf> {
+    query
+        .install_search_dirs
+        .iter()
+        .map(|dir| dir.join(&query.command))
+        .find(|path| path.exists())
+        .map(|path| canonicalize_or_keep(&path))
+}
+
+/// 候选目录是否在登录 shell PATH 上（目录成员语义，规范化比较）。
+fn on_login_path(dir: &Path, query: &ExposeQuery) -> bool {
+    query.login_path_dirs.iter().any(|path| same_dir(path, dir))
+}
+
+/// 路径上有东西吗（含断链：断链也是需要如实说明的「残留」）。
+fn link_exists(path: &Path) -> bool {
+    path.symlink_metadata().is_ok()
+}
+
+/// `link` 解析后是否指向 `installed`（规范化比较；断链 = false）。
+fn resolves_to(link: &Path, installed: &Path) -> bool {
+    std::fs::canonicalize(link)
+        .map(|real| real == installed)
+        .unwrap_or(false)
+}
+
+/// 建软链（Unix）；其它平台返回明确错误（不引入新依赖）。
+#[cfg(unix)]
+fn create_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn create_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("当前平台不支持创建软链"))
 }
 
 #[cfg(all(test, unix))]

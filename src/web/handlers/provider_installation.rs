@@ -6,6 +6,9 @@
 //!   作业，不阻塞请求）；Kimi 缺 `acknowledge_remote_script=true` → 400
 //!   （REQ-PCI-01：远程脚本必须先告知来源，防绕过）。
 //! - `GET  /api/providers/install/{job_id}`：轮询作业状态与结果。
+//! - `POST /api/providers/{target}/expose`：把已安装的 CLI 软链到登录
+//!   shell PATH 上的可写目录（§五 2.11；用户明确点击才动作，不写 shell
+//!   profile、不改 PATH 环境变量；安装与更新共用，任意已装版本可点）。
 //!
 //! 不实现 version-cache 查询端点：24h 缓存是 `registry_version` 的内部
 //! 实现细节（tasks.md 82 条契约不含该端点）。
@@ -26,6 +29,7 @@ use crate::cross_cutting::provider_health::ProviderHealthReasonCode;
 use crate::cross_cutting::semver::compare_semver;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::provider_installation::InstallTarget;
+use crate::product::provider_installation::expose::expose_to_terminal_path;
 use crate::product::provider_installation::job_store::InstallJobStore;
 use crate::product::provider_installation::registry_version::{
     RegistryVersionService, ReqwestRegistrySource,
@@ -316,6 +320,44 @@ pub async fn get_install_job(
             "install_job_store_error",
             error.to_string(),
         ),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExposeResponse {
+    pub exposed: bool,
+    /// 可直接运行的命令名（如 `claude`）。
+    pub command: String,
+    /// 软链所在目录（登录 shell PATH 上、真实可写）。
+    pub dir: String,
+    /// 软链指向的已安装二进制路径。
+    pub target: String,
+}
+
+/// 把已安装的 CLI 暴露到用户终端 PATH（§五 2.11）：只在登录 shell PATH
+/// 上真实可写的目录建**单个软链**；失败如实返回可行动原因（候选目录与
+/// 各自不合格原因），不静默、不降级。
+pub async fn post_provider_expose(Path(target_wire): Path<String>) -> Response {
+    // 未知对象（含 fake）→ 400（与 install 端点同口径）。
+    if InstallTarget::parse_wire(&target_wire).is_none() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "install_target_unknown",
+            format!("未知安装对象：{target_wire}"),
+        );
+    }
+    match expose_to_terminal_path(&target_wire) {
+        Ok(outcome) => (
+            StatusCode::OK,
+            Json(ExposeResponse {
+                exposed: true,
+                command: outcome.command,
+                dir: outcome.dir.display().to_string(),
+                target: outcome.target.display().to_string(),
+            }),
+        )
+            .into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error.code, error.message),
     }
 }
 
@@ -847,8 +889,7 @@ mod tests {
     #[tokio::test]
     async fn expose_unknown_target_is_rejected() {
         for target in ["nope", "fake"] {
-            let response =
-                post_provider_expose(axum::extract::Path(target.to_string())).await;
+            let response = post_provider_expose(axum::extract::Path(target.to_string())).await;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{target}");
             let payload = response_json(response).await;
             assert_eq!(payload["code"], json!("install_target_unknown"), "{target}");
