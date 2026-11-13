@@ -29,7 +29,8 @@ pub(crate) fn is_teachable_parse_failure(code: &str) -> bool {
 /// fault / IR fault）才授予恰一次教学重驱。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TeachingPayload {
-    /// parse 语法类（码表 4 项）code:line:message 回灌。
+    /// parse 语法类（码表 4 项）事实块回灌（首行 code:line:message 逐字
+    /// + 精确 field/repair_example 行；有界投影在渲染侧）。
     pub parse_reasons: Vec<String>,
     /// lowering typed fault（构造点显式写入、事实齐全）。
     pub lowering_faults: Vec<crate::product::work_item_plan_compiler::LoweringFault>,
@@ -48,7 +49,7 @@ pub(super) enum TeachingVerdict {
 /// 教学资格判定（钉死规则，测试逐条对应）：
 /// - `preflight_operational_failures` 非空 ⇒ `NotEligible{mixed_operational_set}`
 ///   （禁止 `any(可教)` 放行）；
-/// - parse 码表命中 ⇒ 收 `parse_reasons`（code:line:message）；
+/// - parse 码表命中 ⇒ 收 `parse_reasons`（首行三段逐字 + field/example 行）；
 /// - `lowering_fault==Some` 且 field 非空、行>0、期望形态非空 ⇒ 收集
 ///   （`line==0` 视为不可定位，不收）；
 /// - `ir_fault==Some` 且 `source_line==Some`、`legal_refs` 非空 ⇒ 收集
@@ -72,10 +73,17 @@ pub(super) fn teaching_verdict(
             .iter()
             .filter(|diagnostic| is_teachable_parse_failure(&diagnostic.code))
             .map(|diagnostic| {
-                format!(
+                let mut block = format!(
                     "{}:{}:{}",
                     diagnostic.code, diagnostic.line, diagnostic.message
-                )
+                );
+                if !diagnostic.field.is_empty() {
+                    block.push_str(&format!("\n  缺失字段: {}", diagnostic.field));
+                }
+                if !diagnostic.repair_example.is_empty() {
+                    block.push_str(&format!("\n  正确形状: {}", diagnostic.repair_example));
+                }
+                block
             })
             .collect(),
         lowering_faults: Vec::new(),
@@ -1137,5 +1145,36 @@ mod tests {
             "同内容重放必须保持 event_id 稳定以幂等去重"
         );
         assert!(first.starts_with("single_candidate_heading_normalized_timeline_node_001"));
+    }
+    /// A1（REQ-WSC-32）：同 message、不同 field 的 parse 诊断经资格判定与
+    /// typed 重驱入口后，最终 prompt 逐条含原三段（逐字）+ 精确 field/形状。
+    #[test]
+    fn typed_reredrive_prompt_keeps_parse_field_and_example_facts() {
+        use super::{TeachingVerdict, build_typed_compile_reredrive_prompt, teaching_verdict};
+        use crate::product::work_item_plan_compiler::CompilerDiagnostic;
+        fn missing(field: &str) -> CompilerDiagnostic {
+            CompilerDiagnostic {
+                code: "missing_section".into(),
+                line: 5,
+                field: field.into(),
+                message: "结构化 section 缺少必需字段。".into(),
+                repair_example: format!("- {field}: value"),
+                kind: None,
+                lowering_fault: None,
+                ir_fault: None,
+            }
+        }
+        let TeachingVerdict::Eligible { payload } =
+            teaching_verdict(&[missing("Goal"), missing("role")], &[])
+        else {
+            panic!("载荷变化不得改教学资格");
+        };
+        let prompt = build_typed_compile_reredrive_prompt(&payload, &[], &[]);
+        for field in ["Goal", "role"] {
+            let block = format!(
+                "missing_section:5:结构化 section 缺少必需字段。\n  缺失字段: {field}\n  正确形状: - {field}: value"
+            );
+            assert!(prompt.contains(&block), "{field} 逐条可区分: {prompt}");
+        }
     }
 }
