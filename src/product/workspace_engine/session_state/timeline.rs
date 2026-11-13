@@ -767,7 +767,7 @@ mod sc_published_mark_tests {
     use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::lifecycle_store::WorkItemPlanSessionOptions;
     use crate::product::models::provider::ProviderName;
-    use crate::product::models::{WorkspaceSessionStatus, WorkspaceType};
+    use crate::product::models::WorkspaceType;
     use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
     use crate::web::workspace_ws_types::ScEvidenceRef;
     use crate::web::workspace_ws_types::ScFailureRepairPackage;

@@ -2,7 +2,6 @@
 
 use super::preview;
 use super::WorkspaceEngine;
-use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::work_item_plan_policy::PolicyDiagnostic;
 use crate::web::workspace_ws_types::ScFailureScope;
 use crate::web::workspace_ws_types::ScPackageCompleteness;
