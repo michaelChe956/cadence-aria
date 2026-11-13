@@ -11,6 +11,8 @@
 //! [`overlay_test_lock`]（或 [`OverlayStateGuard::acquire`]）执行并在结束清空
 //! （计划 §6.1 测试隔离纪律），否则会污染并行的 PATH 断言用例。
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
@@ -29,11 +31,22 @@ struct OverlayEntry {
     position: OverlayPosition,
 }
 
+// 测试构建的线程级存储：overlay 用例与并行用例（如 F10 provider environ
+// 逐字断言）**不共享锁** ⇒ 注册表按线程隔离，他线程的登记不得影响本线程
+// 的合并结果/子进程 env（竞态修复）；生产构建仍走进程级全局注册表。
+#[cfg(test)]
+thread_local! {
+    static TEST_OVERLAY: RefCell<Vec<OverlayEntry>> = const { RefCell::new(Vec::new()) };
+    static TEST_SHELL_PROBE: RefCell<Option<ShellEnvProbe>> = const { RefCell::new(None) };
+}
+
+#[cfg(not(test))]
 fn registry() -> &'static Mutex<Vec<OverlayEntry>> {
     static REGISTRY: LazyLock<Mutex<Vec<OverlayEntry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
     &REGISTRY
 }
 
+#[cfg(not(test))]
 fn lock_registry() -> MutexGuard<'static, Vec<OverlayEntry>> {
     registry()
         .lock()
@@ -47,22 +60,37 @@ pub fn register(dir: &Path, position: OverlayPosition) {
     if !dir.is_dir() {
         return;
     }
-    let mut entries = lock_registry();
-    if entries.iter().any(|entry| entry.dir == dir) {
-        return;
-    }
-    entries.push(OverlayEntry {
-        dir: dir.to_path_buf(),
-        position,
+    #[cfg(test)]
+    TEST_OVERLAY.with(|overlay| {
+        let mut overlay = overlay.borrow_mut();
+        if !overlay.iter().any(|entry| entry.dir == dir) {
+            overlay.push(OverlayEntry {
+                dir: dir.to_path_buf(),
+                position,
+            });
+        }
     });
+    #[cfg(not(test))]
+    {
+        let mut entries = lock_registry();
+        if entries.iter().any(|entry| entry.dir == dir) {
+            return;
+        }
+        entries.push(OverlayEntry {
+            dir: dir.to_path_buf(),
+            position,
+        });
+    }
 }
 
 /// 当前 overlay 的目录快照（登记顺序）。
 pub fn snapshot() -> Vec<PathBuf> {
-    lock_registry()
-        .iter()
-        .map(|entry| entry.dir.clone())
-        .collect()
+    with_overlay_entries(|entries| {
+        entries
+            .iter()
+            .map(|entry| entry.dir.clone())
+            .collect::<Vec<_>>()
+    })
 }
 
 /// 合并 overlay 与 base 成子进程 PATH：`Prepend` 目录置前（登记顺序），
@@ -77,7 +105,7 @@ pub fn effective_path(base: Option<&str>) -> String {
             .to_string_lossy()
             .into_owned(),
     };
-    let entries = lock_registry();
+    let entries: Vec<OverlayEntry> = with_overlay_entries(|entries| entries.to_vec());
     let mut merged: Vec<PathBuf> = Vec::with_capacity(entries.len());
     for position in [OverlayPosition::Prepend, OverlayPosition::Append] {
         for entry in entries.iter() {
@@ -102,8 +130,21 @@ pub fn effective_path(base: Option<&str>) -> String {
 /// 测试用：清空 overlay 注册表与登录 shell 探测结果。
 #[cfg(test)]
 pub fn clear() {
-    lock_registry().clear();
-    *lock_shell_probe() = ShellEnvProbe::default();
+    TEST_OVERLAY.with(|overlay| overlay.borrow_mut().clear());
+    TEST_SHELL_PROBE.with(|probe| *probe.borrow_mut() = None);
+}
+
+/// 读取 overlay 注册表：测试构建读线程级存储（见 `TEST_OVERLAY`），生产
+/// 构建读进程级全局注册表。
+fn with_overlay_entries<R>(read: impl FnOnce(&[OverlayEntry]) -> R) -> R {
+    #[cfg(test)]
+    {
+        TEST_OVERLAY.with(|overlay| read(&overlay.borrow()))
+    }
+    #[cfg(not(test))]
+    {
+        read(&lock_registry())
+    }
 }
 
 /// 登录 shell 探测输出的行标记（rc 文件 banner 污染由「只认标记行」兜底）。
@@ -120,26 +161,60 @@ struct ShellEnvProbe {
     vars: std::collections::BTreeMap<String, String>,
 }
 
+#[cfg(not(test))]
 fn shell_probe_state() -> &'static Mutex<ShellEnvProbe> {
     static STATE: LazyLock<Mutex<ShellEnvProbe>> =
         LazyLock::new(|| Mutex::new(ShellEnvProbe::default()));
     &STATE
 }
 
+#[cfg(not(test))]
 fn lock_shell_probe() -> std::sync::MutexGuard<'static, ShellEnvProbe> {
     shell_probe_state()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// 探测结果的空默认（测试线程未安装探测时读取）。
+#[cfg(test)]
+static EMPTY_SHELL_PROBE: ShellEnvProbe = ShellEnvProbe {
+    path: None,
+    vars: std::collections::BTreeMap::new(),
+};
+
+/// 读取登录 shell 探测结果：测试构建读线程级存储（见 `TEST_SHELL_PROBE`），
+/// 生产构建读进程级全局状态。
+fn with_shell_probe<R>(read: impl FnOnce(&ShellEnvProbe) -> R) -> R {
+    #[cfg(test)]
+    {
+        TEST_SHELL_PROBE.with(|probe| read(probe.borrow().as_ref().unwrap_or(&EMPTY_SHELL_PROBE)))
+    }
+    #[cfg(not(test))]
+    {
+        read(&lock_shell_probe())
+    }
+}
+
+/// 安装探测结果（启动异步探测完成后写入；测试构建写线程级存储）。
+fn install_shell_probe(probe: ShellEnvProbe) {
+    #[cfg(test)]
+    {
+        TEST_SHELL_PROBE.with(|state| *state.borrow_mut() = Some(probe));
+    }
+    #[cfg(not(test))]
+    {
+        *lock_shell_probe() = probe;
+    }
+}
+
 /// 最近一次登录 shell 探测的 PATH 原值（未与 overlay 合并）。
 pub fn login_shell_path() -> Option<String> {
-    lock_shell_probe().path.clone()
+    with_shell_probe(|probe| probe.path.clone())
 }
 
 /// 最近一次登录 shell 探测回的 agent 专属环境变量（如 `PI_CODING_AGENT_DIR`）。
 pub fn shell_env(name: &str) -> Option<String> {
-    lock_shell_probe().vars.get(name).cloned()
+    with_shell_probe(|probe| probe.vars.get(name).cloned())
 }
 
 /// 把探测到的 agent 专属环境变量补进子进程 env（计划 2.12）：平台已有的
@@ -154,15 +229,17 @@ fn shell_env_overrides_with(
     environment: Option<&std::collections::BTreeMap<String, String>>,
     platform_env: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Vec<(String, String)> {
-    lock_shell_probe()
-        .vars
-        .iter()
-        .filter(|(name, _)| {
-            environment.is_none_or(|env| !env.contains_key(name.as_str()))
-                && platform_env(name).is_none()
-        })
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect()
+    with_shell_probe(|state| {
+        state
+            .vars
+            .iter()
+            .filter(|(name, _)| {
+                environment.is_none_or(|env| !env.contains_key(name.as_str()))
+                    && platform_env(name).is_none()
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect::<Vec<_>>()
+    })
 }
 
 fn parse_shell_probe_stdout(stdout: &str) -> ShellEnvProbe {
@@ -189,10 +266,10 @@ fn parse_shell_probe_stdout(stdout: &str) -> ShellEnvProbe {
 /// 测试用：直接安装一份探测结果（绕过真实登录 shell 探测）。
 #[cfg(test)]
 pub(crate) fn set_shell_probe_for_test(path: Option<String>, vars: Vec<(String, String)>) {
-    *lock_shell_probe() = ShellEnvProbe {
+    install_shell_probe(ShellEnvProbe {
         path,
         vars: vars.into_iter().collect(),
-    };
+    });
 }
 
 /// 登录 shell PATH 探测的硬上限（计划 2.4c：2s，超时不阻塞启动）。
@@ -215,7 +292,7 @@ pub async fn register_startup_overlay() {
                     }
                 }
             }
-            *lock_shell_probe() = probe;
+            install_shell_probe(probe);
         }
     });
 }
