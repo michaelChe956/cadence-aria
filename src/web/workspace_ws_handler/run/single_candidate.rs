@@ -120,17 +120,15 @@ pub(super) mod single_candidate_compile_preflight;
 mod single_candidate_delivery;
 
 use single_candidate_compile_preflight::{
-    TeachingVerdict, build_preflight_ir_reredrive_prompt, build_typed_compile_reredrive_prompt,
     compile_failure_surface, emit_author_ears_normalized_event,
     emit_author_heading_normalized_event, emit_contract_autorepair_instructions_event,
     prepare_author_delivery_for_compile, prevalidate_plan_candidate_ir,
-    record_equivalence_canonicalizations, teaching_verdict,
+    record_equivalence_canonicalizations,
 };
 use single_candidate_structure_reredrive::{
-    authorize_sc_teaching_reredrive, close_sc_teaching_delivered, compile_typed_kinds,
-    drive_compile_teaching_reredrive, record_generate_segment_compile_failure,
-    record_generate_segment_ir_validation_failure, sc_sha256, sc_teaching_chain_binding,
-    sc_teaching_failure_request, stable_code_kind,
+    close_sc_teaching_delivered, drive_compile_teaching_reredrive,
+    record_generate_segment_compile_failure, record_generate_segment_ir_validation_failure,
+    sc_sha256, sc_teaching_chain_binding,
 };
 // Task 4：`is_teachable_parse_failure` 判据已由 `teaching_verdict` 接管，
 // 已切 `build_preflight_ir_reredrive_prompt`——两者仅为 `ir_prompt_tests`
@@ -784,49 +782,26 @@ pub(crate) async fn run_single_candidate_author(
             Err(diagnostics) => {
                 let (reasons, instruction_lines) =
                     compile_failure_surface(&compile_source, &diagnostics, &compile_context);
-                // Task 6：四类失败共用同一耐久教学窗口——establish → 漂移
-                // 核验 → claim；Denied/Drift ⇒ 不重驱（既有失败面收口）。
-                let grant = 'teach: {
-                    // 当前轮 raw 未归档，不消费教学窗口，也不发起额外 start。
-                    let raw_archived = matches!(
-                        current_round.as_ref(),
-                        Some((ScEvidenceRef::Available { .. }, _))
-                    );
-                    if !raw_archived {
-                        break 'teach None;
-                    }
-                    let TeachingVerdict::Eligible { payload } =
-                        teaching_verdict(&diagnostics, &[])
-                    else {
-                        break 'teach None;
-                    };
-                    let reredrive_prompt = build_typed_compile_reredrive_prompt(
-                        &payload,
-                        &instruction_lines,
-                        &design_requirement_ids,
-                    );
-                    let request = sc_teaching_failure_request(
-                        &teaching_binding,
-                        sc_sha256(&compile_source),
-                        compile_typed_kinds(&diagnostics),
-                        "build_typed_compile_reredrive_prompt",
-                        sc_sha256(&instruction_lines.join("\n")),
-                        &reredrive_prompt,
-                    );
-                    let attempt =
-                        authorize_sc_teaching_reredrive(&lifecycle, engine, &request)?;
-                    break 'teach attempt.map(|attempt| (attempt, reredrive_prompt));
-                };
-                // Task 8（5.1/5.2，REQ-WSC-25/28D）：generate 段失败流水行
-                // （阶段=Parse/TypedLowering/TypedIrValidation；non-blocking）。
-                record_generate_segment_compile_failure(
+                let detail = reasons.join("; ");
+                // Task 6：事实写读 → 既有资格/窗口 claim → 真实判定写读，
+                // 全在 grant 之前（原窗口 establish/漂移/claim 顺序不变）。
+                let grant = sc_failure_evidence::gate_compile_failure(
                     engine,
                     &lifecycle,
+                    &bound,
+                    current_round.as_ref(),
+                    &compile_source,
                     &diagnostics,
-                    &reasons.join("; "),
-                );
-                if let Some((attempt, reredrive_prompt)) = grant {
-                    first_round_failure.get_or_insert_with(|| reasons.join("; "));
+                    instruction_lines,
+                    &teaching_binding,
+                    &design_requirement_ids,
+                    &detail,
+                )?;
+                // Task 8（5.1/5.2，REQ-WSC-25/28D）：generate 段失败流水行
+                // （阶段=Parse/TypedLowering/TypedIrValidation；non-blocking）。
+                record_generate_segment_compile_failure(engine, &lifecycle, &diagnostics, &detail);
+                if let Some(grant) = grant {
+                    first_round_failure.get_or_insert(detail.clone());
                     let ScAuthorRoundDelivery { source, raw, round } =
                         drive_compile_teaching_reredrive(
                             engine,
@@ -840,9 +815,9 @@ pub(crate) async fn run_single_candidate_author(
                             "compile_reredrive",
                             "SC compile 失败教学重驱提示词",
                             "typed 完备判据（parse 码表 / lowering fault / IR fault，事实齐全且可定位）compile 失败的教学重驱（含 typed 载荷与错误原文），恰一次",
-                            &reredrive_prompt,
+                            &grant.reredrive_prompt,
                             &repository.path,
-                            &attempt,
+                            &grant.attempt,
                             &bound,
                             current_round.as_ref(),
                         )
@@ -851,23 +826,22 @@ pub(crate) async fn run_single_candidate_author(
                     current_round = Some((raw, round));
                     continue;
                 }
-                    let detail = reasons.join("; ");
-                    let message = match first_round_failure.as_deref() {
-                        Some(first_round) => format!(
-                            "compile markdown source failed (after one teaching re-drive): \
-                             first round: {first_round}; re-drive round: {detail}\
-                             {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
-                        ),
-                        None => format!(
-                            "compile markdown source failed: {detail}\
-                             {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
-                        ),
-                    };
-                    engine.persist_single_candidate_terminal_phase(
-                        crate::product::models::SingleCandidatePhase::Failed,
-                    );
-                    return Err(SingleCandidateProviderRunError::Message(message));
-                }
+                let message = match first_round_failure.as_deref() {
+                    Some(first_round) => format!(
+                        "compile markdown source failed (after one teaching re-drive): \
+                         first round: {first_round}; re-drive round: {detail}\
+                         {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
+                    ),
+                    None => format!(
+                        "compile markdown source failed: {detail}\
+                         {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
+                    ),
+                };
+                engine.persist_single_candidate_terminal_phase(
+                    crate::product::models::SingleCandidatePhase::Failed,
+                );
+                return Err(SingleCandidateProviderRunError::Message(message));
+            }
             };
         // O1（裁决二）：缺口机器指令不应用、不丢弃——渲染进 owner 可见
         // 执行事件随失败面呈现（与教学重驱 prompt 同源的呈现面）；缺口
@@ -894,40 +868,23 @@ pub(crate) async fn run_single_candidate_author(
             prevalidate_plan_candidate_ir(engine, &lifecycle, &request, &ir, &compile_source);
         if preflight.has_failures() {
             // Task 6：与 compile 类共用同一耐久教学窗口（无独立槽位）。
-            let grant = 'teach: {
-                // 与 compile 臂同门：缺失当前 raw 不消费教学窗口。
-                let raw_archived = matches!(
-                    current_round.as_ref(),
-                    Some((ScEvidenceRef::Available { .. }, _))
-                );
-                if !raw_archived {
-                    break 'teach None;
-                }
-                let TeachingVerdict::Eligible { .. } = preflight.to_teaching_verdict() else {
-                    break 'teach None;
-                };
-                let reredrive_prompt =
-                    build_preflight_ir_reredrive_prompt(&preflight, &design_requirement_ids);
-                let request = sc_teaching_failure_request(
-                    &teaching_binding,
-                    sc_sha256(&compile_source),
-                    vec![stable_code_kind("typed_ir_validation")],
-                    "build_preflight_ir_reredrive_prompt",
-                    sc_sha256(&preflight.presentation_reasons().join("\n")),
-                    &reredrive_prompt,
-                );
-                let attempt = authorize_sc_teaching_reredrive(&lifecycle, engine, &request)?;
-                break 'teach attempt.map(|attempt| (attempt, reredrive_prompt));
-            };
-            // Task 8（5.1）：typed IR 校验失败流水行（stage=TypedIrValidation）。
-            record_generate_segment_ir_validation_failure(
+            // Task 6：与 compile 类共用同一耐久教学窗口（无独立槽位）。
+            let detail = preflight.presentation_reasons().join("; ");
+            let grant = sc_failure_evidence::gate_ir_failure(
                 engine,
                 &lifecycle,
-                &preflight.presentation_reasons().join("; "),
-            );
-            if let Some((attempt, reredrive_prompt)) = grant {
-                first_round_failure
-                    .get_or_insert_with(|| preflight.presentation_reasons().join("; "));
+                &bound,
+                current_round.as_ref(),
+                &compile_source,
+                &preflight,
+                &teaching_binding,
+                &design_requirement_ids,
+                &detail,
+            )?;
+            // Task 8（5.1）：typed IR 校验失败流水行（stage=TypedIrValidation）。
+            record_generate_segment_ir_validation_failure(engine, &lifecycle, &detail);
+            if let Some(grant) = grant {
+                first_round_failure.get_or_insert(detail.clone());
                 let ScAuthorRoundDelivery { source, raw, round } =
                     drive_compile_teaching_reredrive(
                         engine,
@@ -941,9 +898,9 @@ pub(crate) async fn run_single_candidate_author(
                         "ir_reredrive",
                         "SC IR 校验失败教学重驱提示词",
                         "IR 校验失败（unknown_requirement_ref / acceptance_criterion_without_reviewer_check 等）的教学重驱（含错误原文与修正指令），恰一次",
-                        &reredrive_prompt,
+                        &grant.reredrive_prompt,
                         &repository.path,
-                        &attempt,
+                        &grant.attempt,
                         &bound,
                         current_round.as_ref(),
                     )
@@ -952,7 +909,6 @@ pub(crate) async fn run_single_candidate_author(
                 current_round = Some((raw, round));
                 continue;
             }
-            let detail = preflight.presentation_reasons().join("; ");
             let message = match first_round_failure.as_deref() {
                 Some(first_round) => format!(
                     "validate plan candidate IR failed (after one teaching re-drive): \
@@ -972,6 +928,7 @@ pub(crate) async fn run_single_candidate_author(
         // Task 6：结构门类不再有独立槽位——拒收统一交回，重驱资格由同一
         // 教学窗口的 claim 结果决定（Denied ⇒ 停止该生成自动链）。
         let failure_source_sha256 = sc_sha256(&compile_source);
+        let failure_source_bytes = compile_source.len() as u64;
         break match engine
             .complete_single_candidate_work_item_plan_author(
                 compile_source,
@@ -989,34 +946,26 @@ pub(crate) async fn run_single_candidate_author(
             // 一次（provider 通道复用，不新造 attempt 通道）。
             Ok(SingleCandidateAuthorCompletion::Rejected {
                 failure,
-                structure_failures: _,
+                structure_failures,
             }) => {
-                let repair_prompt =
-                    crate::product::workspace_engine::single_candidate_structure_failure::author_structure_repair_prompt(&failure);
-                // 结构臂亦只消费当前轮已归档的 raw，不以日志代替证据。
-                let raw_archived = matches!(
+                let detail =
+                    super::single_candidate_structure_reredrive::structure_gate_first_round_failure();
+                // 结构臂不重算 typed 集：原 sealed failure + 原 typed 失败集
+                // 原样进事实写读，重驱资格仍由同一窗口 claim 决定。
+                let grant = sc_failure_evidence::gate_structure_failure(
+                    engine,
+                    &lifecycle,
+                    &bound,
                     current_round.as_ref(),
-                    Some((ScEvidenceRef::Available { .. }, _))
-                );
-                let attempt = if raw_archived {
-                    let request = sc_teaching_failure_request(
-                        &teaching_binding,
-                        failure_source_sha256,
-                        vec![stable_code_kind(
-                            crate::product::workspace_engine::single_candidate_structure_failure::STRUCTURE_STABLE_CODE,
-                        )],
-                        "author_structure_repair_prompt",
-                        sc_sha256(&repair_prompt),
-                        &repair_prompt,
-                    );
-                    authorize_sc_teaching_reredrive(&lifecycle, engine, &request)?
-                } else {
-                    None
-                };
-                if let Some(attempt) = attempt {
-                    first_round_failure.get_or_insert_with(
-                        super::single_candidate_structure_reredrive::structure_gate_first_round_failure,
-                    );
+                    failure_source_sha256,
+                    failure_source_bytes,
+                    &failure,
+                    &structure_failures,
+                    &teaching_binding,
+                    &detail,
+                )?;
+                if let Some(grant) = grant {
+                    first_round_failure.get_or_insert(detail.clone());
                     let ScAuthorRoundDelivery { source, raw, round } =
                         super::single_candidate_structure_reredrive::drive_structure_gate_reredrive(
                             engine,
@@ -1027,9 +976,9 @@ pub(crate) async fn run_single_candidate_author(
                             command_rx,
                             &node_id,
                             &author_provider,
-                            &repair_prompt,
+                            &grant.reredrive_prompt,
                             &repository.path,
-                            Some(&attempt),
+                            Some(&grant.attempt),
                             &bound,
                             current_round.as_ref(),
                         )
@@ -1041,9 +990,6 @@ pub(crate) async fn run_single_candidate_author(
                 // Denied/Drift ⇒ 停止该生成自动链：保留 last-valid refs 与
                 // 失败历史、不提升坏 candidate、不开人工门、不留 A 通道
                 // 预领，按既有失败面回显两轮真实原因。
-                let detail =
-                    super::single_candidate_structure_reredrive::structure_gate_first_round_failure(
-                    );
                 let message = match first_round_failure.as_deref() {
                     Some(first_round) => format!(
                         "candidate structure gate rejected (after one teaching re-drive): \

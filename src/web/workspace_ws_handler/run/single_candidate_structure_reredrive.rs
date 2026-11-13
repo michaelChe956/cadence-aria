@@ -23,7 +23,7 @@ use crate::product::work_item_plan_policy::{
     ScTeachingWindowRequest, ScTeachingWindowStatus,
 };
 use crate::web::types::GenerateWorkItemsRequest;
-use crate::web::workspace_ws_types::{ScEvidenceRef, ScRoundIdentity};
+use crate::web::workspace_ws_types::{ScEvidenceRef, ScRoundIdentity, ScTeachingDecision};
 
 /// 结构门拒收的首轮失败描述（终态错误文案用；只述事实，不虚构原因）。
 pub(super) fn structure_gate_first_round_failure() -> String {
@@ -298,19 +298,24 @@ pub(super) fn begin_sc_teaching_reredrive_run(
     }
 }
 
-/// 重驱判定的收口包装（compile/IR/结构三类臂共用）：Granted/Replay ⇒
-/// `Ok(Some(attempt))`；Denied/Drift ⇒ `Ok(None)`（调用方按既有失败面
-/// 收口，不重驱）；StoreError ⇒ 持久化终态 Failed 后以 Message 上浮
-/// （fail-closed，不无账启动）。
+/// 重驱判定的收口包装（compile/IR/结构三类失败共用）：把既有窗口消费结果
+/// 一一映射为**真实判定对**——Drive/Replay ⇒ `(Granted, Some(attempt))`；
+/// Denied ⇒ `(Denied, None)`（`deny_and_close` 已先执行）；Drift ⇒
+/// `(Drift, None)`（durable 漂移诊断已先写）；StoreError ⇒ 不形成判定，
+/// 持久化终态 Failed 后以 Message 上浮（fail-closed，不无账启动）。
+/// 调用方必须在返回后立刻把判定 durable 写读，再启动 provider。
 #[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同本文件先例）。
 pub(super) fn authorize_sc_teaching_reredrive(
     lifecycle: &LifecycleStore,
     engine: &mut WorkspaceEngine,
     request: &ScTeachingWindowRequest,
-) -> Result<Option<ScTeachingAttemptRef>, SingleCandidateProviderRunError> {
+) -> Result<(ScTeachingDecision, Option<ScTeachingAttemptRef>), SingleCandidateProviderRunError> {
     match consume_sc_teaching_window(lifecycle, &engine.session().session_id, request) {
-        ScTeachingWindowDecision::Drive { attempt } => Ok(Some(attempt)),
-        ScTeachingWindowDecision::Denied | ScTeachingWindowDecision::Drift => Ok(None),
+        ScTeachingWindowDecision::Drive { attempt } => {
+            Ok((ScTeachingDecision::Granted, Some(attempt)))
+        }
+        ScTeachingWindowDecision::Denied => Ok((ScTeachingDecision::Denied, None)),
+        ScTeachingWindowDecision::Drift => Ok((ScTeachingDecision::Drift, None)),
         ScTeachingWindowDecision::StoreError(message) => {
             engine.persist_single_candidate_terminal_phase(SingleCandidatePhase::Failed);
             Err(SingleCandidateProviderRunError::Message(message))
