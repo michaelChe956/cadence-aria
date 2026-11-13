@@ -89,6 +89,12 @@ pub(super) mod sc_failure_evidence;
 #[path = "sc_teaching_source.rs"]
 pub(super) mod sc_teaching_source;
 
+/// P22：SC 教学重驱 prompt 的最终装配 facade（纯函数面：零 I/O、零 provider、
+/// 零 store）。模块本体声明在 single_candidate.rs 内——它消费同子树的
+/// `single_candidate_compile_preflight` typed 事实与 P20 的 source 解析结果。
+#[path = "sc_teaching_prompt.rs"]
+pub(super) mod sc_teaching_prompt;
+
 /// 公共 admission 预检「成员语言规则缺失」等待项的判别码（路 C，Task 4）：
 /// SC 消费链对成员文件的必需性判定收敛到实际消费点——该等待项在 SC 侧不
 /// 直接阻断（其他 active 成员缺失不阻断 SC），由消费点对已解析
