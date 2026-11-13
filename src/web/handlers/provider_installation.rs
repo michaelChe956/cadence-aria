@@ -336,7 +336,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        get_install_job, get_install_targets, post_provider_install, resolve_install_action,
+        get_install_job, get_install_targets, post_provider_expose, post_provider_install,
+        resolve_install_action,
     };
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::bounded_command_runner::{
@@ -840,6 +841,18 @@ mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let payload = response_json(response).await;
         assert_eq!(payload["code"], json!("install_target_unknown"));
+    }
+
+    // §五 2.11：未知对象（含 fake）→ 400，与 install 端点同口径。
+    #[tokio::test]
+    async fn expose_unknown_target_is_rejected() {
+        for target in ["nope", "fake"] {
+            let response =
+                post_provider_expose(axum::extract::Path(target.to_string())).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{target}");
+            let payload = response_json(response).await;
+            assert_eq!(payload["code"], json!("install_target_unknown"), "{target}");
+        }
     }
 
     #[tokio::test]
