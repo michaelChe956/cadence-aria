@@ -28,10 +28,17 @@ use super::single_candidate_provider_run::{
 };
 use super::*;
 use crate::product::models::{SingleCandidatePhase, WorkspaceSessionRecord};
+use crate::product::lifecycle_store::sc_failure_evidence::{
+    ScFailureEvidenceEvent, sc_failure_chain_id, sc_failure_split_locator,
+};
 use crate::product::work_item_plan_policy::{
     ProviderStartLedgerEntry, RunPolicy, ScTeachingWindowRequest, ScTeachingWindowStatus,
     WorkItemPlanFlowKind,
 };
+use crate::web::workspace_ws_types::{
+    ScEvidenceRef, ScFailureChainIdentity, ScFailureScope, ScPromptDisposition, ScRoundIdentity,
+};
+use sha2::Digest as _;
 use std::sync::atomic::AtomicUsize;
 
 /// durable `provider_start_ledger` 中 `single_candidate_author:{id}:` 前缀
@@ -79,14 +86,128 @@ fn session_json_bytes(fixture: &ProviderRunFixture, id: &str) -> String {
     std::fs::read_to_string(&path).expect("read session json")
 }
 
-/// 与真实重驱必然计算出的 digest 全部不同的「完全合格」教学请求（四项
-/// 判据的事实面完整；用于在播种会话上驱动 establish 的真实 store 面）。
-fn fully_qualified_seed_request() -> ScTeachingWindowRequest {
+/// 种子 chain 身份（chain_id 由 store 的长度前缀哈希口径算出，不自造）。
+const SEED_BUSINESS_KEY: &str = "business_key_fault_matrix_seed";
+const SEED_NODE_ID: &str = "node_fault_matrix_seed";
+/// 种子 source 正文（真实写入 split run 产物 ⇒ 可读回）。
+const SEED_SOURCE_TEXT: &str = "# Work Item Plan\nseed source body\n";
+/// 种子教学提示正文（真实 put 全文 ⇒ 可读回、摘要自洽）。
+const SEED_PROMPT_TEXT: &str = "教学提示种子正文（真实 put 后读回）\n";
+/// 审计用构造器名（只进审计字段，不进 locator）。
+const SEED_BUILDER_ID: &str = "seed_teaching_prompt";
+
+/// 全文摘要（与证据库同一口径：sha256 小写 hex）。
+fn sha256_hex(text: &str) -> String {
+    hex::encode(sha2::Sha256::digest(text.as_bytes()))
+}
+
+/// 「完全合格」教学请求（四项判据的事实面完整；用于在播种会话上驱动
+/// establish 的真实 store 面）。
+///
+/// 来源面全部来自真实 store（P26）：prompt locator/摘要出自真实
+/// `put_sc_teaching_prompt` 并读回校验；failure source 指向真实 split run
+/// 产物（读回后实算摘要）。旧的伪 ref / builder 名不再冒充「生产可读
+/// 来源」。
+fn seed_teaching_request(
+    fixture: &ProviderRunFixture,
+    session_id: &str,
+) -> ScTeachingWindowRequest {
+    let record = record_of(&fixture.lifecycle, session_id);
+    // 真实 split run：source 正文与 locator 均来自真实写入。
+    let handle = fixture
+        .lifecycle
+        .begin_work_item_split_provider_run(
+            &record.project_id,
+            &record.issue_id,
+            &crate::product::models::ProviderName::Codex,
+            session_id,
+        )
+        .expect("begin seed split run");
+    fixture
+        .lifecycle
+        .complete_work_item_split_provider_run(
+            &handle,
+            "seed split prompt",
+            &serde_json::Value::String(SEED_SOURCE_TEXT.to_string()),
+        )
+        .expect("complete seed split run");
+    let scope = ScFailureScope {
+        session_id: session_id.to_string(),
+        project_id: record.project_id.clone(),
+        issue_id: record.issue_id.clone(),
+        plan_id: record.entity_id.clone(),
+    };
+    let chain = ScFailureChainIdentity {
+        scope: scope.clone(),
+        chain_id: sc_failure_chain_id(
+            session_id,
+            SEED_BUSINESS_KEY,
+            SEED_NODE_ID,
+            handle.role_run_seq,
+        )
+        .expect("seed chain id"),
+        business_key: SEED_BUSINESS_KEY.to_string(),
+        original_node_id: SEED_NODE_ID.to_string(),
+        original_role_run_seq: handle.role_run_seq,
+    };
+    let round = ScRoundIdentity {
+        chain_id: chain.chain_id.clone(),
+        round_id: handle.run_ref.clone(),
+        node_id: SEED_NODE_ID.to_string(),
+        round_ordinal: 1,
+        provider: crate::product::models::ProviderName::Codex,
+        workspace_session_id: handle.workspace_session_id.clone(),
+        role_run_seq: handle.role_run_seq,
+        run_ref: handle.run_ref.clone(),
+    };
+    fixture
+        .lifecycle
+        .append_sc_failure_evidence(
+            &chain,
+            &ScFailureEvidenceEvent::RoundBound {
+                round: round.clone(),
+            },
+        )
+        .expect("bind seed round");
+    // 真实 put：locator 与摘要来自 store（不是 builder 名）。
+    let evidence = fixture
+        .lifecycle
+        .put_sc_teaching_prompt(
+            &chain,
+            &round.round_id,
+            2,
+            SEED_BUILDER_ID,
+            SEED_PROMPT_TEXT,
+            ScPromptDisposition::Prepared,
+        )
+        .expect("put seed teaching prompt");
+    let ScEvidenceRef::Available {
+        locator: prompt_ref,
+        sha256: prompt_digest,
+        bytes: prompt_bytes,
+    } = evidence.prompt
+    else {
+        panic!("真实 put 必须产出可用的提示事实");
+    };
+    // locator 必须可读回且正文逐字一致（伪来源不可读）。
+    let read_back = fixture
+        .lifecycle
+        .read_sc_teaching_prompt(&chain, &prompt_ref)
+        .expect("seed prompt locator 必须可读回");
+    assert_eq!(read_back, SEED_PROMPT_TEXT, "真实 put 的正文必须逐字可读回");
+    assert_eq!(prompt_bytes, SEED_PROMPT_TEXT.len() as u64);
+    // source：真实 split 产物（读回后实算摘要）。
+    let source_body = fixture
+        .lifecycle
+        .read_sc_split_output(&scope, &round)
+        .expect("seed source 必须可读回");
+    let failure_source_ref = sc_failure_split_locator(session_id, handle.role_run_seq);
+    let failure_source_sha256 = sha256_hex(&source_body);
     let digest64 = |seed: &str| format!("{seed:0<64}");
     ScTeachingWindowRequest {
         provider_path_admissible: true,
-        failure_source_ref: Some("work_item_plan_source:s1:rev_0001".to_string()),
-        failure_source_sha256: digest64("t9a"),
+        failure_source_ref: Some(failure_source_ref),
+        failure_source_sha256,
         failure_typed_kinds: vec![
             crate::product::planning_failure::PlanningFailureKind::Unknown {
                 code: "t9_seed".to_string(),
@@ -97,8 +218,8 @@ fn fully_qualified_seed_request() -> ScTeachingWindowRequest {
         context_digest: digest64("t9d"),
         allowed_edit_closure: "seed closure".to_string(),
         instruction_digest: digest64("t9e"),
-        prompt_ref: "t9_seed_prompt_builder".to_string(),
-        prompt_digest: digest64("t9f"),
+        prompt_ref,
+        prompt_digest,
     }
 }
 
@@ -225,7 +346,7 @@ async fn takeover_does_not_mint_new_chance() {
     // ② 父会话经真实 establish 面建立已批准教学窗口（父链的 C 事实）。
     let established = match fixture
         .lifecycle
-        .establish_sc_teaching_window(&generate, &fully_qualified_seed_request())
+        .establish_sc_teaching_window(&generate, &seed_teaching_request(&fixture, &fixture.record.id))
         .expect("seed establish teaching window on parent")
     {
         crate::product::lifecycle_store::ScTeachingEstablishOutcome::Established {
@@ -273,7 +394,7 @@ async fn takeover_does_not_mint_new_chance() {
 
     // ⑤ 接管后新 session 上的教学请求（与父链同一请求的重放）：子会话无
     //    可证明原授权 ⇒ 未批准 ⇒ 机会 0 而非 2 ⇒ 零额外调用。
-    let request = fully_qualified_seed_request();
+    let request = seed_teaching_request(&fixture, &child_id);
     let child_seeded = record_of(&fixture.lifecycle, &child_id);
     match fixture
         .lifecycle
@@ -373,7 +494,7 @@ async fn none_fields_and_empty_ledger_mean_zero_not_two() {
     );
 
     // 教学请求（事实完整）⇒ 判据① 失败 ⇒ 未批准 ⇒ 机会数 0 而非 2。
-    let request = fully_qualified_seed_request();
+    let request = seed_teaching_request(&fixture, &fixture.record.id);
     match fixture
         .lifecycle
         .establish_sc_teaching_window(&seeded, &request)
