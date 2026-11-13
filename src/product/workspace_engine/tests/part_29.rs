@@ -229,6 +229,21 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
                 },
             )
             .unwrap();
+        // D1 语义：append 在锁内按 max(raw)+1 分配版本号，调用方传入的 version 被覆盖。
+        // 绑定断言必须取实际持久化的版本，而不是调用方猜测的字面量。
+        let expected_payload = ArtifactPayload::Markdown {
+            markdown: format!("# {entity_id} amendment"),
+            diff: None,
+        };
+        let stored_version = lifecycle
+            .list_artifact_versions(&child_session_id)
+            .unwrap()
+            .into_iter()
+            .find(|stored| {
+                stored.source_node_id == format!("timeline_node_linked_{:04}", index + 1)
+                    && stored.payload == expected_payload
+            })
+            .expect("linked amendment artifact version must be persisted");
         let timeline_nodes = linked_workspace_timeline(&format!(
             "timeline_node_linked_{:04}",
             index + 1
@@ -254,7 +269,7 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
 
         assert_eq!(restored.entity_id, entity_id);
         assert_eq!(restored.workspace_type, workspace_type);
-        assert_eq!(restored.artifact_version_id, Some(7));
+        assert_eq!(restored.artifact_version_id, Some(stored_version.version));
         assert_eq!(restored.timeline_nodes, timeline_nodes);
         assert_eq!(
             restored.selected_timeline_node_id,
@@ -325,6 +340,19 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
             },
         )
         .unwrap();
+    let expected_payload = ArtifactPayload::Markdown {
+        markdown: "# work_item_0001 amendment".to_string(),
+        diff: None,
+    };
+    let stored_version = lifecycle
+        .list_artifact_versions(&child.id)
+        .unwrap()
+        .into_iter()
+        .find(|stored| {
+            stored.source_node_id == "timeline_node_linked_work_item"
+                && stored.payload == expected_payload
+        })
+        .expect("linked work item artifact version must be persisted");
     let timeline_nodes = linked_workspace_timeline("timeline_node_linked_work_item");
     lifecycle
         .save_timeline_nodes(&child.id, &timeline_nodes)
@@ -344,7 +372,7 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
     .unwrap();
     assert_eq!(restored.entity_id, "work_item_0001");
     assert_eq!(restored.workspace_type, WorkspaceType::WorkItem);
-    assert_eq!(restored.artifact_version_id, Some(7));
+    assert_eq!(restored.artifact_version_id, Some(stored_version.version));
     assert_eq!(restored.timeline_nodes, timeline_nodes);
     assert_eq!(
         restored.selected_timeline_node_id,
