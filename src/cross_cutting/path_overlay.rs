@@ -99,10 +99,11 @@ pub fn effective_path(base: Option<&str>) -> String {
         .unwrap_or(base_value)
 }
 
-/// 测试用：清空 overlay 注册表。
+/// 测试用：清空 overlay 注册表与登录 shell 探测结果。
 #[cfg(test)]
 pub fn clear() {
     lock_registry().clear();
+    *lock_shell_probe() = ShellEnvProbe::default();
 }
 
 /// 登录 shell 探测输出的行标记（rc 文件 banner 污染由「只认标记行」兜底）。
@@ -110,11 +111,7 @@ const SHELL_PROBE_MARKER: &str = "__aria_shell_probe__";
 
 /// 计划 2.12：随登录 shell PATH 一并取回的 agent 专属环境变量（本仓四家
 /// provider 实际消费的收敛清单；扩展只需在此追加）。
-const SHELL_PROBE_VARS: [&str; 3] = [
-    "PI_CODING_AGENT_DIR",
-    "CODEX_HOME",
-    "CLAUDE_CONFIG_DIR",
-];
+const SHELL_PROBE_VARS: [&str; 3] = ["PI_CODING_AGENT_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR"];
 
 /// 登录 shell 探测结果：PATH 原值 + agent 专属环境变量。
 #[derive(Debug, Default, Clone)]
@@ -137,13 +134,12 @@ fn lock_shell_probe() -> std::sync::MutexGuard<'static, ShellEnvProbe> {
 
 /// 最近一次登录 shell 探测的 PATH 原值（未与 overlay 合并）。
 pub fn login_shell_path() -> Option<String> {
-    None
+    lock_shell_probe().path.clone()
 }
 
 /// 最近一次登录 shell 探测回的 agent 专属环境变量（如 `PI_CODING_AGENT_DIR`）。
 pub fn shell_env(name: &str) -> Option<String> {
-    let _ = name;
-    None
+    lock_shell_probe().vars.get(name).cloned()
 }
 
 /// 把探测到的 agent 专属环境变量补进子进程 env（计划 2.12）：平台已有的
@@ -151,30 +147,52 @@ pub fn shell_env(name: &str) -> Option<String> {
 pub fn shell_env_overrides(
     environment: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Vec<(String, String)> {
-    let _ = environment;
-    Vec::new()
+    shell_env_overrides_with(environment, |name| std::env::var_os(name))
 }
 
 fn shell_env_overrides_with(
     environment: Option<&std::collections::BTreeMap<String, String>>,
     platform_env: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Vec<(String, String)> {
-    let _ = (environment, platform_env);
-    Vec::new()
+    lock_shell_probe()
+        .vars
+        .iter()
+        .filter(|(name, _)| {
+            environment.is_none_or(|env| !env.contains_key(name.as_str()))
+                && platform_env(name).is_none()
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 fn parse_shell_probe_stdout(stdout: &str) -> ShellEnvProbe {
-    let _ = stdout;
-    ShellEnvProbe::default()
+    let mut probe = ShellEnvProbe::default();
+    for line in stdout.lines() {
+        let Some(payload) = line.trim().strip_prefix(SHELL_PROBE_MARKER) else {
+            continue;
+        };
+        let Some((name, value)) = payload.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        if name == "PATH" {
+            probe.path = (!value.is_empty()).then(|| value.to_string());
+        } else if value.is_empty() {
+            probe.vars.remove(name);
+        } else {
+            probe.vars.insert(name.to_string(), value.to_string());
+        }
+    }
+    probe
 }
 
 /// 测试用：直接安装一份探测结果（绕过真实登录 shell 探测）。
 #[cfg(test)]
-pub(crate) fn set_shell_probe_for_test(
-    path: Option<String>,
-    vars: Vec<(String, String)>,
-) {
-    let _ = (path, vars);
+pub(crate) fn set_shell_probe_for_test(path: Option<String>, vars: Vec<(String, String)>) {
+    *lock_shell_probe() = ShellEnvProbe {
+        path,
+        vars: vars.into_iter().collect(),
+    };
 }
 
 /// 登录 shell PATH 探测的硬上限（计划 2.4c：2s，超时不阻塞启动）。
@@ -189,12 +207,15 @@ const LOGIN_SHELL_PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 pub async fn register_startup_overlay() {
     register_existing_candidates(user_home_dir().as_deref());
     tokio::spawn(async {
-        if let Some(path_value) = probe_login_shell_path().await {
-            for dir in std::env::split_paths(&path_value) {
-                if dir.is_absolute() {
-                    register(&dir, OverlayPosition::Append);
+        if let Some(probe) = probe_login_shell_env().await {
+            if let Some(path_value) = probe.path.clone() {
+                for dir in std::env::split_paths(&path_value) {
+                    if dir.is_absolute() {
+                        register(&dir, OverlayPosition::Append);
+                    }
                 }
             }
+            *lock_shell_probe() = probe;
         }
     });
 }
@@ -308,15 +329,28 @@ fn mise_node_bins(home: &Path) -> Vec<PathBuf> {
     bins
 }
 
-/// 登录 shell PATH 探测（计划 2.4c 第二档）：交互式 login shell 打印其
-/// PATH，2s 硬上限（`kill_on_drop` 兜底回收）；失败/超时返回 None。rc
-/// 文件的 banner 污染由调用侧「绝对路径过滤 + register 只收存在目录」兜底。
-async fn probe_login_shell_path() -> Option<String> {
+/// 登录 shell 探测（计划 2.4c 第二档 + 2.12）：交互式 login shell 以
+/// `__aria_shell_probe__` 标记行打印 PATH 与 agent 专属环境变量，2s 硬上限
+/// （`kill_on_drop` 兜底回收）；失败/超时返回 None。rc 文件的 banner 污染
+/// 由「只认标记行」+ 解析侧空值过滤兜底。
+async fn probe_login_shell_env() -> Option<ShellEnvProbe> {
     let shell = std::env::var("SHELL").ok()?;
+    let mut script = String::from("printf '");
+    script.push_str(SHELL_PROBE_MARKER);
+    script.push_str("PATH=%s\\n");
+    for name in SHELL_PROBE_VARS {
+        script.push_str(SHELL_PROBE_MARKER);
+        script.push_str(name);
+        script.push_str("=%s\\n");
+    }
+    script.push_str("' \"$PATH\"");
+    for name in SHELL_PROBE_VARS {
+        script.push_str(&format!(" \"${{{name}-}}\""));
+    }
     let output = tokio::time::timeout(
         LOGIN_SHELL_PATH_PROBE_TIMEOUT,
         tokio::process::Command::new(&shell)
-            .args(["-i", "-l", "-c", "printf %s \"$PATH\""])
+            .args(["-i", "-l", "-c", &script])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -329,13 +363,9 @@ async fn probe_login_shell_path() -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .rev()
-        .find_map(|line| {
-            let trimmed = line.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        })
+    Some(parse_shell_probe_stdout(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 /// 进程级 overlay 测试锁：一切触碰注册表的用例（含其他文件里的合并点
@@ -598,9 +628,8 @@ mod tests {
         );
 
         // 平台进程 env 已有 CODEX_HOME(platform_env 返回 Some) ⇒ 不补。
-        let platform_env = |name: &str| {
-            (name == "CODEX_HOME").then(|| std::ffi::OsString::from("/host/codex"))
-        };
+        let platform_env =
+            |name: &str| (name == "CODEX_HOME").then(|| std::ffi::OsString::from("/host/codex"));
         assert_eq!(
             shell_env_overrides_with(None, platform_env),
             vec![("PI_CODING_AGENT_DIR".to_string(), "/probe/pi".to_string())]
