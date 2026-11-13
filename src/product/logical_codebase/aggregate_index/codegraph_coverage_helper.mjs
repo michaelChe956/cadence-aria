@@ -73,8 +73,11 @@ async function main() {
   }
   // 显式只读：上游默认 open 可能迁移 schema / 自愈索引 / 维护 WAL，不是
   // 严格只读。1.6.2 的 `CodeGraph.open(projectRoot, { readOnly: true })` 支持
-  // 该选项（`src/index.ts:120 OpenOptions.readOnly`、`src/index.ts:484`；
-  // 其自家 `status` 命令同样用只读打开）。
+  // 该选项（`src/index.ts:120 OpenOptions.readOnly`、`src/index.ts:388`）。
+  // 注意：上游自家 `status` 命令**并非**只读打开（1.6.2 实测
+  // `src/bin/codegraph.ts:1094` 是 `CodeGraph.open(projectPath)`，没有传
+  // readOnly，已初始化索引上走读写 + WAL 自愈），故本 helper 的只读口径
+  // 是自己的选择，不能拿 `status` 当旁证。
   const cg = await CodeGraph.open(root, { readOnly: true });
   if (typeof cg.hasFilesUnder !== "function") {
     return fail("sdk_incompatible", "CodeGraph instance has no hasFilesUnder()");
