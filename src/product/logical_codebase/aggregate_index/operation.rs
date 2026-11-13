@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::Value;
@@ -13,6 +14,9 @@ use crate::product::logical_codebase::{
     LogicalCodebaseStore, MemberStatus, RepositoryCheckoutRecord,
 };
 
+use super::codegraph_coverage::{
+    AggregateCoverageProbe, CliFallbackCoverageProbe, CodeGraphCoverage, CoverageOutcome,
+};
 use super::{
     AggregateIndexError, AggregateIndexRecord, AggregateIndexSnapshotCollector,
     AggregateIndexStatus, AggregateIndexStore, CodeGraphCli, CodeGraphExcludeGenerator,
@@ -32,16 +36,24 @@ const EXCLUDED_QUERIES: [&str; 4] = [
 /// 命中≥2 成员——真实业务仓无该符号时 planning_ready 仍可达。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateIndexAcceptance {
-    pub member_files: BTreeMap<String, Vec<PathBuf>>,
+    /// 每成员覆盖判定（SDK `hasFilesUnder` / CLI `starts_with` 归一为布尔；
+    /// 未持久化，仅验收证据）。
+    pub member_covered: BTreeMap<String, bool>,
     pub excluded_queries: BTreeMap<String, Vec<PathBuf>>,
+    /// 健康闸/CLI 回退的审计 warning（不阻断激活）。
+    pub warning: Option<String>,
 }
 
 impl AggregateIndexAcceptance {
     fn verify(
         cli: &CodeGraphCli,
+        coverage: &dyn AggregateCoverageProbe,
         root: &Path,
         member_names: &[String],
     ) -> Result<Self, AggregateIndexError> {
+        // RED（红灯占位）：SDK 探针尚未接线，沿用 CLI files 验收路径；
+        // 绿灯实现将改为 SDK 成员覆盖 + 健康闸 + CLI 回退。
+        let _ = coverage;
         let files = match cli.files(root) {
             Ok(files) => files,
             // 空索引＝每个成员都没有任何可索引文件：把上游人读提示归并
@@ -53,7 +65,8 @@ impl AggregateIndexAcceptance {
             }) => return Err(member_coverage_failed(member_names)),
             Err(error) => return Err(error),
         };
-        let member_files = verify_member_coverage(&files, member_names)?;
+        let member_covered = verify_member_coverage(&files, member_names)?;
+        require_member_coverage(&member_covered, member_names)?;
         let mut excluded_queries = BTreeMap::new();
         for query in EXCLUDED_QUERIES {
             let result = cli.query_json(root, query)?;
@@ -65,13 +78,14 @@ impl AggregateIndexAcceptance {
         }
 
         Ok(Self {
-            member_files,
+            member_covered,
             excluded_queries,
+            warning: None,
         })
     }
 
     fn soft_warning(&self) -> Option<String> {
-        None
+        self.warning.clone()
     }
 }
 
@@ -83,6 +97,9 @@ pub struct AggregateIndexOperation {
     excludes: CodeGraphExcludeGenerator,
     cli: CodeGraphCli,
     snapshots: AggregateIndexSnapshotCollector,
+    /// 成员覆盖探针：生产=new() 装配 SDK 探针；DI 构造器默认 CLI 回退
+    /// 探针（保持既有 CLI 验收行为，测试可注入桩）。
+    coverage: Arc<dyn AggregateCoverageProbe>,
 }
 
 impl AggregateIndexOperation {
@@ -98,6 +115,7 @@ impl AggregateIndexOperation {
             excludes,
             AggregateIndexSnapshotCollector::for_paths(paths),
         )
+        .with_coverage_probe(Arc::new(CodeGraphCoverage::production()))
     }
 
     pub fn with_dependencies(
@@ -133,7 +151,14 @@ impl AggregateIndexOperation {
             excludes,
             cli,
             snapshots,
+            coverage: Arc::new(CliFallbackCoverageProbe),
         }
+    }
+
+    /// 覆盖探针注入 seam（测试桩 / for_lc 探针继承）。
+    pub fn with_coverage_probe(mut self, coverage: Arc<dyn AggregateCoverageProbe>) -> Self {
+        self.coverage = coverage;
+        self
     }
 
     /// Re-scopes manifest/member reads, index generations and the single-writer
@@ -149,6 +174,7 @@ impl AggregateIndexOperation {
             self.excludes,
             self.snapshots.for_lc(lc_id),
         )
+        .with_coverage_probe(self.coverage.clone())
     }
 
     /// Clones the logical-codebase store handle for sibling services such as
@@ -444,6 +470,7 @@ impl AggregateIndexOperation {
 
         let acceptance = match AggregateIndexAcceptance::verify(
             &self.cli,
+            self.coverage.as_ref(),
             &manifest.provider_context_root,
             &member_names,
         ) {
@@ -650,29 +677,40 @@ fn layout_error(path: &Path, error: std::io::Error) -> AggregateIndexError {
 fn verify_member_coverage(
     files: &[PathBuf],
     member_names: &[String],
-) -> Result<BTreeMap<String, Vec<PathBuf>>, AggregateIndexError> {
+) -> Result<BTreeMap<String, bool>, AggregateIndexError> {
     let mut result = BTreeMap::new();
-    let mut uncovered = Vec::new();
     for member_name in member_names {
         validate_relative_id(member_name)?;
         let prefix = Path::new(member_name);
-        let covered = files
-            .iter()
-            .filter(|file| file.starts_with(prefix))
-            .cloned()
-            .collect::<Vec<_>>();
-        if covered.is_empty() {
-            // 收集全部未覆盖成员再失败：bootstrap 失败卡要呈现完整的
-            // 「无可索引代码文件的成员」清单，不止第一个。
-            uncovered.push(member_name.clone());
-            continue;
-        }
+        let covered = files.iter().any(|file| file.starts_with(prefix));
         result.insert(member_name.clone(), covered);
     }
-    if !uncovered.is_empty() {
-        return Err(member_coverage_failed(&uncovered));
-    }
     Ok(result)
+}
+
+/// SDK/CLI 归一后的成员覆盖判定：点名全部未覆盖成员再失败（bootstrap
+/// 失败卡要呈现完整的「无可索引代码文件的成员」清单，不止第一个）。
+fn require_member_coverage(
+    member_covered: &BTreeMap<String, bool>,
+    member_names: &[String],
+) -> Result<(), AggregateIndexError> {
+    let uncovered = member_names
+        .iter()
+        .filter(|name| !member_covered.get(*name).copied().unwrap_or(false))
+        .cloned()
+        .collect::<Vec<_>>();
+    if uncovered.is_empty() {
+        Ok(())
+    } else {
+        Err(member_coverage_failed(&uncovered))
+    }
+}
+
+/// 健康闸：SDK 返回的 index.state / pending / stale / stats.fileCount 有
+/// 异常信号时记 warning（不阻断激活——保持「不因健康问题阻断」语义）。
+/// RED（红灯占位）：绿灯实现将读取健康字段产出 warning。
+fn index_health_warning(_outcome: &CoverageOutcome) -> Option<String> {
+    None
 }
 
 /// 覆盖不足的业务语义错误：点名无可索引代码文件的成员清单（空索引时
