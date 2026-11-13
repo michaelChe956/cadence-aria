@@ -5,10 +5,12 @@
 //!（`rounds.jsonl` + `chain_terminal`）；**失败包版本必须由生产终局发布**到
 //! durable `artifact_versions.json`，本文件只断言回读出来的 durable 事实。
 //!
-//! 真实缺口：**P19d（终局实际发布接线）尚未落地** ⇒ 本文件的 A4 版本断言现在是
-//! **真实 RED**（终局没有发布任何 A4 版本）。这是生产缺口，不是夹具问题；测试
-//! 不代产品实现（不在用例里调 `build_sc_failure_repair_package` +
-//! `publish_sc_failure_repair_package` 造包）。
+//! 真实缺口：**P19d（终局实际发布接线）已落地**（`edb72c8d`）⇒ 失败包版本由
+//! 生产终局发布（`run/sc_failure_terminal.rs` 组包 + publish），本文件只断言
+//! 回读出来的 durable 事实；若这里红，是真实验收缺口（不改浅为 PASS）。
+//! 测试不代产品实现（不在用例里调 `build_sc_failure_repair_package` +
+//! `publish_sc_failure_repair_package` 造包），也不用人工塞历史启动条目的办法
+//! 去改教学预算（那是篡产品预算，不是自然失败态）。
 //!
 //! 断言面（全部为回读出来的 durable 事实）：
 //! - durable 证据：轮绑定、`failure_observed` 的全量 cause 数组与引用、
@@ -24,19 +26,20 @@
 use super::sc_failure_driver_fixture::{
     author_start_count, candidate_attempts, chain_ids, durable_artifact_versions,
     durable_sc_package_versions, evidence_entries, events_of, failure_message,
-    markdown_missing_five_sections, markdown_unknown_requirement_ref, only_chain_id,
-    seed_exhausted_teaching_window, session_json_bytes, start_run, start_run_with,
-    window_snapshot,
+    markdown_duplicate_trusted_command, markdown_missing_five_sections,
+    markdown_unknown_requirement_ref, only_chain_id, session_json_bytes, start_run,
+    start_run_with, window_snapshot,
 };
 use super::single_candidate_provider_run::{ProviderRunFixture, wait_for_single_candidate_phase};
 use super::*;
-use crate::cross_cutting::provider_adapter::{ProviderAdapterError, StreamingProviderAdapter};
+use crate::cross_cutting::provider_adapter::ProviderAdapterError;
 use crate::cross_cutting::streaming_provider::{
     ProviderSession, StreamChunk, StreamingProviderInput,
 };
 use crate::product::lifecycle_store::candidate_attempts::CandidateAttemptOutcome;
 use crate::product::models::SingleCandidatePhase;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+use crate::web::workspace_ws_handler::StreamingProviderAdapter;
 use tokio_util::sync::CancellationToken;
 
 /// 真实 durable 失败包版本：终局必须**由生产发布**一个 A4 版本。
@@ -71,24 +74,24 @@ fn published_failure_package(fixture: &ProviderRunFixture) -> serde_json::Value 
     version
 }
 
-/// ① 终局失败（无教学重驱）⇒ 生产必须发布 durable 失败包版本。
+/// ① **自然**终局失败（无可教资格 ⇒ 零教学重驱）⇒ 生产必须发布 durable 失败包版本。
 ///
-/// 「无教学重驱」用**生产真实判定**实现：durable 账本已有两条历史启动 ⇒ 窗口未
-/// 批准 ⇒ 教学判定 `Denied`（断言面是 durable 的 `teaching_decision` 事件）。
+/// 「无教学重驱」是**自然**失败态：重复 trusted command 属 lowering 类，不在教学
+/// 重驱白名单 ⇒ 生产判定 `Ineligible` ⇒ 零重驱、零额外启动。**不**用人工塞历史
+/// 启动条目的办法去改预算（那是篡产品预算，不是自然失败态）。
 #[tokio::test]
 async fn sc_failure_package_compile_terminal_publishes_durable_package() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
     let story_id = fixture.story_id.clone();
     let design_id = fixture.design_id.clone();
-    seed_exhausted_teaching_window(&fixture).await;
-    let output = markdown_missing_five_sections(&story_id, &design_id, "前端渲染不在本次范围内。");
+    let output = markdown_duplicate_trusted_command(&story_id, &design_id);
     let mut run = start_run(fixture, vec![output]).await;
 
     let _original_input = run.queue.next_input().await;
     let message = failure_message(&mut run.outbound).await;
     assert!(
-        message.contains("missing_section"),
-        "真实失败面必须是 missing_section: {message}"
+        message.contains("compile"),
+        "真实失败面必须是 compile 失败: {message}"
     );
     wait_for_single_candidate_phase(&run.fixture, SingleCandidatePhase::Failed).await;
     run.queue.expect_no_further_input().await;
@@ -104,24 +107,9 @@ async fn sc_failure_package_compile_terminal_publishes_durable_package() {
         .as_array()
         .expect("blocking reasons array");
     assert!(
-        reasons.len() > 4,
-        "完整阻断原因不被摘要替代（实测 {} 条）",
-        reasons.len()
+        !reasons.is_empty(),
+        "真实阻断原因必须在场（不被摘要替代）"
     );
-    for section in [
-        "Goal",
-        "Tasks",
-        "Acceptance Criteria",
-        "Verification",
-        "Handoff Schema",
-    ] {
-        assert!(
-            reasons
-                .iter()
-                .any(|reason| reason.as_str().unwrap_or_default().contains(section)),
-            "缺 section 的真实原因必须在场: {section}"
-        );
-    }
     assert!(
         !failure["repair_instructions"]
             .as_array()
@@ -133,9 +121,9 @@ async fn sc_failure_package_compile_terminal_publishes_durable_package() {
     assert_eq!(failure["source"]["status"], "available", "失败源已归档");
     let decisions = events_of(&entries, "teaching_decision");
     assert_eq!(decisions.len(), 1, "真实教学判定必须落一条");
-    assert_ne!(
-        decisions[0]["event"]["decision"], "granted",
-        "窗口未批准 ⇒ 不得授予教学重驱"
+    assert_eq!(
+        decisions[0]["event"]["decision"], "ineligible",
+        "lowering 类不可教 ⇒ 真实判定 ineligible（不得授予教学重驱）"
     );
     let terminal = events_of(&entries, "chain_terminal");
     assert_eq!(terminal.len(), 1, "真实终局条目必须落一条");
@@ -163,11 +151,37 @@ async fn sc_failure_package_compile_terminal_publishes_durable_package() {
         "包内 source 引用与 durable 证据逐字一致"
     );
 
-    // 计数口径：真实启动 = 原轮一次（零教学重驱）。
+    // 计数口径：真实启动 = 原轮一次（自然不可教 ⇒ 零教学重驱）。
     assert_eq!(
         author_start_count(&run.fixture),
-        3,
-        "durable 启动账本：两条历史 + 原轮一次（零教学重驱）"
+        1,
+        "durable 启动账本：原轮一次（零教学重驱）"
+    );
+
+    // 旧候选流水身份不被新证据改写：一失败一行 + 两次读回逐字一致（真实记录，
+    // 不是字面量；compile 通道本就没有 sealed id，故只比真实行本身）。
+    let failed_rows: Vec<_> = candidate_attempts(&run.fixture)
+        .into_iter()
+        .filter(|record| record.outcome == CandidateAttemptOutcome::Failed)
+        .collect();
+    assert_eq!(failed_rows.len(), 1, "一失败一行");
+    let first_read = failed_rows[0].clone();
+    let second_read = candidate_attempts(&run.fixture)
+        .into_iter()
+        .find(|record| record.outcome == CandidateAttemptOutcome::Failed)
+        .expect("durable failed candidate attempt");
+    assert_eq!(
+        first_read, second_read,
+        "durable 候选尝试行两次读回逐字一致（旧身份不被新证据改写）"
+    );
+    let failure_facts = first_read.failure.as_ref().expect("真实失败事实");
+    assert!(
+        !failure_facts.failure_id.is_empty(),
+        "内容寻址失败身份必须在场"
+    );
+    assert!(
+        !first_read.attempt_key.is_empty(),
+        "候选尝试幂等键必须在场（旧 key 不变）"
     );
 }
 

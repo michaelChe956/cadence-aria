@@ -21,8 +21,6 @@ use super::single_candidate_provider_run::{
 use super::*;
 use crate::cross_cutting::streaming_provider::StreamingProviderInput;
 use crate::product::lifecycle_store::candidate_attempts::CandidateAttemptRecord;
-use crate::product::models::{SingleCandidatePhase, WorkspaceSessionStatus};
-use crate::product::work_item_plan_policy::ProviderStartLedgerEntry;
 use sha2::Digest as _;
 use std::sync::atomic::AtomicUsize;
 
@@ -276,47 +274,6 @@ pub(super) fn teaching_attempt_numbers(fixture: &ProviderRunFixture) -> Vec<u8> 
         .collect()
 }
 
-/// 播种「教学窗口不可用」的 durable 态：账本里已有两条历史启动 ⇒ 原调用之外
-/// 无剩余物理机会 ⇒ 窗口未批准 ⇒ 教学判定 `Denied` ⇒ 零教学重驱。
-pub(super) async fn seed_exhausted_teaching_window(fixture: &ProviderRunFixture) {
-    let record = fixture
-        .lifecycle
-        .get_workspace_session(&fixture.record.id)
-        .expect("reload session");
-    let ledger: Vec<ProviderStartLedgerEntry> = (0..2)
-        .map(|ordinal| ProviderStartLedgerEntry {
-            provider_start_idempotency_key: format!(
-                "single_candidate_author:{}:{ordinal}",
-                fixture.record.id
-            ),
-            started: true,
-            provider: None,
-            started_at: None,
-            provider_attempt_key: None,
-        })
-        .collect();
-    let persist = crate::product::lifecycle_store::PolicyRoutePersist {
-        status: WorkspaceSessionStatus::Running,
-        single_candidate_phase: Some(SingleCandidatePhase::Generate),
-        run_history: record.run_history.clone(),
-        scope: record.review_invocation_scope.clone(),
-        gate: None,
-        diagnostics: record.policy_diagnostics.clone(),
-        repair_reservation: None,
-        provider_start_ledger: ledger,
-        author_rewrite_budget: record.author_rewrite_budget.clone(),
-    };
-    let seeded = fixture
-        .lifecycle
-        .compare_and_save_policy_route(&record, persist)
-        .expect("seed durable policy route");
-    fixture
-        .engine
-        .lock()
-        .await
-        .reload_session_from_record(seeded);
-}
-
 // ── 失败样本（复用既有夹具样本，不另造） ──────────────────────────────────
 
 /// 删除五段 section，制造**多段** missing_section 编译失败（真实 cause 数组 >4 条）。
@@ -354,6 +311,19 @@ pub(super) fn markdown_missing_five_sections(
 /// IR 预检失败样本：非法 requirement 引用（复用既有 IR 重驱夹具函数）。
 pub(super) fn markdown_unknown_requirement_ref(story_id: &str, design_id: &str) -> String {
     super::single_candidate_ir_reredrive::markdown_with_unknown_requirement_ref(story_id, design_id)
+}
+
+/// **自然**不可教的 compile 失败样本：重复 trusted command（lowering 类不在教学
+/// 重驱白名单 ⇒ 零重驱，天然终局）。
+///
+/// 与既有夹具的私有样本 `single_candidate_markdown_with_duplicate_command` 同款
+/// （既有 helper 是私有的，这里只复用其**样本内容**，不改既有文件可见性）。
+pub(super) fn markdown_duplicate_trusted_command(story_id: &str, design_id: &str) -> String {
+    single_candidate_markdown(story_id, design_id).replacen(
+        "- check_id: CHECK-001\n- manual_instruction: Inspect the backend API response manually.",
+        "- check_id: CHECK-001\n- command: cargo test --locked --lib backend_api\n- manual_instruction: Inspect the backend API response manually.\n- required: true\n- non_zero_test_execution_required: false\n- check_id: CHECK-002\n- command: cargo test --locked --lib backend_api\n- manual_instruction: Confirm the backend API response manually.\n- required: true\n- non_zero_test_execution_required: false",
+        1,
+    )
 }
 
 // ── 结构化 source 块提取（不 pin 措辞、不 trim 末尾 LF） ──────────────────
