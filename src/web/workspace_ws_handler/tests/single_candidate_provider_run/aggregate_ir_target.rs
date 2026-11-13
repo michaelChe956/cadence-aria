@@ -542,3 +542,183 @@ async fn omitted_parse_diagnostics_fully_retrievable_from_durable_audit() {
         "审计接入不得改变 failure_id（被哈希 detail 逐字未动）"
     );
 }
+
+// append to src/web/workspace_ws_handler/tests/single_candidate_provider_run/aggregate_ir_target.rs
+// (included into module `single_candidate_provider_run`: mpsc/Arc/session types/
+//  provider_session_with_output/fixture+helpers are already in scope; no new mount).
+// RED until P08 wires begin_sc_failure_round before the physical start.
+
+/// Provider whose `start` body *is* the physical start edge: it reads the strict
+/// evidence log on disk at that instant and records what it sees, so "RoundBound
+/// durable before start" is observed as a fact, not inferred from a zero counter.
+struct StartOrderProvider {
+    output: String,
+    inputs: mpsc::UnboundedSender<StreamingProviderInput>,
+    timeline_root: std::path::PathBuf,
+    starts: Arc<std::sync::atomic::AtomicUsize>,
+    round_bound_at_start: Arc<std::sync::Mutex<Option<bool>>>,
+}
+
+#[async_trait::async_trait]
+impl StreamingProviderAdapter for StartOrderProvider {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
+        self.starts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let observed = evidence_log_has_round_bound(&self.timeline_root);
+        *self.round_bound_at_start.lock().expect("order slot") = Some(observed);
+        let _ = self.inputs.send(input);
+        provider_session_with_output(self.output.clone()).await
+    }
+
+    async fn run_streaming(
+        &self,
+        _input: &crate::protocol::contracts::AdapterInput,
+        _cancel: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
+        unreachable!("workspace provider-run tests use start")
+    }
+}
+
+/// 本会话严格证据日志（`<timeline>/sc-failure-evidence/*/rounds.jsonl`）是否已含
+/// 一条可完整反序列化的 `RoundBound` 条目——按真实 store 条目类型解析 JSON 行。
+fn evidence_log_has_round_bound(timeline_root: &std::path::Path) -> bool {
+    use crate::product::lifecycle_store::sc_failure_evidence::{
+        ScFailureEvidenceEntry, ScFailureEvidenceEvent,
+    };
+    let Ok(chains) = std::fs::read_dir(timeline_root.join("sc-failure-evidence")) else {
+        return false;
+    };
+    chains.flatten().any(|chain| {
+        let Ok(body) = std::fs::read_to_string(chain.path().join("rounds.jsonl")) else {
+            return false;
+        };
+        body.lines().any(|line| {
+            serde_json::from_str::<ScFailureEvidenceEntry>(line)
+                .map(|entry| matches!(entry.event, ScFailureEvidenceEvent::RoundBound { .. }))
+                .unwrap_or(false)
+        })
+    })
+}
+
+fn start_order_provider(
+    fixture: &ProviderRunFixture,
+) -> (
+    Arc<StartOrderProvider>,
+    mpsc::UnboundedReceiver<StreamingProviderInput>,
+) {
+    let (input_tx, input_rx) = mpsc::unbounded_channel();
+    let timeline_root = fixture
+        .lifecycle
+        .workspace_timeline_root_for_session(&fixture.record.id)
+        .expect("timeline root");
+    let provider = Arc::new(StartOrderProvider {
+        output: single_candidate_markdown(&fixture.story_id, &fixture.design_id),
+        inputs: input_tx,
+        timeline_root,
+        starts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        round_bound_at_start: Arc::new(std::sync::Mutex::new(None)),
+    });
+    (provider, input_rx)
+}
+
+/// P08：SC 原轮物理 start 之前 RoundBound 必须已 durable（start 回调内可读）。
+#[tokio::test]
+async fn sc_round_bound_is_durable_at_the_physical_start_edge() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let (provider, mut input_rx) = start_order_provider(&fixture);
+    // start 回调发首轮输入：等到它即证明 start 已观测；helper 继续等 HumanConfirm
+    // 并确认零额外启动。
+    let _first = sc_start_and_capture_first_input(&fixture, provider.clone(), &mut input_rx).await;
+
+    assert_eq!(
+        provider
+            .starts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "SC 原轮恰一次物理启动"
+    );
+    assert_eq!(
+        *provider.round_bound_at_start.lock().expect("order slot"),
+        Some(true),
+        "物理 start 回调内必须已能读到完整的 RoundBound 条目（先落盘，后启动）"
+    );
+    let durable = t17_latest_record(&fixture);
+    assert_eq!(
+        durable
+            .provider_start_ledger
+            .iter()
+            .filter(|entry| entry.is_actual_launch_observation())
+            .count(),
+        1,
+        "耐久账本恰一条真实 start"
+    );
+}
+
+/// P08：绑定落盘失败 ⇒ 物理 start 绝不发生，也不 claim 教学预算。
+#[tokio::test]
+async fn sc_bound_write_failure_blocks_physical_start_and_teaching_claim() {
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    // 真实故障、非 mock：证据分区路径被普通文件占位，证据目录无法建立。
+    let timeline_root = fixture
+        .lifecycle
+        .workspace_timeline_root_for_session(&fixture.record.id)
+        .expect("timeline root");
+    std::fs::create_dir_all(&timeline_root).expect("timeline dir");
+    std::fs::write(timeline_root.join("sc-failure-evidence"), b"not-a-directory")
+        .expect("inject file-instead-of-dir");
+
+    let (provider, _input_rx) = start_order_provider(&fixture);
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider.clone());
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+
+    // spawn 只登记 run（不等待执行）：先等可见失败原因，再等 durable 终态。
+    let message = next_error_message(&mut outbound_rx).await;
+    assert!(
+        message.contains("sc_failure"),
+        "失败原因必须可见（严格证据写失败）: {message}"
+    );
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+
+    assert_eq!(
+        provider
+            .starts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "绑定落盘失败不得新增任何 provider start"
+    );
+    assert_eq!(
+        *provider.round_bound_at_start.lock().expect("order slot"),
+        None,
+        "provider 从未启动"
+    );
+    let durable = t17_latest_record(&fixture);
+    assert_eq!(
+        durable
+            .provider_start_ledger
+            .iter()
+            .filter(|entry| entry.is_actual_launch_observation())
+            .count(),
+        0,
+        "耐久账本零真实 start"
+    );
+    assert!(
+        durable.sc_generation_teaching_windows.is_empty(),
+        "绑定失败不 claim 教学窗口"
+    );
+}
