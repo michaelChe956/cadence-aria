@@ -648,13 +648,11 @@ async fn draft_fresh_uses_frozen_feedback_retry_once_budget_and_new_split_handle
     );
     {
         let mut engine = fixture.engine.lock().await;
-        engine
-            .update_artifact(case_outline_artifact(
-                vec![outline.clone()],
-                &fixture.story_id,
-                &fixture.design_id,
-            ))
-            .await;
+        engine.update_artifact(case_outline_artifact(
+            vec![outline.clone()],
+            &fixture.story_id,
+            &fixture.design_id,
+        )).await.expect("fixture artifact write");
         engine.session.provider_conversations = vec![case_old_author_conversation_ref()];
         engine.pending_revision_context =
             Some("P5内存残留反馈（不得进入draft fresh输入）".to_string());
@@ -854,13 +852,11 @@ async fn batch_fresh_uses_frozen_payload_keeps_batch_and_continues_loop() {
     );
     {
         let mut engine = fixture.engine.lock().await;
-        engine
-            .update_artifact(case_outline_artifact(
-                vec![outline_a.clone(), outline_b.clone()],
-                &fixture.story_id,
-                &fixture.design_id,
-            ))
-            .await;
+        engine.update_artifact(case_outline_artifact(
+            vec![outline_a.clone(), outline_b.clone()],
+            &fixture.story_id,
+            &fixture.design_id,
+        )).await.expect("fixture artifact write");
         engine.session.provider_conversations = vec![case_old_author_conversation_ref()];
         engine.pending_revision_context =
             Some("P5batch内存残留反馈（不得进入fresh输入）".to_string());

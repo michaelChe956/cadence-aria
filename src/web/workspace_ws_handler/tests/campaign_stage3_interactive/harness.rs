@@ -311,12 +311,10 @@ pub(super) async fn campaign_stage3_fixture(
         SingleCandidatePhase::Approval,
         gate_refs,
     );
-    engine
-        .update_artifact(ArtifactPayload::Markdown {
-            markdown: REP4_CANDIDATE.to_string(),
-            diff: None,
-        })
-        .await;
+    engine.update_artifact(ArtifactPayload::Markdown {
+        markdown: REP4_CANDIDATE.to_string(),
+        diff: None,
+    }).await.expect("fixture artifact write");
     let artifact = engine.session.artifact.clone();
     let mut record = lifecycle
         .get_workspace_session(&engine.session().session_id)

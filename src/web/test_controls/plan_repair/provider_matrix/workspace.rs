@@ -69,9 +69,7 @@ pub(super) async fn run_workspace_provider_roles(
     session.repository_path = Some(root.join("worktree"));
     let mut engine =
         WorkspaceEngine::new_persistent(checkpoint_store, lifecycle.clone(), event_tx, session);
-    engine
-        .update_artifact(outline_artifact(author_contract))
-        .await;
+    engine.update_artifact(outline_artifact(author_contract)).await.expect("fixture artifact write");
     WorkItemPlanStore::new(paths)
         .save_active_index(&WorkItemPlanDraftActiveIndex {
             project_id: PROJECT_ID.to_string(),

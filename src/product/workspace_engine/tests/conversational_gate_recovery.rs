@@ -705,12 +705,10 @@ async fn orphaned_candidate_snapshot_requires_recovery_before_approve() {
         SingleCandidatePhase::Approval,
         gate_refs,
     );
-    engine
-        .update_artifact(ArtifactPayload::Markdown {
-            markdown: rep4_candidate.clone(),
-            diff: None,
-        })
-        .await;
+    engine.update_artifact(ArtifactPayload::Markdown {
+        markdown: rep4_candidate.clone(),
+        diff: None,
+    }).await.expect("fixture artifact write");
     let mut record = lifecycle
         .get_workspace_session(&engine.session().session_id)
         .expect("session record");

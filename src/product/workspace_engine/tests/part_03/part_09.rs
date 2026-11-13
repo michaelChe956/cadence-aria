@@ -636,7 +636,7 @@ async fn compile_recovery_continue_replays_pre_active_publication_with_same_tx_a
     let (_tmp, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let outline_payload = engine.session.artifact.clone().unwrap();
-    engine.update_artifact(outline_payload).await;
+    engine.update_artifact(outline_payload).await.expect("fixture artifact write");
     let (compile_tx, accepted_drafts) = prepare_initial_compile_transaction(
         &engine,
         &lifecycle,
@@ -780,7 +780,7 @@ async fn compile_recovery_continue_replays_each_pre_active_publication_checkpoin
         let (_tmp, lifecycle, plan_id, mut engine) =
             make_work_item_plan_engine_with_accepted_contract_drafts();
         let outline_payload = engine.session.artifact.clone().expect("outline artifact");
-        engine.update_artifact(outline_payload).await;
+        engine.update_artifact(outline_payload).await.expect("fixture artifact write");
         let compile_id = format!("compile_pre_active_{checkpoint:?}").to_lowercase();
         let (compile_tx, accepted_drafts) = prepare_initial_compile_transaction(
             &engine,

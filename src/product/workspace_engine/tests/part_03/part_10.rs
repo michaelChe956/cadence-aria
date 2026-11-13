@@ -3,7 +3,7 @@ async fn compile_recovery_abort_rejects_prepared_publication_and_preserves_conti
     let (_tmp, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let outline_payload = engine.session.artifact.clone().unwrap();
-    engine.update_artifact(outline_payload).await;
+    engine.update_artifact(outline_payload).await.expect("fixture artifact write");
     let (compile_tx, accepted_drafts) = prepare_initial_compile_transaction(
         &engine,
         &lifecycle,
