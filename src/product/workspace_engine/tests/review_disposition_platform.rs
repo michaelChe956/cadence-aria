@@ -718,11 +718,7 @@ async fn sc_projection_live_and_historical_share_view_and_keep_durable_raw() {
     let mut engine = fixture.engine();
     engine.timeline_nodes.push(review_timeline_node(node_id));
     let live = engine
-        .finalize_review_verdict(
-            node_id,
-            "readable output".to_string(),
-            raw_verdict.clone(),
-        )
+        .finalize_review_verdict(node_id, "readable output".to_string(), raw_verdict.clone())
         .await;
     assert_eq!(
         live.findings[0].disposition,
@@ -750,12 +746,9 @@ async fn sc_projection_live_and_historical_share_view_and_keep_durable_raw() {
     // 历史刷新：反序列化/历史兼容写回之后再投影，与 live 同一有效视图。
     let session = WorkspaceSession::from_record(fixture.record.clone());
     let nodes = vec![review_timeline_node(node_id)];
-    let historical = session_state::latest_review_verdict_for_session(
-        &fixture.store,
-        &session,
-        &nodes,
-    )
-    .expect("historical verdict readable");
+    let historical =
+        session_state::latest_review_verdict_for_session(&fixture.store, &session, &nodes)
+            .expect("historical verdict readable");
     assert_eq!(
         historical.findings[0].disposition,
         Some(ReviewFindingDisposition::Advisory),
@@ -787,16 +780,16 @@ async fn sc_projection_requires_trusted_single_candidate_session() {
         let fixture = platform_fixture_with(entity, workspace_type, None);
         let mut engine = fixture.engine();
         let effective = engine
-            .finalize_review_verdict(
-                "not_a_timeline_node",
-                String::new(),
-                sc_narrow_verdict(),
-            )
+            .finalize_review_verdict("not_a_timeline_node", String::new(), sc_narrow_verdict())
             .await;
         assert_eq!(effective.findings[0].disposition, None, "{entity}");
         assert!(effective.findings[0].is_actionable(), "{entity}");
         assert_eq!(effective.verdict, ReviewVerdictType::Revise, "{entity}");
-        assert_eq!(effective.review_gate, ReviewGate::UserConfirmAllowed, "{entity}");
+        assert_eq!(
+            effective.review_gate,
+            ReviewGate::UserConfirmAllowed,
+            "{entity}"
+        );
     }
 }
 
@@ -849,8 +842,10 @@ async fn missing_disposition_outside_slice_and_real_blockers_stay_fail_closed() 
 
     // 混合 verdict：命中的建议被投影，真必修仍阻断（不因建议降级而放行）；
     // 模型标 advisory 的契约类缺口经平台加固仍是 actionable。
-    let mut contract_advisory =
-        finding(ReviewFindingSeverity::Suggestion, "自相矛盾：目标同时要求做与不做");
+    let mut contract_advisory = finding(
+        ReviewFindingSeverity::Suggestion,
+        "自相矛盾：目标同时要求做与不做",
+    );
     contract_advisory.category = Some(ReviewFindingCategory::SelfContradiction);
     contract_advisory.disposition = Some(ReviewFindingDisposition::Advisory);
     let contract_advisory = contract_advisory.with_platform_disposition_rules();
