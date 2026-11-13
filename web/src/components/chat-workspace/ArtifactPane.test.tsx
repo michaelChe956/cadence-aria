@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { ArtifactVersion, ArtifactVersionSummary } from "../../state/workspace-ws-store";
+import type { ScFailureRepairPackage } from "../../api/types";
 import { ArtifactPane } from "./ArtifactPane";
 
 vi.mock("../shared/MonacoViewer", () => ({
@@ -353,7 +354,122 @@ describe("ArtifactPane", () => {
     fireEvent.click(screen.getByRole("button", { name: "展开 Artifact" }));
     expect(screen.getByLabelText("Artifact 版本")).toBeInTheDocument();
   });
+
+  // REQ34 原范围：A4 包恒 is_current=false，只以已发布 artifactVersions 条目出现；
+  // rail 以最高版本为初值 ⇒ 默认选中该包（不读 current，不替换普通 artifact）。
+  it("renders the published SC failure package for the selected version without loading its markdown", () => {
+    const loadArtifactVersion = vi.fn(() => Promise.resolve("# Artifact v1\n\n历史计划正文"));
+
+    render(
+      <ArtifactPane
+        // summaries 故意不带包版本：rail 必须由 typed 版本投影补齐（published versions 选择）
+        artifactVersions={[artifactVersionSummary(1)]}
+        artifact="# 普通 current markdown"
+        sessionId="session-1"
+        loadArtifactVersion={loadArtifactVersion}
+        structuredVersions={[
+          {
+            ...artifactVersionSummary(2),
+            is_current: false,
+            artifact: { type: "sc_failure_repair_package", payload: SC_FAILURE_REPAIR_PACKAGE },
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("sc-failure-repair-package-view")).toBeVisible();
+    expect(
+      JSON.parse(screen.getByTestId("sc-failure-repair-package-json").textContent ?? "null"),
+    ).toEqual(SC_FAILURE_REPAIR_PACKAGE);
+    // 未落 markdown 兜底：既不渲染普通 current，也不为包版本发 markdown 请求
+    expect(screen.queryByTestId("monaco-viewer")).toBeNull();
+    expect(loadArtifactVersion).not.toHaveBeenCalledWith(2);
+    // 包版本在既有 rail 上可识别（复用 workItemPlanArtifactLabel 的标签）
+    expect(screen.getByRole("option", { name: /SC Failure Repair/ })).toBeInTheDocument();
+  });
+
+  it("returns to the existing markdown view for a history version after showing the package", async () => {
+    const loadArtifactVersion = vi.fn(() => Promise.resolve("# Artifact v1\n\n历史计划正文"));
+
+    render(
+      <ArtifactPane
+        artifactVersions={[artifactVersionSummary(1), { ...artifactVersionSummary(2), is_current: false }]}
+        artifact={null}
+        sessionId="session-1"
+        loadArtifactVersion={loadArtifactVersion}
+        structuredVersions={[
+          {
+            ...artifactVersionSummary(2),
+            is_current: false,
+            artifact: { type: "sc_failure_repair_package", payload: SC_FAILURE_REPAIR_PACKAGE },
+          },
+        ]}
+      />,
+    );
+
+    expect(screen.getByTestId("sc-failure-repair-package-view")).toBeVisible();
+
+    fireEvent.change(screen.getByLabelText("Artifact 版本"), { target: { value: "1" } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("历史计划正文");
+    });
+    expect(screen.queryByTestId("sc-failure-repair-package-view")).toBeNull();
+    expect(loadArtifactVersion).toHaveBeenCalledWith(1);
+  });
 });
+
+const SC_FAILURE_REPAIR_PACKAGE: ScFailureRepairPackage = {
+  schema_version: 1,
+  package_id: "scfp_default_surface",
+  chain_id: "chain_0001",
+  session_id: "session_sc_0001",
+  project_id: "project_0001",
+  issue_id: "issue_0001",
+  plan_id: "plan_0001",
+  terminal_class: "compile",
+  terminal_reason: "compile 失败：parse 原因未消除",
+  completeness: "complete",
+  rounds: [
+    {
+      identity: {
+        chain_id: "chain_0001",
+        round_id: "round_1",
+        node_id: "node_author_1",
+        round_ordinal: 1,
+        provider: "claude_code",
+        workspace_session_id: "session_sc_0001",
+        role_run_seq: 1,
+        run_ref: "ws-session_sc_0001-split-run-1",
+      },
+      launch_state: "started",
+      failure_class: "compile",
+      blocking_reasons: ["parse: 缺少 REQ-001 验收标准"],
+      repair_instructions: ["补齐 REQ-001 验收标准"],
+      raw: { status: "available", locator: "rounds/1/raw.txt", sha256: "a".repeat(64), bytes: 42 },
+      source: { status: "available", locator: "rounds/1/source.md", sha256: "b".repeat(64), bytes: 84 },
+      existing_failure_id: null,
+      attempt_key: null,
+      prompts: [],
+      teaching_decision: "granted",
+    },
+  ],
+  last_provider_output: {
+    status: "available",
+    locator: "rounds/1/raw.txt",
+    sha256: "a".repeat(64),
+    bytes: 42,
+  },
+  last_failure_source: {
+    source_round_id: "round_1",
+    source: { status: "available", locator: "rounds/1/source.md", sha256: "b".repeat(64), bytes: 84 },
+  },
+  teaching_prompts: [],
+  evidence_log_ref: "issues/issue_0001/sc-failure-evidence.jsonl",
+  evidence_digest: "c".repeat(64),
+  evidence_through_entry_key: "entry_0042",
+  missing_evidence: [],
+};
 
 function artifactVersions(): ArtifactVersion[] {
   return [

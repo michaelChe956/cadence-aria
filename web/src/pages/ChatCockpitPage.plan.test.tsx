@@ -17,7 +17,7 @@ import {
   type TimelineNode,
   type WorkspaceWsState,
 } from "../state/workspace-ws-store";
-import type { PlanProjectionBundle } from "../api/types";
+import type { PlanProjectionBundle, ScFailureRepairPackage } from "../api/types";
 import {
   fetchWorkspaceArtifactVersion,
   fetchWorkspaceNodeDetail,
@@ -185,6 +185,58 @@ describe("ChatCockpitPage", () => {
     // F-38：plan 会话此前没有「产物审核」页签——Work Item Plan 全文（artifact_versions
     // 单串 markdown）在 cockpit 里不可达；PlanApprovalPanel 的数据源是 plan-repair
     // 链路，普通 SC 会话空转。产物页签扩到 work_item_plan（复用 ArtifactReviewPanel）。
+    const SC_FAILURE_REPAIR_PACKAGE: ScFailureRepairPackage = {
+      schema_version: 1,
+      package_id: "scfp_cockpit_default",
+      chain_id: "chain_0001",
+      session_id: "session_001",
+      project_id: "project_0001",
+      issue_id: "issue_0001",
+      plan_id: "plan_0001",
+      terminal_class: "compile",
+      terminal_reason: "compile 失败：parse 原因未消除",
+      completeness: "complete",
+      rounds: [
+        {
+          identity: {
+            chain_id: "chain_0001",
+            round_id: "round_1",
+            node_id: "timeline_node_001",
+            round_ordinal: 1,
+            provider: "fake",
+            workspace_session_id: "session_001",
+            role_run_seq: 1,
+            run_ref: "ws-session_001-split-run-1",
+          },
+          launch_state: "started",
+          failure_class: "compile",
+          blocking_reasons: ["parse: 缺少 REQ-001 验收标准"],
+          repair_instructions: ["补齐 REQ-001 验收标准"],
+          raw: { status: "available", locator: "rounds/1/raw.txt", sha256: "a".repeat(64), bytes: 42 },
+          source: { status: "available", locator: "rounds/1/source.md", sha256: "b".repeat(64), bytes: 84 },
+          existing_failure_id: null,
+          attempt_key: null,
+          prompts: [],
+          teaching_decision: "granted",
+        },
+      ],
+      last_provider_output: {
+        status: "available",
+        locator: "rounds/1/raw.txt",
+        sha256: "a".repeat(64),
+        bytes: 42,
+      },
+      last_failure_source: {
+        source_round_id: "round_1",
+        source: { status: "available", locator: "rounds/1/source.md", sha256: "b".repeat(64), bytes: 84 },
+      },
+      teaching_prompts: [],
+      evidence_log_ref: "issues/issue_0001/sc-failure-evidence.jsonl",
+      evidence_digest: "c".repeat(64),
+      evidence_through_entry_key: "entry_0042",
+      missing_evidence: [],
+    };
+
     function planArtifactVersion(versionNo: number, isCurrent = true) {
       return {
         version: versionNo,
@@ -231,6 +283,72 @@ describe("ChatCockpitPage", () => {
         "审批：通过",
       );
       expect(vi.mocked(fetchWorkspaceArtifactVersion)).toHaveBeenCalledWith("session_001", 1);
+    });
+
+    // A4/P11 真实形态：session.artifact 保持最后普通 current（markdown），包只作为
+    // published artifact_versions 条目出现且 is_current=false；默认面必须从版本投影取包。
+    it("shows the published SC failure package from artifact_versions on the default cockpit surface", async () => {
+      const user = userEvent.setup();
+      vi.mocked(fetchWorkspaceArtifactVersion).mockReset();
+      vi.mocked(fetchWorkspaceArtifactVersion).mockResolvedValue({
+        version: 1,
+        markdown: "# Work Item Plan\n## WI-001 登录\n",
+      });
+
+      useWorkspaceStore.getState().setSessionState({
+        session_id: "session_001",
+        workspace_type: "work_item_plan",
+        stage: "human_confirm",
+        session_status: "waiting_for_human",
+        flow_kind: "legacy",
+        run_policy: "interactive",
+        run_history: {
+          seen_fingerprints: [],
+          repairs_used: 0,
+          manual_repairs_used: 0,
+          transitions_used: 0,
+          initial_review_count: 0,
+          verification_review_count: 0,
+        },
+        messages: [],
+        checkpoints: [],
+        artifact: "# Work Item Plan\n## WI-001 登录\n",
+        providers: { author: "fake", reviewer: null },
+        artifact_versions: [
+          {
+            version: 1,
+            markdown: "# Work Item Plan\n## WI-001 登录\n",
+            generated_by: "fake",
+            created_at: "2026-11-13T00:00:00Z",
+            source_node_id: "timeline_node_001",
+            is_current: true,
+          },
+          {
+            version: 2,
+            generated_by: "fake",
+            created_at: "2026-11-13T00:01:00Z",
+            source_node_id: "timeline_node_002",
+            is_current: false,
+            sc_failure_repair_package: SC_FAILURE_REPAIR_PACKAGE,
+          },
+        ],
+      });
+
+      renderCockpit();
+
+      await user.click(screen.getByTestId("cockpit-artifact-review-tab"));
+
+      expect(screen.getByTestId("sc-failure-repair-package-view")).toBeVisible();
+      expect(
+        JSON.parse(screen.getByTestId("sc-failure-repair-package-json").textContent ?? "null"),
+      ).toEqual(SC_FAILURE_REPAIR_PACKAGE);
+      expect(screen.queryByTestId("monaco-viewer")).toBeNull();
+
+      // REQ34 历史版本响应：切回 v1 仍走既有 markdown 全文通路。
+      fireEvent.change(screen.getByLabelText("Artifact 版本"), { target: { value: "1" } });
+
+      expect(screen.getByTestId("monaco-viewer")).toHaveTextContent("WI-001");
+      expect(screen.queryByTestId("sc-failure-repair-package-view")).toBeNull();
     });
 
     it("keeps the plan artifact panel free of story/design finalize actions", async () => {
