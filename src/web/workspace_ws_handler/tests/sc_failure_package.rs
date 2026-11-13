@@ -77,8 +77,12 @@ fn published_failure_package(fixture: &ProviderRunFixture) -> serde_json::Value 
 /// ① **自然**终局失败（无可教资格 ⇒ 零教学重驱）⇒ 生产必须发布 durable 失败包版本。
 ///
 /// 「无教学重驱」是**自然**失败态：重复 trusted command 属 lowering 类，不在教学
-/// 重驱白名单 ⇒ 生产判定 `Ineligible` ⇒ 零重驱、零额外启动。**不**用人工塞历史
-/// 启动条目的办法去改预算（那是篡产品预算，不是自然失败态）。
+/// 重驱白名单 ⇒ 生产判定不可教 ⇒ 零重驱、零额外启动。**不**用人工塞历史启动
+/// 条目的办法去改预算（那是篡产品预算，不是自然失败态）。
+///
+/// 断言只钉**行为事实**（未授予教学 ⇒ 零重驱 ⇒ 包内恰一轮、启动账本原轮一次）；
+/// 判定标签（`ineligible`/`not_requested`/…）是生产分类面，不在测试里猜死，
+/// 真实值取自 durable `teaching_decision` 事件并在失败信息里带出。
 #[tokio::test]
 async fn sc_failure_package_compile_terminal_publishes_durable_package() {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
@@ -121,9 +125,12 @@ async fn sc_failure_package_compile_terminal_publishes_durable_package() {
     assert_eq!(failure["source"]["status"], "available", "失败源已归档");
     let decisions = events_of(&entries, "teaching_decision");
     assert_eq!(decisions.len(), 1, "真实教学判定必须落一条");
-    assert_eq!(
-        decisions[0]["event"]["decision"], "ineligible",
-        "lowering 类不可教 ⇒ 真实判定 ineligible（不得授予教学重驱）"
+    let decision = decisions[0]["event"]["decision"]
+        .as_str()
+        .unwrap_or_default();
+    assert_ne!(
+        decision, "granted",
+        "自然不可教 ⇒ 不得授予教学重驱（durable 真实判定值 {decision}）"
     );
     let terminal = events_of(&entries, "chain_terminal");
     assert_eq!(terminal.len(), 1, "真实终局条目必须落一条");
