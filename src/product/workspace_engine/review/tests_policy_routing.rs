@@ -22,30 +22,9 @@ fn normalized_route(engine: &WorkspaceEngine, nodes_before: usize) -> Normalized
             .collect(),
     }
 }
-
-fn artifact_variant(engine: &WorkspaceEngine) -> Option<&'static str> {
-    engine
-        .session()
-        .artifact
-        .as_ref()
-        .map(|artifact| match artifact {
-            ArtifactPayload::Markdown { .. } => "markdown",
-            ArtifactPayload::WorkItemPlanCandidate { .. } => "work_item_plan_candidate",
-            ArtifactPayload::WorkItemPlanOutlineCandidate { .. } => {
-                "work_item_plan_outline_candidate"
-            }
-            ArtifactPayload::WorkItemPlanContextBlocker { .. } => "work_item_plan_context_blocker",
-            ArtifactPayload::WorkItemDraftCandidate { .. } => "work_item_draft_candidate",
-            ArtifactPayload::WorkItemBatchState { .. } => "work_item_batch_state",
-            ArtifactPayload::WorkItemPlanCompileReport { .. } => "work_item_plan_compile_report",
-            ArtifactPayload::WorkItemPlanProjection { .. } => "work_item_plan_projection",
-            ArtifactPayload::WorkItemProjection { .. } => "work_item_projection",
-            ArtifactPayload::WorkItemRevisionHistory { .. } => "work_item_revision_history",
-            ArtifactPayload::ProjectionValidation { .. } => "projection_validation",
-            ArtifactPayload::PlanAmendmentManifest { .. } => "plan_amendment_manifest",
-        })
-}
-
+#[path = "tests_policy_routing_artifact.rs"]
+mod tests_policy_routing_artifact;
+use tests_policy_routing_artifact::artifact_variant;
 fn normalized_stage(stage: WorkspaceStage) -> String {
     format!("{stage:?}")
 }
