@@ -221,9 +221,17 @@ pub(super) fn ir_failure_facts(
     }
 }
 
-/// 结构门通道纯 facts：原 typed 失败集逐条渲染（sidecar 原样，不重算）；
-/// source 只认 sealed 失败的 revision ref，缺 ref 显式 Missing，绝不借 split
-/// locator 冒充 revision；existing_failure_id 取 seal 后的内容寻址 id。
+/// 结构门通道纯 facts：原 typed 失败集逐条渲染（sidecar 原样，不重算）。
+///
+/// source 描述**本轮真实交付的归一化正文**（与 compile/IR 同口径，locator 取
+/// 本轮 split 产物）：store 的 FailureObserved 校验要求 raw 与 source 的
+/// Available locator 都等于本轮 split locator（
+/// `sc_failure_split_locator(session, role_run_seq)`），把 sealed 失败的
+/// canonical revision ref 放进 source locator 会被拒。revision 身份不丢失：
+/// sealed 失败本体（含 `source_revision_ref`）与内容寻址 `failure_id` 仍在
+/// `existing_failure_id`／原失败对象上，P20 resolver 按 canonical ref 读
+/// revision，不经本事件。
+/// existing_failure_id 取 seal 后的内容寻址 id。
 pub(super) fn structure_failure_facts(
     failure: &PlanningCompileFailure,
     structure_failures: &PlanningFailureSet,
@@ -232,19 +240,7 @@ pub(super) fn structure_failure_facts(
     source_sha256: String,
     source_bytes: u64,
 ) -> ScFailureFacts {
-    let source = match &failure.source_revision_ref {
-        Some(locator) => ScEvidenceRef::Available {
-            locator: locator.clone(),
-            sha256: source_sha256,
-            bytes: source_bytes,
-        },
-        None => ScEvidenceRef::Missing {
-            code: "sc_failure_source_ref_missing".to_string(),
-            detail: "结构失败缺少 source_revision_ref，不能借用 split locator 冒充 revision"
-                .to_string(),
-            round_id: round.round_id.clone(),
-        },
-    };
+    let source = round_source_ref_from_digest(raw, source_sha256, source_bytes, &round.round_id);
     ScFailureFacts {
         failure_class: ScFailureClass::StructureGate,
         blocking_reasons: structure_blocking_reasons(structure_failures),
@@ -620,12 +616,23 @@ fn raw_archived(raw: &ScEvidenceRef) -> bool {
 /// compile/IR 的 source 引用：与 raw 同 locator，摘要/字节数为归一化正文
 /// 的真值；raw 缺失时 source 也显式缺失（本轮身份，不借别轮）。
 fn round_source_ref(raw: &ScEvidenceRef, source: &str, round_id: &str) -> ScEvidenceRef {
+    round_source_ref_from_digest(raw, sc_sha256(source), source.len() as u64, round_id)
+}
+
+/// 同上，但摘要/字节数由调用方预取（结构臂在 source move 前已算出）。
+fn round_source_ref_from_digest(
+    raw: &ScEvidenceRef,
+    sha256: String,
+    bytes: u64,
+    round_id: &str,
+) -> ScEvidenceRef {
     match raw {
         ScEvidenceRef::Available { locator, .. } => ScEvidenceRef::Available {
             locator: locator.clone(),
-            sha256: sc_sha256(source),
-            bytes: source.len() as u64,
+            sha256,
+            bytes,
         },
+        // raw 缺失 ⇒ 本轮无交付正文，source 同缺（不借别轮 locator）。
         ScEvidenceRef::Missing { code, detail, .. } => ScEvidenceRef::Missing {
             code: code.clone(),
             detail: detail.clone(),
