@@ -40,13 +40,30 @@ thread_local! {
     static TEST_SHELL_PROBE: RefCell<Option<ShellEnvProbe>> = const { RefCell::new(None) };
 }
 
-#[cfg(not(test))]
+/// overlay 注册表**存储实现**（F12）：生产 = **进程级全局**（跨线程共享是
+/// 生产语义，子进程 env 由任意工作线程构造）；测试默认 = **线程级**（并行
+/// 用例互不污染，见 `TEST_OVERLAY`）。两种实现都能被同一组断言直接驱动
+/// （`*_in` 系函数）⇒ 生产语义不再只靠「测试构建换掉存储」来假定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayStorage {
+    ProcessGlobal,
+    ThreadLocal,
+}
+
+/// 默认存储：测试构建走线程级（隔离），生产构建走进程级（跨线程共享）。
+fn default_storage() -> OverlayStorage {
+    if cfg!(test) {
+        OverlayStorage::ThreadLocal
+    } else {
+        OverlayStorage::ProcessGlobal
+    }
+}
+
 fn registry() -> &'static Mutex<Vec<OverlayEntry>> {
     static REGISTRY: LazyLock<Mutex<Vec<OverlayEntry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
     &REGISTRY
 }
 
-#[cfg(not(test))]
 fn lock_registry() -> MutexGuard<'static, Vec<OverlayEntry>> {
     registry()
         .lock()
@@ -57,29 +74,38 @@ fn lock_registry() -> MutexGuard<'static, Vec<OverlayEntry>> {
 /// 重复登记只保留首次的位置（去重，只追加）。只动注册表：不改进程真实
 /// env、不写盘、不创建目录。
 pub fn register(dir: &Path, position: OverlayPosition) {
+    register_in(default_storage(), dir, position);
+}
+
+/// 按存储实现登记（F12 seam）：两种实现共用同一套「忽略不存在目录 / 同目录
+/// 只保留首次位置」规则。
+fn register_in(storage: OverlayStorage, dir: &Path, position: OverlayPosition) {
     if !dir.is_dir() {
         return;
     }
-    #[cfg(test)]
-    TEST_OVERLAY.with(|overlay| {
-        let mut overlay = overlay.borrow_mut();
-        if !overlay.iter().any(|entry| entry.dir == dir) {
-            overlay.push(OverlayEntry {
+    let mut add = |entries: &mut Vec<OverlayEntry>| {
+        if !entries.iter().any(|entry| entry.dir == dir) {
+            entries.push(OverlayEntry {
                 dir: dir.to_path_buf(),
                 position,
             });
         }
-    });
+    };
+    match storage {
+        OverlayStorage::ProcessGlobal => add(&mut lock_registry()),
+        OverlayStorage::ThreadLocal => with_thread_overlay_mut(add),
+    }
+}
+
+/// 线程级存储的可变访问（非测试构建退化为进程级 —— 线程级只是测试隔离手段）。
+fn with_thread_overlay_mut<R>(apply: impl FnOnce(&mut Vec<OverlayEntry>) -> R) -> R {
+    #[cfg(test)]
+    {
+        TEST_OVERLAY.with(|overlay| apply(&mut overlay.borrow_mut()))
+    }
     #[cfg(not(test))]
     {
-        let mut entries = lock_registry();
-        if entries.iter().any(|entry| entry.dir == dir) {
-            return;
-        }
-        entries.push(OverlayEntry {
-            dir: dir.to_path_buf(),
-            position,
-        });
+        apply(&mut lock_registry())
     }
 }
 
@@ -93,11 +119,18 @@ pub fn snapshot() -> Vec<PathBuf> {
     })
 }
 
-/// 合并 overlay 与 base 成子进程 PATH：`Prepend` 目录置前（登记顺序），
-/// `Append` 目录其后（登记顺序），再接 base 各目录；整体去重、保留首次
-/// 出现。`base` 缺省取进程 env PATH；overlay 为空时原样返回 base（零行为
-/// 变化，既有调用方语义不受影响）。
+/// 合并 overlay 与 base 成子进程 PATH：**`Prepend` 目录置前（登记顺序）→
+/// base 各目录 → `Append` 目录（登记顺序）**；整体去重、保留首次出现。
+/// `Append` 的语义是「**不抢占**用户已有工具」⇒ 必须在 base 之后（否则
+/// `register_existing_candidates` 登记的 `/usr/local/bin` 会盖到 base 里更靠
+/// 前的 venv / fnm 目录，抢用错误的 python / node / npm）。`base` 缺省取
+/// 进程 env PATH；overlay 为空时原样返回 base（零行为变化）。
 pub fn effective_path(base: Option<&str>) -> String {
+    effective_path_in(default_storage(), base)
+}
+
+/// 按存储实现合并（F12 seam）。
+fn effective_path_in(storage: OverlayStorage, base: Option<&str>) -> String {
     let base_value = match base {
         Some(value) => value.to_string(),
         None => std::env::var_os("PATH")
@@ -105,21 +138,30 @@ pub fn effective_path(base: Option<&str>) -> String {
             .to_string_lossy()
             .into_owned(),
     };
-    let entries: Vec<OverlayEntry> = with_overlay_entries(|entries| entries.to_vec());
-    let mut merged: Vec<PathBuf> = Vec::with_capacity(entries.len());
-    for position in [OverlayPosition::Prepend, OverlayPosition::Append] {
-        for entry in entries.iter() {
-            if entry.position == position && !merged.contains(&entry.dir) {
-                merged.push(entry.dir.clone());
-            }
-        }
-    }
-    if merged.is_empty() {
+    let entries: Vec<OverlayEntry> = with_overlay_entries_in(storage, |entries| entries.to_vec());
+    if entries.is_empty() {
         return base_value;
+    }
+    let mut merged: Vec<PathBuf> = Vec::with_capacity(entries.len());
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.position == OverlayPosition::Prepend)
+    {
+        if !merged.contains(&entry.dir) {
+            merged.push(entry.dir.clone());
+        }
     }
     for dir in std::env::split_paths(&base_value) {
         if !dir.as_os_str().is_empty() && !merged.contains(&dir) {
             merged.push(dir);
+        }
+    }
+    for entry in entries
+        .iter()
+        .filter(|entry| entry.position == OverlayPosition::Append)
+    {
+        if !merged.contains(&entry.dir) {
+            merged.push(entry.dir.clone());
         }
     }
     std::env::join_paths(merged)
@@ -127,16 +169,32 @@ pub fn effective_path(base: Option<&str>) -> String {
         .unwrap_or(base_value)
 }
 
-/// 测试用：清空 overlay 注册表与登录 shell 探测结果。
+/// 测试用：清空 overlay 注册表（线程级与进程级都清）与登录 shell 探测结果。
 #[cfg(test)]
 pub fn clear() {
     TEST_OVERLAY.with(|overlay| overlay.borrow_mut().clear());
+    lock_registry().clear();
     TEST_SHELL_PROBE.with(|probe| *probe.borrow_mut() = None);
 }
 
-/// 读取 overlay 注册表：测试构建读线程级存储（见 `TEST_OVERLAY`），生产
-/// 构建读进程级全局注册表。
+/// 读取 overlay 注册表（默认存储：测试 = 线程级，生产 = 进程级）。
 fn with_overlay_entries<R>(read: impl FnOnce(&[OverlayEntry]) -> R) -> R {
+    with_overlay_entries_in(default_storage(), read)
+}
+
+/// 按存储实现读取注册表（F12 seam）。
+fn with_overlay_entries_in<R>(
+    storage: OverlayStorage,
+    read: impl FnOnce(&[OverlayEntry]) -> R,
+) -> R {
+    match storage {
+        OverlayStorage::ProcessGlobal => read(&lock_registry()),
+        OverlayStorage::ThreadLocal => with_thread_overlay(read),
+    }
+}
+
+/// 线程级存储的只读访问（非测试构建退化为进程级）。
+fn with_thread_overlay<R>(read: impl FnOnce(&[OverlayEntry]) -> R) -> R {
     #[cfg(test)]
     {
         TEST_OVERLAY.with(|overlay| read(&overlay.borrow()))
@@ -514,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_path_orders_prepend_then_append_then_base_deduped() {
+    fn effective_path_orders_prepend_then_base_then_append_deduped() {
         let _state = OverlayStateGuard::acquire();
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -538,11 +596,83 @@ mod tests {
         let merged = effective_path(Some(&base));
         let entries: Vec<PathBuf> = std::env::split_paths(&merged).collect();
 
+        // `Append` 的语义是「**不抢占**用户已有工具」⇒ 必须在 base 之后；
+        // 否则 base 里更靠前的 python / node / npm 会被覆盖（F7）。
         assert_eq!(
             entries,
-            vec![a.clone(), c.clone(), b.clone(), base_dir.clone()],
-            "Prepend(登记序) → Append(登记序) → base(去重保首次): {merged}"
+            vec![a.clone(), c.clone(), base_dir.clone(), b.clone()],
+            "Prepend(登记序) → base(去重保首次) → Append(登记序): {merged}"
         );
+    }
+
+    #[test]
+    fn effective_path_append_never_preempts_base_entries() {
+        let _state = OverlayStateGuard::acquire();
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let venv_bin = root.path().join("venv/bin");
+        let usr_local_bin = root.path().join("usr/local/bin");
+        for dir in [&venv_bin, &usr_local_bin] {
+            std::fs::create_dir_all(dir).expect("mkdir");
+        }
+
+        // 启动期发现 `~/.local/bin` / `/usr/local/bin` 时用 `Append` 登记 ⇒
+        // 不得跑到服务进程 PATH（venv 优先）之前抢用错误的 python / node。
+        register(&usr_local_bin, OverlayPosition::Append);
+
+        let base = format!(
+            "{venv}:{usr_local}",
+            venv = venv_bin.display(),
+            usr_local = usr_local_bin.display()
+        );
+        let merged = effective_path(Some(&base));
+        let entries: Vec<PathBuf> = std::env::split_paths(&merged).collect();
+
+        assert_eq!(
+            entries,
+            vec![venv_bin.clone(), usr_local_bin.clone()],
+            "Append 目录已在 base 里 ⇒ 保持 base 的原位置（不得前插）: {merged}"
+        );
+    }
+
+    /// F12：**生产语义**的存储实现（进程级全局注册表）必须**跨线程可见**
+    /// —— 登记发生在工作线程 A、`effective_path` 在服务主线程 B 构造子进程
+    /// env；同时线程级存储（测试默认）保持隔离。
+    #[test]
+    fn process_global_registry_is_shared_across_threads() {
+        let _state = OverlayStateGuard::acquire();
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let shared = root.path().join("shared-bin");
+        std::fs::create_dir_all(&shared).expect("mkdir");
+
+        // 生产存储：另一个线程登记 ⇒ 本线程必须看得到。
+        let registered = shared.clone();
+        std::thread::spawn(move || {
+            register_in(
+                OverlayStorage::ProcessGlobal,
+                &registered,
+                OverlayPosition::Prepend,
+            );
+        })
+        .join()
+        .expect("thread");
+
+        let merged = effective_path_in(OverlayStorage::ProcessGlobal, Some("/usr/bin"));
+        assert_eq!(
+            std::env::split_paths(&merged).next(),
+            Some(shared.clone()),
+            "进程级注册表必须跨线程共享（生产语义）: {merged}"
+        );
+
+        // 线程级存储（测试默认）看不到他线程的登记：隔离语义不得被削弱。
+        let local = effective_path(Some("/usr/bin"));
+        assert_eq!(
+            local, "/usr/bin",
+            "线程级存储必须保持隔离（不得被进程级登记污染）: {local}"
+        );
+
+        lock_registry().clear();
     }
 
     #[test]
