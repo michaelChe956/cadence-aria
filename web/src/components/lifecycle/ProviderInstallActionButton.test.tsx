@@ -88,12 +88,44 @@ function runningJob(jobId: string, target: InstallTargetWire): InstallJob {
   };
 }
 
+// 后端 npm_path_hint() 返回的是**完整句子**（2026-11-13 确认）：
+// 「已安装到 <prefix>；若 `<cmd>` 不在 PATH 上，请把 <prefix>/bin 加入 PATH 后重试」。
+const PATH_HINT_SENTENCE =
+  "已安装到 /opt/node；若 `codegraph` 不在 PATH 上，请把 /opt/node/bin 加入 PATH 后重试";
+
 function completedJob(jobId: string, target: InstallTargetWire): InstallJob {
   return {
     ...runningJob(jobId, target),
     status: "completed",
-    outcome: { installed_version: "1.0.34", path_hint: "~/.npm-global/bin" },
+    outcome: { installed_version: "1.0.34", path_hint: PATH_HINT_SENTENCE },
   };
+}
+
+function completedJobWithOutcome(
+  jobId: string,
+  target: InstallTargetWire,
+  outcome: InstallJob["outcome"],
+): InstallJob {
+  return {
+    ...runningJob(jobId, target),
+    status: "completed",
+    outcome,
+    failure: null,
+  };
+}
+
+/** 点安装 → 轮询到终态（两轮轮询：running → completed）。 */
+async function driveToCompleted(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "安装" }));
+    await Promise.resolve();
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_000);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_000);
+  });
 }
 
 function failedJob(jobId: string, target: InstallTargetWire): InstallJob {
@@ -428,5 +460,69 @@ describe("异步安装作业（REQ-PCI-05 / REQ-PCI-06）", () => {
     expect(status).toHaveTextContent(NPM_MANUAL("@openai/codex"));
     expect(status).not.toHaveTextContent("已安装");
     expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+});
+
+// 2026-11-13 bug 修复（契约变更）：后端 path_hint 本身是完整句子，前端
+// 曾再包一层「若命令不在 PATH，可把 X 加入 PATH」⇒ 用户看到破碎双句，
+// 误以为「点了安装没效果」。新契约：path_hint **原样渲染**，不二次包裹、
+// 不截断；没有 path_hint 就不渲染该提示节点。
+describe("安装完成后的 path_hint 呈现（原样渲染后端整句）", () => {
+  it("path_hint 是完整句子时逐字渲染，且不再出现二次包裹痕迹", async () => {
+    vi.useFakeTimers();
+    installFetchRouter({
+      target: "codex",
+      jobIds: ["job_hint"],
+      jobs: [
+        () => runningJob("job_hint", "codex"),
+        () =>
+          completedJobWithOutcome("job_hint", "codex", {
+            installed_version: "1.0.34",
+            path_hint: PATH_HINT_SENTENCE,
+          }),
+      ],
+    });
+    renderButton({ cliAvailable: false });
+
+    await driveToCompleted();
+
+    // 逐字等于后端返回的整句（不截断、不加前后缀）。
+    const hint = screen.getByTestId("provider-install-path-hint-codex");
+    expect(hint.textContent?.trim()).toBe(PATH_HINT_SENTENCE);
+
+    const status = screen.getByTestId("provider-install-status-codex");
+    expect(status.textContent).toContain(PATH_HINT_SENTENCE);
+    // 旧的二次包裹形态（「可把 … 加入 PATH」）彻底消失。
+    expect(status.textContent).not.toContain("可把");
+    expect(status.textContent).not.toContain(
+      `可把 ${PATH_HINT_SENTENCE} 加入 PATH`,
+    );
+    // 版本提示不受影响。
+    expect(status).toHaveTextContent("已安装：1.0.34");
+  });
+
+  it("path_hint 缺失时不渲染提示节点", async () => {
+    vi.useFakeTimers();
+    installFetchRouter({
+      target: "codex",
+      jobIds: ["job_nohint"],
+      jobs: [
+        () => runningJob("job_nohint", "codex"),
+        () =>
+          completedJobWithOutcome("job_nohint", "codex", {
+            installed_version: "1.0.34",
+            path_hint: null,
+          }),
+      ],
+    });
+    renderButton({ cliAvailable: false });
+
+    await driveToCompleted();
+
+    expect(
+      screen.queryByTestId("provider-install-path-hint-codex"),
+    ).toBeNull();
+    const status = screen.getByTestId("provider-install-status-codex");
+    expect(status).toHaveTextContent("已安装：1.0.34");
   });
 });
