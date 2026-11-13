@@ -1204,10 +1204,47 @@ mod tests {
             .to_string()
     }
 
+    /// 通过 Design gate 的唯一候选产物（既有候选选择测试的合规样本，见
+    /// `workspace_engine::tests` 的 `complete_design_artifact`）。
+    fn compliant_design_artifact() -> String {
+        "```artifact\n# Design Spec\n\n\
+         ## 设计范围\n覆盖当前设计变更。\n\n\
+         ## 设计决策\n- [DEC-001] 复用现有组件边界。\n\n\
+         ## 公共组件\n- [CMP-001] 复用现有组件边界。\n\n\
+         ## API 契约\n- [API-001] 新增 provider 检查接口。\n\n\
+         ## 数据模型\n- 沿用现有数据模型。\n\n\
+         ## 风险\n无。\n\n\
+         ## 追踪关系\n- source ids: Story Spec story_spec_0001, Issue issue_0001。\n\
+         - [DEC-001] -> [REQ-001]\n```\n"
+            .to_string()
+    }
+
+    /// void 出口失败用例的表驱动行：Story / Design 共用同一段被测分支，唯一差异是
+    /// gate 合规产物样本。
+    fn void_failure_cases() -> Vec<(&'static str, WorkspaceType, String)> {
+        vec![
+            ("story", WorkspaceType::Story, compliant_story_artifact()),
+            ("design", WorkspaceType::Design, compliant_design_artifact()),
+        ]
+    }
+
     /// Story/Design 的 void 出口：artifact 落盘失败必须显式暴露为 Error 事件 +
     /// Failed 节点，且不得推进到 checkpoint / MessageComplete / AuthorConfirm。
+    ///
+    /// 按 workspace type 表驱动：Story / Design 共用 `complete_assistant_message` 的
+    /// 同一段被测分支，唯一差异是 gate 合规产物样本。
     #[tokio::test]
     async fn complete_assistant_message_reports_artifact_write_failure_and_fails_node() {
+        for (label, workspace_type, artifact) in void_failure_cases() {
+            assert_void_artifact_write_failure(label, workspace_type, artifact).await;
+        }
+    }
+
+    async fn assert_void_artifact_write_failure(
+        label: &str,
+        workspace_type: WorkspaceType,
+        artifact: String,
+    ) {
         use crate::product::app_paths::ProductAppPaths;
         use tempfile::TempDir;
 
@@ -1219,8 +1256,8 @@ mod tests {
             .create_workspace_session(CreateWorkspaceSessionInput {
                 project_id: "project_0001".to_string(),
                 issue_id: "issue_0001".to_string(),
-                entity_id: "story_spec_0001".to_string(),
-                workspace_type: WorkspaceType::Story,
+                entity_id: format!("{label}_spec_0001"),
+                workspace_type,
                 author_provider: ProviderName::ClaudeCode,
                 reviewer_provider: Some(ProviderName::Codex),
                 review_rounds: 2,
@@ -1257,7 +1294,7 @@ mod tests {
         engine
             .complete_assistant_message(
                 "assistant_msg_001".to_string(),
-                compliant_story_artifact(),
+                artifact,
                 false,
             )
             .await;
@@ -1267,12 +1304,15 @@ mod tests {
             if let EngineEvent::Error { message } = event {
                 assert!(
                     message.starts_with("artifact_versions_write_failed:"),
-                    "Error 事件必须带步骤前缀：{message}"
+                    "Error 事件必须带步骤前缀（{label}）：{message}"
                 );
                 saw_error = true;
             }
         }
-        assert!(saw_error, "artifact 落盘失败必须显式暴露为 Error 事件");
+        assert!(
+            saw_error,
+            "artifact 落盘失败必须显式暴露为 Error 事件（{label}）"
+        );
 
         let node = engine
             .timeline_nodes
@@ -1282,20 +1322,20 @@ mod tests {
         assert_eq!(
             node.status,
             TimelineNodeStatus::Failed,
-            "落盘失败必须把当前节点标记为 Failed"
+            "落盘失败必须把当前节点标记为 Failed（{label}）"
         );
         assert!(
             engine.session.artifact.is_none(),
-            "失败不得提交 session.artifact"
+            "失败不得提交 session.artifact（{label}）"
         );
         assert!(
             engine.artifact_versions.is_empty(),
-            "失败不得提交 engine.artifact_versions"
+            "失败不得提交 engine.artifact_versions（{label}）"
         );
         assert_ne!(
             engine.current_stage(),
             WorkspaceStage::AuthorConfirm,
-            "失败不得推进到 AuthorConfirm"
+            "失败不得推进到 AuthorConfirm（{label}）"
         );
         assert!(
             engine
@@ -1305,7 +1345,7 @@ mod tests {
                 .expect("assistant 消息")
                 .checkpoint_id
                 .is_none(),
-            "失败不得创建 checkpoint"
+            "失败不得创建 checkpoint（{label}）"
         );
     }
 }
