@@ -243,6 +243,16 @@ fn run_command_capture_with_stream(
     if let Some(env) = environment {
         command.envs(env);
     }
+    // 计划 2026-11-13 包 2.4:PATH overlay 合并点——`environment=None`
+    // (继承宿主 env)分支同样必须显式写合并后的 PATH,不能只在
+    // `Some(env)` 分支合并;overlay 为空时 effective_path 原样返回 base。
+    let base_path = environment
+        .and_then(|env| env.get("PATH"))
+        .map(String::as_str);
+    command.env(
+        "PATH",
+        crate::cross_cutting::path_overlay::effective_path(base_path),
+    );
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_text.is_some() {
         command.stdin(Stdio::piped());
