@@ -732,3 +732,157 @@ mod t3_termination_tests {
         assert_eq!(failed.summary.as_deref(), Some("provider 真实失败"));
     }
 }
+
+/// A4（SC 失败修复包）恒 is_current=false：review/confirm 标记只落在最后一个
+/// **普通**版本上——末尾 A4 不被标记，其它普通版本的 metadata 逐字段不变。
+#[cfg(test)]
+mod sc_published_mark_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use crate::product::checkpoint_store::CheckpointStore;
+    use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
+    use crate::product::lifecycle_store::LifecycleStore;
+    use crate::product::lifecycle_store::WorkItemPlanSessionOptions;
+    use crate::product::models::provider::ProviderName;
+    use crate::product::models::{WorkspaceSessionStatus, WorkspaceType};
+    use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+    use crate::web::workspace_ws_types::ScEvidenceRef;
+    use crate::web::workspace_ws_types::ScFailureRepairPackage;
+    use crate::web::workspace_ws_types::ScFailureSourceEvidence;
+    use crate::web::workspace_ws_types::ScPackageCompleteness;
+
+    fn sc_engine(root: &std::path::Path) -> WorkspaceEngine {
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let record = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "entity_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                    flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                    ..Default::default()
+                }),
+            })
+            .expect("SC session");
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(8);
+        WorkspaceEngine::new_persistent(
+            std::sync::Arc::new(CheckpointStore::new(root.join("advance-checkpoints"))),
+            lifecycle,
+            event_tx,
+            WorkspaceSession::from_record(record),
+        )
+    }
+
+    fn ordinary_version(version: u32) -> ArtifactVersion {
+        ArtifactVersion {
+            version,
+            payload: ArtifactPayload::Markdown {
+                markdown: format!("# 普通产物 v{version}"),
+                diff: None,
+            },
+            generated_by: ProviderName::Fake,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: version == 2,
+            created_at: "2026-11-13T00:00:00Z".to_string(),
+            source_node_id: "node_sc_1".to_string(),
+        }
+    }
+
+    fn sc_repair_package_version(version: u32) -> ArtifactVersion {
+        let available = || ScEvidenceRef::Available {
+            locator: "evidence".to_string(),
+            sha256: "0".repeat(64),
+            bytes: 0,
+        };
+        ArtifactVersion {
+            version,
+            payload: ArtifactPayload::ScFailureRepairPackage {
+                sc_failure_repair_package: Box::new(ScFailureRepairPackage {
+                    schema_version: 1,
+                    package_id: "pkg_mark_sc_1".to_string(),
+                    chain_id: "chain_mark_sc_1".to_string(),
+                    session_id: "session_sc_1".to_string(),
+                    project_id: "project_0001".to_string(),
+                    issue_id: "issue_0001".to_string(),
+                    plan_id: "entity_0001".to_string(),
+                    terminal_class: "compile".to_string(),
+                    terminal_reason: "terminal compile failure".to_string(),
+                    completeness: ScPackageCompleteness::Complete,
+                    rounds: Vec::new(),
+                    last_provider_output: available(),
+                    last_failure_source: ScFailureSourceEvidence {
+                        source_round_id: "round_1".to_string(),
+                        source: available(),
+                    },
+                    teaching_prompts: Vec::new(),
+                    evidence_log_ref: "sc-failure-evidence/chain_mark_sc_1".to_string(),
+                    evidence_digest: "a".repeat(64),
+                    evidence_through_entry_key: "entry_1".to_string(),
+                    missing_evidence: Vec::new(),
+                }),
+            },
+            generated_by: ProviderName::Fake,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: false,
+            created_at: "2026-11-13T00:00:00Z".to_string(),
+            source_node_id: "node_sc_1".to_string(),
+        }
+    }
+
+    /// 末尾是 A4 时：review/confirm 落在最后一个**普通**版本上；A4 与更早的普通
+    /// 版本逐字段不变（断言只比对标记前后的真实版本，不钉字面量）。
+    #[test]
+    fn mark_latest_artifact_skips_sc_repair_package_and_marks_last_ordinary() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let mut engine = sc_engine(root.path());
+        engine.artifact_versions = vec![
+            ordinary_version(1),
+            ordinary_version(2),
+            sc_repair_package_version(3),
+        ];
+        let before = engine.artifact_versions.clone();
+
+        engine.mark_latest_artifact_reviewed(
+            Some(ProviderName::Codex),
+            Some(ReviewVerdictType::Pass),
+        );
+        {
+            let versions = &engine.artifact_versions;
+            assert_eq!(
+                versions[2], before[2],
+                "A4 (SC repair package) must not be marked"
+            );
+            assert_eq!(
+                versions[0], before[0],
+                "older ordinary version must stay untouched"
+            );
+            assert_eq!(versions[1].reviewed_by, Some(ProviderName::Codex));
+            assert_eq!(versions[1].review_verdict, Some(ReviewVerdictType::Pass));
+            assert_eq!(versions[1].version, before[1].version);
+            assert_eq!(versions[1].is_current, before[1].is_current);
+            assert_eq!(versions[1].created_at, before[1].created_at);
+            assert_eq!(versions[1].source_node_id, before[1].source_node_id);
+            assert_eq!(versions[1].generated_by, before[1].generated_by);
+            assert_eq!(versions[1].confirmed_by, before[1].confirmed_by);
+        }
+
+        engine.mark_latest_artifact_confirmed(Some("user".to_string()));
+        {
+            let versions = &engine.artifact_versions;
+            assert_eq!(versions[2].confirmed_by, None, "A4 must not be confirmed");
+            assert_eq!(versions[1].confirmed_by, Some("user".to_string()));
+            assert_eq!(versions[0].confirmed_by, before[0].confirmed_by);
+        }
+    }
+}

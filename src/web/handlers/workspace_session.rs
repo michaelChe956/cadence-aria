@@ -752,4 +752,191 @@ mod tests {
             "unmanaged takeover must keep legacy behavior"
         );
     }
+
+    /// A4（SC 失败修复包）REST 公开视图三相：pending（缺发布回执）不可读；坏回执
+    /// 显式 HTTP 错误（不吞成 404 not found）；真实回执落盘后可读。
+    #[tokio::test]
+    async fn sc_repair_package_rest_view_hides_pending_and_surfaces_receipt_failures() {
+        use crate::product::lifecycle_store::WorkItemPlanSessionOptions;
+        use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
+        use crate::web::workspace_ws_types::ArtifactPayload;
+        use crate::web::workspace_ws_types::ScArtifactPublishedReceipt;
+        use crate::web::workspace_ws_types::ScEvidenceRef;
+        use crate::web::workspace_ws_types::ScFailureRepairPackage;
+        use crate::web::workspace_ws_types::ScFailureSourceEvidence;
+        use crate::web::workspace_ws_types::ScPackageCompleteness;
+        use sha2::{Digest, Sha256};
+
+        let tmp = TempDir::new().expect("temp dir");
+        let root = tmp.path().to_path_buf();
+        let state = WebAppState::new(root.clone(), WebRuntime::new_fake(root.clone()));
+        let paths = ProductAppPaths::new(root.join(".aria"));
+        let lifecycle = LifecycleStore::new(paths.clone());
+        let session = lifecycle
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "plan_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: Some(WorkItemPlanSessionOptions {
+                    flow_kind: WorkItemPlanFlowKind::SingleCandidate,
+                    ..Default::default()
+                }),
+            })
+            .expect("create workspace session");
+
+        let available = || ScEvidenceRef::Available {
+            locator: "evidence".to_string(),
+            sha256: "0".repeat(64),
+            bytes: 0,
+        };
+        let package = ScFailureRepairPackage {
+            schema_version: 1,
+            package_id: "pkg_rest_sc_1".to_string(),
+            chain_id: "chain_rest_sc_1".to_string(),
+            session_id: session.id.clone(),
+            project_id: "project_0001".to_string(),
+            issue_id: "issue_0001".to_string(),
+            plan_id: "plan_0001".to_string(),
+            terminal_class: "compile".to_string(),
+            terminal_reason: "terminal compile failure".to_string(),
+            completeness: ScPackageCompleteness::Complete,
+            rounds: Vec::new(),
+            last_provider_output: available(),
+            last_failure_source: ScFailureSourceEvidence {
+                source_round_id: "round_1".to_string(),
+                source: available(),
+            },
+            teaching_prompts: Vec::new(),
+            evidence_log_ref: "sc-failure-evidence/chain_rest_sc_1".to_string(),
+            evidence_digest: "a".repeat(64),
+            evidence_through_entry_key: "entry_1".to_string(),
+            missing_evidence: Vec::new(),
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(serde_json::to_vec(&package).expect("package is serializable"));
+        let package_digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        lifecycle
+            .save_artifact_versions(
+                &session.id,
+                &[
+                    ArtifactVersion {
+                        version: 1,
+                        payload: ArtifactPayload::Markdown {
+                            markdown: "# 普通产物\n".to_string(),
+                            diff: None,
+                        },
+                        generated_by: ProviderName::ClaudeCode,
+                        reviewed_by: None,
+                        review_verdict: None,
+                        confirmed_by: None,
+                        is_current: true,
+                        created_at: "2026-11-13T00:00:00Z".to_string(),
+                        source_node_id: "node_sc_1".to_string(),
+                    },
+                    ArtifactVersion {
+                        version: 2,
+                        payload: ArtifactPayload::ScFailureRepairPackage {
+                            sc_failure_repair_package: Box::new(package.clone()),
+                        },
+                        generated_by: ProviderName::ClaudeCode,
+                        reviewed_by: None,
+                        review_verdict: None,
+                        confirmed_by: None,
+                        is_current: false,
+                        created_at: "2026-11-13T00:00:00Z".to_string(),
+                        source_node_id: "node_sc_1".to_string(),
+                    },
+                ],
+            )
+            .expect("save artifact versions");
+        lifecycle
+            .save_node_detail(
+                &session.id,
+                "node_sc_1",
+                &crate::product::models::NodeDetail {
+                    node_id: "node_sc_1".to_string(),
+                    session_id: session.id.clone(),
+                    node_type: crate::web::workspace_ws_types::TimelineNodeType::AuthorRun,
+                    status: crate::web::workspace_ws_types::TimelineNodeStatus::Completed,
+                    agent_role: None,
+                    provider: None,
+                    prompt: None,
+                    messages: Vec::new(),
+                    streaming_content: String::new(),
+                    execution_events: Vec::new(),
+                    permission_events: Vec::new(),
+                    verdict: None,
+                    artifact_ref: Some(crate::product::models::ArtifactRef {
+                        artifact_id: "artifact_version_002".to_string(),
+                        version: 2,
+                    }),
+                    is_revision: false,
+                    revision_feedback: None,
+                    base_artifact_ref: None,
+                    started_at: "2026-11-13T00:00:00Z".to_string(),
+                    ended_at: Some("2026-11-13T00:00:01Z".to_string()),
+                },
+            )
+            .expect("save node detail");
+
+        let receipt_path = paths
+            .issue_lifecycle_root("project_0001", "issue_0001")
+            .join("workspace-timelines")
+            .join(&session.id)
+            .join("sc-failure-evidence")
+            .join(&package.chain_id)
+            .join("published")
+            .join(format!("{}.json", package.package_id));
+        let receipt = ScArtifactPublishedReceipt {
+            schema_version: 1,
+            package_id: package.package_id.clone(),
+            chain_id: package.chain_id.clone(),
+            node_id: "node_sc_1".to_string(),
+            package_digest,
+            version: 2,
+        };
+
+        // ① pending（缺发布回执）→ A4 版本在 REST 公开视图不可读。
+        let pending = workspace_session_artifact_version(
+            State(state.clone()),
+            Path((session.id.clone(), 2)),
+        )
+        .await
+        .expect_err("pending SC repair package must not be readable");
+        assert_eq!(pending.code, "artifact_version_not_found");
+
+        // ② 坏回执 → 显式 HTTP 错误（不吞成 404 not found）。
+        std::fs::create_dir_all(receipt_path.parent().expect("receipt dir"))
+            .expect("create receipt dir");
+        std::fs::write(&receipt_path, b"{corrupt").expect("write corrupt receipt");
+        let corrupt = workspace_session_artifact_version(
+            State(state.clone()),
+            Path((session.id.clone(), 2)),
+        )
+        .await
+        .expect_err("corrupt receipt must surface an explicit error");
+        assert_ne!(corrupt.code, "artifact_version_not_found");
+
+        // ③ 真实回执 → A4 版本可读。
+        std::fs::write(
+            &receipt_path,
+            serde_json::to_vec(&receipt).expect("receipt is serializable"),
+        )
+        .expect("write receipt");
+        let Json(value) =
+            workspace_session_artifact_version(State(state), Path((session.id.clone(), 2)))
+                .await
+                .expect("published SC repair package must be readable");
+        assert_eq!(value["version"], 2);
+    }
 }
