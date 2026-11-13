@@ -13,6 +13,7 @@ use crate::web::workspace_ws_types::{
 };
 
 mod artifact_version_roundtrip;
+mod artifact_version_sc_failure_roundtrip;
 #[path = "tests/conversational_gate_events.rs"]
 mod conversational_gate_events;
 mod interrupted_run_recovery;
