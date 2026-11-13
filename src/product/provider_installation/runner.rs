@@ -30,7 +30,7 @@ use crate::cross_cutting::bounded_command_runner::{
     BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
 };
 use crate::cross_cutting::path_overlay;
-use crate::cross_cutting::provider_health::ProviderHealthService;
+use crate::cross_cutting::provider_health::{ProviderHealthService, version_token_from_output};
 
 use super::InstallTarget;
 use super::effective_prefix::{
@@ -286,6 +286,12 @@ impl HealthRefreshProber {
     ///
     /// **必须经 `BoundedCommandRunner`**：否则 PATH 覆盖层（overlay）不生效，
     /// 装完的 CLI 在平台自身探测里仍是「找不到」。
+    ///
+    /// **返回口径 = provider health 的 `parse_version_token`**（首条非空行的
+    /// 版本 token，stdout 优先、其次 stderr）：更新**前**的版本快照必须与装后
+    /// 那一侧同源同口径 —— provider 的装后版本来自 `health.refresh` 的解析
+    /// token（`2.6.1`），若装前返回原始行（`kimi 2.6.1`），两者永不相等 ⇒
+    /// 「脚本 exit 0 但版本没变」会被静默判成功（REQ-PCI-10 复审 R10）。
     async fn probe_version(
         &self,
         command: &str,
@@ -307,12 +313,9 @@ impl HealthRefreshProber {
             stderr_limit: 4096,
         };
         match self.command_runner.run(request).await {
-            Ok(result) if result.exit_code == Some(0) && !result.timed_out => result
-                .stdout
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_string),
+            Ok(result) if result.exit_code == Some(0) && !result.timed_out => {
+                version_token_from_output(&result.stdout, &result.stderr)
+            }
             _ => None,
         }
     }
