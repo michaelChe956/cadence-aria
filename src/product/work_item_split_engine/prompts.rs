@@ -176,7 +176,6 @@ mod sc_few_shot;
 #[cfg(test)]
 pub(crate) use sc_few_shot::WORK_ITEM_PLAN_FEW_SHOT_IDS;
 mod sc_baseline_tree;
-#[cfg(test)]
 pub(crate) use sc_baseline_tree::WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES;
 #[cfg(test)]
 pub(crate) use sc_baseline_tree::render_baseline_tree_section;
@@ -202,7 +201,7 @@ pub(crate) const SINGLE_CANDIDATE_PROJECT_RULE_PRIORITY: &str = "结构标题(##
 
 const SINGLE_CANDIDATE_CODE_USAGE_SUMMARY: &str = "任务拆分与验证设计遵循测试先行纪律：先明确可验证验收，再安排实现步骤；验证命令必须真实可执行、可复现，并与仓库现有工具链相符；遵守安全边界，不引入未授权依赖、凭据、网络访问或外部服务。";
 
-const SINGLE_CANDIDATE_CODE_READING_SUMMARY: &str = "对目标仓库做事实核查时，大范围定位优先检索工具，精确结构优先 outline 式阅读；先依据真实文件确认事实再写计划。引用的代码、路径、命令与契约 ID 必须来自真实仓库内容，保留原样且可追溯；不得臆造、猜测不存在的接口、目录、测试或验证命令。";
+const SINGLE_CANDIDATE_CODE_READING_SUMMARY: &str = "已给事实不重复全仓探测；缺事实才针对性查证，大范围定位优先检索工具，先依据真实文件确认事实再写计划。引用的代码、路径、命令与契约 ID 必须来自真实仓库内容，保留原样且可追溯；不得臆造、猜测不存在的接口、目录、测试或验证命令。";
 
 fn single_candidate_project_rules_reference(
     language_rules: &str,
