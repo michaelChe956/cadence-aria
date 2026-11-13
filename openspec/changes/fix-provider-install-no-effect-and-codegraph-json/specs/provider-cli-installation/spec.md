@@ -174,3 +174,41 @@ Kimi Code 的官方脚本安装目录 SHALL 可被平台识别：平台 SHALL �
 
 - **WHEN** 平台判定某对象处于「不在终端 PATH 上」状态
 - **THEN** 平台 MUST NOT 自动改写用户的 shell profile、MUST NOT 创建 symlink；MUST NOT 因此阻断该对象的安装或使用
+
+### Requirement: 更新落点与被更新对象一致（REQ-PCI-09）
+
+更新 SHALL 复用与安装同一条异步作业链（作业标识、轮询、durable 状态的语义见 REQ-PCI-05），但**落点**必须与被更新对象当前所在的位置一致。
+
+更新 SHALL 把 CLI 装到**被更新对象当前所在的前缀**：已安装且其命令在宿主 PATH 上时，更新 SHALL 装回**同一个前缀**；已安装但其命令不在宿主 PATH 上时，平台 SHOULD 从**二进制的真实路径反推 npm 前缀**（形如 `.../node_modules/<pkg>/...` ⇒ 其 `lib` 目录的父目录即该前缀），MUST NOT 把更新改装到别的前缀（MUST NOT 造成「更新装到 A、用户跑的还是 B」）。前缀候选与可写性的判定口径见 REQ-PCI-03。
+
+#### Scenario: 已安装且在 PATH 上时更新装回同一前缀
+
+- **WHEN** 用户对某对象触发更新、且该对象的命令当前在宿主 PATH 上
+- **THEN** 平台 SHALL 把该对象更新到**它当前所在的前缀**；MUST NOT 改装到另一个前缀
+
+#### Scenario: 已安装但不在 PATH 上时从二进制真实路径反推前缀
+
+- **WHEN** 用户对某对象触发更新、且该对象已安装但其命令不在宿主 PATH 上
+- **THEN** 平台 SHOULD 从该二进制的真实路径反推其 npm 前缀并把更新装到该前缀；MUST NOT 因为「PATH 上找不到该命令」就改装到别的前缀
+
+#### Scenario: 更新不得改装到别的前缀
+
+- **WHEN** 平台执行某对象的更新
+- **THEN** 平台 MUST NOT 把更新装到与被更新对象当前所在位置不同的前缀；MUST NOT 造成「更新装到 A、用户实际运行的仍是 B」的结果
+
+### Requirement: 更新后版本校验与 Kimi 更新（REQ-PCI-10）
+
+更新完成后，若该命令的版本仍与更新前相同，平台 SHALL 明确报告「命令仍是旧版」（诊断 SHALL 说明更新前后版本相同并给出可行动提示），MUST NOT 静默判成功、MUST NOT 把「版本未变」呈现为更新完成。
+
+Kimi Code 的更新 SHALL 沿用官方安装脚本的**原地替换**通道（见 REQ-PCI-05），MUST NOT 让 Kimi Code 走 npm 安装路径；且 SHALL 经装后验证（见 REQ-PCI-05 的装后重新探测，以及 REQ-PCI-01 的来源告知与用户确认）确认更新后的命令真实可用。
+
+#### Scenario: 更新后版本未变须明确报告
+
+- **WHEN** 更新执行完成、但探测到的命令版本与更新前相同
+- **THEN** 平台 SHALL 明确报告「命令仍是旧版」并给出可行动诊断；MUST NOT 静默判成功、MUST NOT 把该结果呈现为更新已完成
+
+#### Scenario: Kimi 更新沿用官方脚本并经装后验证
+
+- **WHEN** 用户对已安装的 Kimi Code 触发更新
+- **THEN** 平台 SHALL 重新执行官方安装脚本完成原地替换，MUST NOT 走 npm 安装路径；SHALL 经装后验证确认更新后的命令真实可用；MUST NOT 在用户未确认来源时执行远程脚本
+

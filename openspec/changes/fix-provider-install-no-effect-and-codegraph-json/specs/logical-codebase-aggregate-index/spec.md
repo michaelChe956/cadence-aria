@@ -9,7 +9,7 @@
 
 stdout 被截断时 SHALL 以专用机器码 `codegraph_files_output_truncated` 报告，MUST NOT 伪装成 `codegraph_files_invalid_json`；截断判定 MUST 先于 JSON 解析（被截断的残缺载荷 MUST NOT 被当合法清单解析），诊断 SHALL 说明截断事实与上限字节数。
 
-`--no-metadata` SHALL 无条件随文件清单调用下发（支持区间 `>=1.6.0, <2.0.0` 内的 CLI 均接受该旗标，且该旗标在 `--json` 模式下不改变载荷）；平台 MUST NOT 按版本号特判、也 MUST NOT 在运行时静默去掉该旗标重试（去旗标降级会掩盖真实失败）。
+文件清单调用 SHALL 只下发 `files --json` 这一个调用形态，MUST NOT 附加任何未经实测证明能降低载荷的额外旗标（实测无收益的旗标只会引入「上游 CLI 移除该旗标 ⇒ 文件清单全线失败」的风险）。
 
 #### Scenario: 非 git 聚合根建索引
 - **WHEN** 完成成员登记并在非 git 聚合根初始化索引
@@ -35,12 +35,12 @@ stdout 被截断时 SHALL 以专用机器码 `codegraph_files_output_truncated` 
 - **WHEN** 平台执行 files 之外的 codegraph 命令（版本探测、query、status、init、sync 等）
 - **THEN** 那些调用的 stdout 与所有命令的 stderr SHALL 保持既有上限不变；既有超时、取消与退出码检查语义 MUST NOT 改变
 
-#### Scenario: 文件清单无条件携带 --no-metadata
+#### Scenario: 文件清单调用不带额外旗标
 
 - **WHEN** 平台执行 `codegraph files --json`
-- **THEN** 下发的调用 SHALL 无条件携带 `--no-metadata`；MUST NOT 按 codegraph 版本号特判该旗标
-- **AND WHEN** 实际执行的 codegraph 明确报告该旗标为未知/不支持参数
-- **THEN** 平台 SHALL 判该次调用失败并保留可行动诊断；MUST NOT 去掉该旗标重试以掩盖真实失败
+- **THEN** 下发的调用 SHALL 只携带 `--json` 一个旗标；MUST NOT 附加未实测证明能降低载荷的额外旗标
+- **AND WHEN** 附加旗标会让上游 CLI 报未知/不支持参数
+- **THEN** 该风险 SHALL 被视为「不应引入该旗标」的理由；平台 MUST NOT 因此依赖运行时去旗标重试来掩盖真实失败
 
 #### Scenario: 真非法 JSON 与空索引不改码
 

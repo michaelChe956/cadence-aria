@@ -10,9 +10,13 @@ x-owner-decisions:
     reason: 仓库 edition 2024 下 std::env::set_var 是 unsafe fn，且多线程改全局 env 有竞态；overlay 与「改 env」语义等价（平台自身发起的命令立即可见新装的 CLI），但无 unsafe、无全局 env 竞态
   - id: codegraph-files-fetch-quota
     decided: 2026-11-13
-    decision: D3 —— codegraph files --json 使用 64 MiB 专用抓取上限 + 无条件传 --no-metadata（1.6.0 / 1.6.2 均接受该 flag）
-    reason: 容器实测 --no-metadata 在 --json 模式下载荷逐字节不变（不瘦身）；保留该 flag 的理由改为「flag 被支持区间内的 CLI 接受且不改变 JSON 语义」，64 MiB 上限是唯一防线
-    risk: 未来 CLI 若移除该 flag ⇒ files 全线失败（未知选项）；本轮不做版本特判、不做静默去旗标降级
+    decision: D3 —— codegraph files --json 使用 64 MiB 专用抓取上限；文件清单调用只下发 `files --json`，不附加任何额外旗标（owner 2026-11-13 裁决去掉原定的额外旗标）
+    reason: 容器实测该额外旗标在 --json 模式下载荷逐字节不变（零收益）；64 MiB 专用上限才是唯一有效防线
+    risk: 若保留该额外旗标，未来 CLI 移除它 ⇒ files 全线失败（未知选项）；裁决去掉后该风险消失，且不做版本特判、不做运行时去旗标降级
+  - id: provider-update-semantics
+    decided: 2026-11-13
+    decision: 更新语义纳入本轮范围 —— 更新 SHALL 装到被更新对象当前所在的前缀（已安装但不在 PATH 上时从二进制真实路径反推 npm 前缀，MUST NOT 改装到别的前缀）；更新后版本未变 SHALL 明确报告「命令仍是旧版」，MUST NOT 静默成功；Kimi 更新沿用官方脚本原地替换并经装后验证
+    reason: 更新装到别的前缀就是「更新装到 A、用户跑的仍是 B」（前缀解析注释里记过 2026-09-09 同型老 bug）；版本未变被静默吞掉，用户会回到「点了没效果」的老症状
   - id: provider-install-path-hint-rendering
     decided: 2026-11-13
     decision: D4 —— 前端 path_hint 原样渲染，不二次包裹

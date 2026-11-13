@@ -2,7 +2,7 @@
 
 > 状态：草案 —— **本 change 只立项契约，不实施**；`tasks.md` 是待办清单，不是已完成记录。
 > 依据：`cadence/plans/2026-11-13_计划文档_修复Provider安装无效果与聚合索引截断_v1.0.md`（提交 `c2929b02` / `d06c1d16` / `8b9012c9`）。
-> Owner 决策（2026-11-13，见 `.openspec.yaml` 的 `x-owner-decisions`）：D1/D2 装完判成功 + 平台命令可见 PATH overlay；D3 64 MiB 专用上限 + `--no-metadata`；D4 前端 `path_hint` 原样渲染。
+> Owner 决策（2026-11-13，见 `.openspec.yaml` 的 `x-owner-decisions`）：D1/D2 装完判成功 + 平台命令可见 PATH overlay；D3 64 MiB 专用上限（额外旗标经 owner 裁决去掉：实测零收益 + 未来上游移除该旗标的风险）；D4 前端 `path_hint` 原样渲染；另增「更新语义」（owner 明确范围含更新）。
 
 ## Why（为什么现在做）
 
@@ -65,6 +65,7 @@
 | 5 | **安装提示与状态**：Kimi 官方脚本的安装目录 SHALL 可被平台识别并用于装后探测与提示；`path_hint` 原样呈现（前端 MUST NOT 二次包裹）；新增「装了但不在终端 PATH 上」的显式状态 |
 | 6 | **装后验证**：版本优先读 npm 包 `package.json`；除 `--version` 外 MUST 跑一个真实命令证明可执行；失败区分「没装上 / 装上但缺平台包 / 装上但不在 PATH」三种语义 |
 | 7 | **npm 安装参数**：`--allow-scripts=<pkg>`；装完探测失败时以 `--include=optional` 重试一次 |
+| 8 | **更新语义**（owner 2026-11-13 明确范围含更新）：更新 SHALL 装到**被更新对象当前所在的前缀**（已安装但不在 PATH 上时从二进制真实路径反推 npm 前缀，MUST NOT 改装到别的前缀）；更新后版本未变 SHALL 明确报告「命令仍是旧版」，MUST NOT 静默成功；Kimi 更新沿用官方脚本原地替换并经装后验证 |
 
 ## 非目标
 
@@ -85,7 +86,7 @@
 
 | capability | 变更 |
 |---|---|
-| `provider-cli-installation` | MODIFIED REQ-PCI-02（探针口径含平台登记目录）、MODIFIED REQ-PCI-03（可写 = 真实写入探测）、MODIFIED REQ-PCI-05（装完判定口径 / 提示原样呈现 / Kimi 目录可识别）、ADDED REQ-PCI-08（「不在终端 PATH 上」显式状态） |
+| `provider-cli-installation` | MODIFIED REQ-PCI-02（探针口径含平台登记目录）、MODIFIED REQ-PCI-03（可写 = 真实写入探测）、MODIFIED REQ-PCI-05（装完判定口径 / 提示原样呈现 / Kimi 目录可识别）、ADDED REQ-PCI-08（「不在终端 PATH 上」显式状态）、ADDED REQ-PCI-09（更新落点与被更新对象一致）、ADDED REQ-PCI-10（更新后版本校验与 Kimi 更新） |
 | `logical-codebase-aggregate-index` | MODIFIED REQ-IND-01（专用抓取配额 + 专用截断码）、MODIFIED REQ-IND-04（截断属构建失败路径 ⇒ 保留 last-known-good 并标 degraded）、MODIFIED REQ-IND-05（截断码不是工具缺失码、不进入致命匹配集；正文语义不改，只补钉死边界的场景） |
 
 ## 证据出处
@@ -95,6 +96,6 @@
 | 方案文档（唯一权威来源） | `cadence/plans/2026-11-13_计划文档_修复Provider安装无效果与聚合索引截断_v1.0.md`（`c2929b02` / `d06c1d16` / `8b9012c9`） |
 | 容器基线复现 | podman `localhost/diag-installfix:latest`（五类布局：npm 前缀不在 PATH、Kimi 官方脚本、fnm 软链农场、逐文件软链农场、root 拥有的 `/usr/local`） |
 | 聚合索引截断复现 | 真实 codegraph 1.6.2 的 `files --json`（2.36 MB）+ 仓库同版本 serde_json 解析 ⇒ 逐字复现 `EOF while parsing a string at line 32565 column 48` |
-| `--no-metadata` 载荷不变 | 容器实测 1.6.0 / 1.6.2：`files --json` 与 `files --json --no-metadata` 输出逐字节相同（每项仍含 `path/language/nodeCount/size`） |
+| 额外旗标不改变载荷（据此去掉该旗标） | 容器实测 1.6.0 / 1.6.2：文件清单的 `--json` 调用在带与不带该额外旗标时输出逐字节相同（每项仍含 `path/language/nodeCount/size`）⇒ 零收益，且保留它只会引入「上游移除该旗标 ⇒ 文件清单全线失败」的风险 |
 | 前端二次包裹 | `web/src/components/lifecycle/ProviderInstallActionButton.tsx`（修复前 `:290-292`；修复已提交 `6cd5075e`） |
 | 致命匹配集 | `src/product/logical_codebase/bootstrap_projector.inc.rs:104`（只含 `codegraph_missing` / `codegraph_version_mismatch`） |
