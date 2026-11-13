@@ -117,6 +117,7 @@ mod provider_drive;
 mod review;
 mod run_boundary;
 mod sc_failure_artifact_summary;
+mod sc_failure_artifacts;
 mod sc_teaching_source_block;
 mod session_state;
 mod single_candidate;
