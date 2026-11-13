@@ -378,9 +378,43 @@ pub async fn workspace_session_artifact_version(
     State(state): State<WebAppState>,
     Path((session_id, version)): Path<(String, u32)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let version = LifecycleStore::new(product_app_paths(&state))
+    let store = LifecycleStore::new(product_app_paths(&state));
+    let raw_versions = store
         .list_artifact_versions(&session_id)
-        .map_err(product_store_api_error)?
+        .map_err(product_store_api_error)?;
+    // A4（SC 失败修复包）只在严格发布回执通过后公开：pending（缺回执）不可读，
+    // 坏回执/摘要显式报错——不吞成 404 not found。内部 socket/mapping 仍读 raw。
+    let versions = if raw_versions.iter().any(|artifact| {
+        matches!(
+            artifact.payload,
+            crate::web::workspace_ws_types::ArtifactPayload::ScFailureRepairPackage { .. }
+        )
+    }) {
+        let record = store
+            .get_workspace_session(&session_id)
+            .map_err(product_store_api_error)?;
+        let scope = crate::web::workspace_ws_types::ScFailureScope {
+            session_id: record.id.clone(),
+            project_id: record.project_id.clone(),
+            issue_id: record.issue_id.clone(),
+            plan_id: record.entity_id.clone(),
+        };
+        store
+            .filter_sc_published_artifact_versions(&scope, raw_versions)
+            .map_err(|failure| {
+                ApiError::runtime(
+                    failure.code.clone(),
+                    format!(
+                        "artifact version publication invalid: {}: {}",
+                        failure.step, failure.detail
+                    ),
+                    json!({ "version": version }),
+                )
+            })?
+    } else {
+        raw_versions
+    };
+    let version = versions
         .into_iter()
         .find(|artifact| artifact.version == version)
         .ok_or_else(|| {
@@ -790,15 +824,21 @@ mod tests {
             })
             .expect("create workspace session");
 
-        let available = || ScEvidenceRef::Available {
-            locator: "evidence".to_string(),
-            sha256: "0".repeat(64),
-            bytes: 0,
+        // 夹具诚实性：durable 链身份必须是 canonical 的 chain-v1-<64 hex>
+        // （store 的 is_valid_chain_id 真实校验），且本夹具不构造证据存储——
+        // 证据缺失用显式 Missing 表达，不用 all-zero sha/bytes 的假 Available。
+        // chain-v1- 后缀 = sha256("p14b-rest-sc-fixture")。
+        let chain_id =
+            "chain-v1-dbe95414d2ad5c3bd5aebb60385ab08f71ec064c11d36d65c6fbd4a929373b2f";
+        let raw_missing = || ScEvidenceRef::Missing {
+            code: "sc_failure_raw_missing".to_string(),
+            detail: "夹具未落盘证据：终局没有 provider 原始输出".to_string(),
+            round_id: "round_1".to_string(),
         };
         let package = ScFailureRepairPackage {
             schema_version: 1,
             package_id: "pkg_rest_sc_1".to_string(),
-            chain_id: "chain_rest_sc_1".to_string(),
+            chain_id: chain_id.to_string(),
             session_id: session.id.clone(),
             project_id: "project_0001".to_string(),
             issue_id: "issue_0001".to_string(),
@@ -807,13 +847,13 @@ mod tests {
             terminal_reason: "terminal compile failure".to_string(),
             completeness: ScPackageCompleteness::Complete,
             rounds: Vec::new(),
-            last_provider_output: available(),
+            last_provider_output: raw_missing(),
             last_failure_source: ScFailureSourceEvidence {
                 source_round_id: "round_1".to_string(),
-                source: available(),
+                source: raw_missing(),
             },
             teaching_prompts: Vec::new(),
-            evidence_log_ref: "sc-failure-evidence/chain_rest_sc_1".to_string(),
+            evidence_log_ref: format!("sc-failure-evidence/{chain_id}"),
             evidence_digest: "a".repeat(64),
             evidence_through_entry_key: "entry_1".to_string(),
             missing_evidence: Vec::new(),

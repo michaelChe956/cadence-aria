@@ -552,7 +552,19 @@ impl WorkspaceEngine {
         reviewed_by: Option<ProviderName>,
         review_verdict: Option<ReviewVerdictType>,
     ) {
-        if let Some(version) = self.artifact_versions.last_mut() {
+        // A4（SC 失败修复包）恒 is_current=false：review 标记落在最后一个
+        // **普通**版本上，末尾 A4 不被标记。
+        if let Some(version) = self
+            .artifact_versions
+            .iter_mut()
+            .rev()
+            .find(|version| {
+                !matches!(
+                    version.payload,
+                    ArtifactPayload::ScFailureRepairPackage { .. }
+                )
+            })
+        {
             version.reviewed_by = reviewed_by;
             version.review_verdict = review_verdict;
             self.persist_artifact_versions();
@@ -560,7 +572,18 @@ impl WorkspaceEngine {
     }
 
     pub(crate) fn mark_latest_artifact_confirmed(&mut self, confirmed_by: Option<String>) {
-        if let Some(version) = self.artifact_versions.last_mut() {
+        // 同上：confirm 标记只落在最后一个普通版本上。
+        if let Some(version) = self
+            .artifact_versions
+            .iter_mut()
+            .rev()
+            .find(|version| {
+                !matches!(
+                    version.payload,
+                    ArtifactPayload::ScFailureRepairPackage { .. }
+                )
+            })
+        {
             version.confirmed_by = confirmed_by;
             self.persist_artifact_versions();
         }
@@ -798,10 +821,15 @@ mod sc_published_mark_tests {
     }
 
     fn sc_repair_package_version(version: u32) -> ArtifactVersion {
-        let available = || ScEvidenceRef::Available {
-            locator: "evidence".to_string(),
-            sha256: "0".repeat(64),
-            bytes: 0,
+        // 夹具诚实性：canonical 链身份（store 真实校验 chain-v1-<64 hex>）＋显式
+        // Missing 证据（夹具不构造证据存储），不用 all-zero 的假 Available。
+        // chain-v1- 后缀 = sha256("p14b-mark-sc-fixture")。
+        let chain_id =
+            "chain-v1-9e3d26b7950437fe339152e4ccdad90ed0f76b9d580b9a280b6b0042105a09d0";
+        let raw_missing = || ScEvidenceRef::Missing {
+            code: "sc_failure_raw_missing".to_string(),
+            detail: "夹具未落盘证据：终局没有 provider 原始输出".to_string(),
+            round_id: "round_1".to_string(),
         };
         ArtifactVersion {
             version,
@@ -809,7 +837,7 @@ mod sc_published_mark_tests {
                 sc_failure_repair_package: Box::new(ScFailureRepairPackage {
                     schema_version: 1,
                     package_id: "pkg_mark_sc_1".to_string(),
-                    chain_id: "chain_mark_sc_1".to_string(),
+                    chain_id: chain_id.to_string(),
                     session_id: "session_sc_1".to_string(),
                     project_id: "project_0001".to_string(),
                     issue_id: "issue_0001".to_string(),
@@ -818,13 +846,13 @@ mod sc_published_mark_tests {
                     terminal_reason: "terminal compile failure".to_string(),
                     completeness: ScPackageCompleteness::Complete,
                     rounds: Vec::new(),
-                    last_provider_output: available(),
+                    last_provider_output: raw_missing(),
                     last_failure_source: ScFailureSourceEvidence {
                         source_round_id: "round_1".to_string(),
-                        source: available(),
+                        source: raw_missing(),
                     },
                     teaching_prompts: Vec::new(),
-                    evidence_log_ref: "sc-failure-evidence/chain_mark_sc_1".to_string(),
+                    evidence_log_ref: format!("sc-failure-evidence/{chain_id}"),
                     evidence_digest: "a".repeat(64),
                     evidence_through_entry_key: "entry_1".to_string(),
                     missing_evidence: Vec::new(),
