@@ -153,13 +153,14 @@ impl LifecycleStore {
     pub fn append_artifact_version(
         &self,
         session_id: &str,
-        version: ArtifactVersion,
+        mut version: ArtifactVersion,
     ) -> Result<(), ProductStoreError> {
-        let (_, scope) = self.resolve_session_scope(session_id)?;
-        self.with_optional_entity_live_write(scope.as_ref(), move || {
-            let mut versions = self.list_artifact_versions(session_id)?;
-            versions.push(version);
-            self.save_artifact_versions(session_id, &versions)
+        self.with_artifact_versions_write(session_id, |ctx| {
+            // D1：锁内分配 max(raw)+1，覆盖 caller 传入的 version。
+            version.version = ctx.next_version()?;
+            let mut proposed = ctx.raw().to_vec();
+            proposed.push(version);
+            ctx.save(&proposed).map(|_| ())
         })
     }
 
@@ -171,10 +172,7 @@ impl LifecycleStore {
         let path = self
             .workspace_timeline_root_for_session(session_id)?
             .join("artifact_versions.json");
-        if !path_exists(&path)? {
-            return Ok(Vec::new());
-        }
-        read_json(&path)
+        Self::read_artifact_versions_at(&path)
     }
 
     pub fn list_artifact_versions_for_issue_session(
@@ -189,10 +187,7 @@ impl LifecycleStore {
         let path = self
             .workspace_timeline_root_for_issue_session(project_id, issue_id, session_id)?
             .join("artifact_versions.json");
-        if !path_exists(&path)? {
-            return Ok(Vec::new());
-        }
-        read_json(&path)
+        Self::read_artifact_versions_at(&path)
     }
 
     pub fn save_artifact_versions(
@@ -200,13 +195,43 @@ impl LifecycleStore {
         session_id: &str,
         versions: &[ArtifactVersion],
     ) -> Result<(), ProductStoreError> {
+        self.with_artifact_versions_write(session_id, |ctx| ctx.save(versions).map(|_| ()))
+    }
+
+    fn read_artifact_versions_at(
+        path: &std::path::Path,
+    ) -> Result<Vec<ArtifactVersion>, ProductStoreError> {
+        if !path_exists(path)? {
+            return Ok(Vec::new());
+        }
+        read_json(path)
+    }
+
+    /// 在 `artifact_versions.json` sidecar 排它锁内运行同步 `operation`。
+    /// 锁序：scope 准入 → artifact 锁（恒为最内层）。闭包同步，结构上不可能跨 await。
+    /// 闭包内禁止调用 `save_artifact_versions` / `append_artifact_version`、嵌套本方法
+    /// （同一 sidecar 的 flock 同线程二次获取会永久阻塞），也禁止写 session record
+    /// （会形成 artifact → session 逆序）。
+    pub(crate) fn with_artifact_versions_write<T>(
+        &self,
+        session_id: &str,
+        operation: impl FnOnce(&mut ArtifactVersionsWrite<'_>) -> Result<T, ProductStoreError>,
+    ) -> Result<T, ProductStoreError> {
         validate_relative_id(session_id)?;
         let (_, scope) = self.resolve_session_scope(session_id)?;
         self.with_optional_entity_live_write(scope.as_ref(), move || {
             let path = self
                 .workspace_timeline_root_for_session(session_id)?
                 .join("artifact_versions.json");
-            write_json(&path, &versions)
+            let lock =
+                crate::product::coding_attempt_store::locking::ExclusiveFileLock::acquire(&path)?;
+            let raw = Self::read_artifact_versions_at(&path)?;
+            let mut ctx = ArtifactVersionsWrite {
+                path: &path,
+                _lock: lock,
+                raw,
+            };
+            operation(&mut ctx)
         })
     }
 
@@ -238,6 +263,65 @@ impl LifecycleStore {
             remove_file_if_exists(&sessions_root.join(format!("{}.json", session.id)))?;
         }
         Ok(())
+    }
+}
+
+/// `artifact_versions.json` 的写事务上下文：仅由 `LifecycleStore::with_artifact_versions_write`
+/// 构造，持有该文件的 sidecar 排它锁（`.artifact_versions.json.lock`，由现有
+/// `ExclusiveFileLock` 原语在此处新建；此前不存在针对该文件的锁）直到 drop。
+pub(crate) struct ArtifactVersionsWrite<'a> {
+    path: &'a std::path::Path,
+    _lock: crate::product::coding_attempt_store::locking::ExclusiveFileLock,
+    raw: Vec<ArtifactVersion>,
+}
+
+impl ArtifactVersionsWrite<'_> {
+    /// 进入事务时的磁盘真值（成功 `save` 后为最新落盘表），不做任何过滤。
+    pub(crate) fn raw(&self) -> &[ArtifactVersion] {
+        &self.raw
+    }
+
+    /// `max(raw.version)+1`（不是 `len()+1`）；溢出返回类型化错误，不回绕。
+    pub(crate) fn next_version(&self) -> Result<u32, ProductStoreError> {
+        match self.raw.iter().map(|entry| entry.version).max() {
+            None => Ok(1),
+            Some(max) => max
+                .checked_add(1)
+                .ok_or_else(|| ProductStoreError::InvalidRecord {
+                    kind: "artifact_versions",
+                    reason: "version_space_exhausted".to_string(),
+                }),
+        }
+    }
+
+    /// 以 `proposed` 为权威整表落盘：删除/回滚合法，不复活磁盘缺席条目，同 version
+    /// 改 payload 允许。version 重复在任何写之前拒绝。
+    /// 禁止转调公共 `save_artifact_versions`：同一 sidecar 的 flock 按 open file
+    /// description 计，同线程二次获取会永久阻塞。
+    pub(crate) fn save(
+        &mut self,
+        proposed: &[ArtifactVersion],
+    ) -> Result<Vec<ArtifactVersion>, ProductStoreError> {
+        let mut seen = std::collections::HashSet::with_capacity(proposed.len());
+        if !proposed.iter().all(|entry| seen.insert(entry.version)) {
+            return Err(ProductStoreError::InvalidRecord {
+                kind: "artifact_versions",
+                reason: "duplicate_version".to_string(),
+            });
+        }
+        write_json(self.path, &proposed)?;
+        self.raw = proposed.to_vec();
+        Ok(self.raw.clone())
+    }
+
+    /// 当前磁盘文件的逐字节内容；文件缺失与 `list_artifact_versions` 同口径返回空。
+    pub(crate) fn read_bytes(&self) -> Result<Vec<u8>, ProductStoreError> {
+        if !path_exists(self.path)? {
+            return Ok(Vec::new());
+        }
+        std::fs::read(self.path).map_err(|error| {
+            ProductStoreError::Io(format!("read {}: {error}", self.path.display()))
+        })
     }
 }
 
