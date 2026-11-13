@@ -19,13 +19,25 @@ impl LifecycleStore {
         match event {
             ScFailureEvidenceEvent::RoundBound { round } => {
                 if round.chain_id != chain.chain_id {
-                    return Err(scope_mismatch_error(step, Some(round.round_id.clone()), "round 的 chain_id 与 chain 不一致"));
+                    return Err(scope_mismatch_error(
+                        step,
+                        Some(round.round_id.clone()),
+                        "round 的 chain_id 与 chain 不一致",
+                    ));
                 }
                 if round.workspace_session_id != chain.scope.session_id {
-                    return Err(scope_mismatch_error(step, Some(round.round_id.clone()), "round 的 workspace_session_id 与 chain scope 不一致"));
+                    return Err(scope_mismatch_error(
+                        step,
+                        Some(round.round_id.clone()),
+                        "round 的 workspace_session_id 与 chain scope 不一致",
+                    ));
                 }
                 if round.round_id.is_empty() || round.run_ref.is_empty() {
-                    return Err(locator_invalid_error(step, Some(round.round_id.clone()), "round 身份不完整（round_id / run_ref）"));
+                    return Err(locator_invalid_error(
+                        step,
+                        Some(round.round_id.clone()),
+                        "round 身份不完整（round_id / run_ref）",
+                    ));
                 }
                 Ok(())
             }
@@ -39,10 +51,8 @@ impl LifecycleStore {
                 let bound = sc_failure_bound_round(read, round_id).ok_or_else(|| {
                     round_not_bound_error(step, Some(round_id.clone()), "该 round 尚未 RoundBound")
                 })?;
-                let expected = sc_failure_split_locator(
-                    &bound.workspace_session_id,
-                    bound.role_run_seq,
-                );
+                let expected =
+                    sc_failure_split_locator(&bound.workspace_session_id, bound.role_run_seq);
                 // raw 一律是本轮 split locator（不扩 raw 资格）。
                 if let ScEvidenceRef::Available { locator, .. } = raw
                     && locator != &expected
@@ -66,12 +76,7 @@ impl LifecycleStore {
                         } = source
                         {
                             self.sc_failure_validate_structure_source(
-                                chain,
-                                locator,
-                                sha256,
-                                *bytes,
-                                round_id,
-                                step,
+                                chain, locator, sha256, *bytes, round_id, step,
                             )?;
                         }
                     }

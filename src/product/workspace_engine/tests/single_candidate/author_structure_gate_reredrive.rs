@@ -50,7 +50,8 @@ mod author_structure_gate_reredrive {
             if fence.len() >= 3 && fence.bytes().all(|byte| byte == b'`') {
                 let body_start = offset + line.len();
                 let body_and_tail = &prompt[body_start..];
-                let body_end = body_and_tail.find(&format!("\n{fence}\n"))
+                let body_end = body_and_tail
+                    .find(&format!("\n{fence}\n"))
                     .expect("previous-source fence must close before output instructions");
                 return &body_and_tail[..body_end];
             }
@@ -59,10 +60,13 @@ mod author_structure_gate_reredrive {
         panic!("previous-source block missing");
     }
 
-    fn prompt_typed_failures(prompt: &str) -> Vec<crate::product::planning_failure::PlanningFailure> {
+    fn prompt_typed_failures(
+        prompt: &str,
+    ) -> Vec<crate::product::planning_failure::PlanningFailure> {
         // JSON rows carry actual typed records, not human wording. Stop before source
         // so JSON-looking source data is never mistaken for a diagnostic record.
-        prompt.lines()
+        prompt
+            .lines()
             .take_while(|line| !(line.len() >= 3 && line.bytes().all(|byte| byte == b'`')))
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect()
@@ -91,24 +95,37 @@ mod author_structure_gate_reredrive {
 
     #[test]
     fn structure_prompt_round_trips_backticks_cjk_and_large_source() {
-        use crate::product::workspace_engine::types::PlanningCompileFailure;
         use crate::product::planning_failure::PlanningFailureSet;
-        let failure = PlanningCompileFailure::operational(STRUCTURE_STABLE_CODE, "unknown_provider_logical_work_item".to_string());
+        use crate::product::workspace_engine::types::PlanningCompileFailure;
+        let failure = PlanningCompileFailure::operational(
+            STRUCTURE_STABLE_CODE,
+            "unknown_provider_logical_work_item".to_string(),
+        );
         let mut source = " \t中文失败候选\r\n```\n内层代码\n```\n```````\n".to_string();
         source.push_str(&"保留原文".repeat(30_000));
         source.push_str("\r\n尾部空格  \t");
-        let prompt = structure_prompt(&failure, &PlanningFailureSet::default(), &source, "failed-revision-backticks");
+        let prompt = structure_prompt(
+            &failure,
+            &PlanningFailureSet::default(),
+            &source,
+            "failed-revision-backticks",
+        );
         assert_eq!(prompt_source_body(&prompt).as_bytes(), source.as_bytes());
         assert!(prompt_typed_failures(&prompt).is_empty());
     }
 
     #[test]
     fn structure_prompt_rejects_mismatched_source_metadata() {
-        use sha2::Digest as _;
-        use crate::product::workspace_engine::single_candidate_structure_failure::author_structure_repair_prompt;
-        use crate::product::workspace_engine::{ScTeachingSourceMetadata, types::PlanningCompileFailure};
         use crate::product::planning_failure::PlanningFailureSet;
-        let failure = PlanningCompileFailure::operational(STRUCTURE_STABLE_CODE, "unknown_provider_logical_work_item".to_string());
+        use crate::product::workspace_engine::single_candidate_structure_failure::author_structure_repair_prompt;
+        use crate::product::workspace_engine::{
+            ScTeachingSourceMetadata, types::PlanningCompileFailure,
+        };
+        use sha2::Digest as _;
+        let failure = PlanningCompileFailure::operational(
+            STRUCTURE_STABLE_CODE,
+            "unknown_provider_logical_work_item".to_string(),
+        );
         let source = "失败候选\n";
         let sha256 = hex::encode(sha2::Sha256::digest(source.as_bytes()));
         let metadata = ScTeachingSourceMetadata {
@@ -120,10 +137,21 @@ mod author_structure_gate_reredrive {
         let failures = PlanningFailureSet::default();
         let invalid_hash = "0".repeat(64);
         for invalid in [
-            ScTeachingSourceMetadata { bytes: metadata.bytes + 1, ..metadata.clone() },
-            ScTeachingSourceMetadata { sha256: &invalid_hash, ..metadata },
+            ScTeachingSourceMetadata {
+                bytes: metadata.bytes + 1,
+                ..metadata.clone()
+            },
+            ScTeachingSourceMetadata {
+                sha256: &invalid_hash,
+                ..metadata
+            },
         ] {
-            assert_eq!(author_structure_repair_prompt(&failure, &failures, source, &invalid).expect_err("invalid source must fail closed").code, "sc_failure_evidence_invalid");
+            assert_eq!(
+                author_structure_repair_prompt(&failure, &failures, source, &invalid)
+                    .expect_err("invalid source must fail closed")
+                    .code,
+                "sc_failure_evidence_invalid"
+            );
         }
     }
 
@@ -133,17 +161,19 @@ mod author_structure_gate_reredrive {
         source_ref: &str,
     ) -> String {
         let session = engine.session();
-        crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(lifecycle.app_paths())
-            .get_source_revision(
-                &crate::product::work_item_plan_source_store::SourceStoreScope {
-                    project_id: session.project_id.clone(),
-                    issue_id: session.issue_id.clone(),
-                    plan_id: session.entity_id.clone(),
-                },
-                source_ref,
-            )
-            .expect("read the failure's own canonical source revision")
-            .source
+        crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
+            lifecycle.app_paths(),
+        )
+        .get_source_revision(
+            &crate::product::work_item_plan_source_store::SourceStoreScope {
+                project_id: session.project_id.clone(),
+                issue_id: session.issue_id.clone(),
+                plan_id: session.entity_id.clone(),
+            },
+            source_ref,
+        )
+        .expect("read the failure's own canonical source revision")
+        .source
     }
 
     #[test]
@@ -173,12 +203,19 @@ mod author_structure_gate_reredrive {
         for (index, physical) in [(3, "repository_c"), (2, "repository_b")] {
             let mut repaired = ir.clone();
             repaired.items[index].target_repository_id = physical.to_string();
-            repaired.items[index].contract.intent_contract.as_mut().expect("fixture intent").target =
-                crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
-                    repository_id: physical.to_string(),
-                };
+            repaired.items[index]
+                .contract
+                .intent_contract
+                .as_mut()
+                .expect("fixture intent")
+                .target = crate::product::logical_codebase::EnrollmentTarget::SingleRepository {
+                repository_id: physical.to_string(),
+            };
             for (before, after) in ir.items.iter().zip(&repaired.items) {
-                assert_eq!(before.contract.input_contracts, after.contract.input_contracts);
+                assert_eq!(
+                    before.contract.input_contracts,
+                    after.contract.input_contracts
+                );
             }
             assert!(matches!(
                 assess_single_candidate_structure(String::new(), &repaired, &context),
@@ -189,15 +226,18 @@ mod author_structure_gate_reredrive {
 
     #[test]
     fn legacy_structure_instruction_digest_keeps_pre_cutover_bytes() {
-        use sha2::Digest as _;
         use crate::product::workspace_engine::single_candidate_structure_failure::legacy_author_structure_repair_body;
         use crate::product::workspace_engine::types::PlanningCompileFailure;
+        use sha2::Digest as _;
         // This pins the already-load-bearing instruction_digest, not new prompt wording.
         // Expected SHA-256 was computed independently with Python hashlib from the
         // pre-cutover body (empty operational cause), including REVISION_TEACHING.
         let failure = PlanningCompileFailure::operational(STRUCTURE_STABLE_CODE, String::new());
         let body = legacy_author_structure_repair_body(&failure);
-        assert_eq!(hex::encode(sha2::Sha256::digest(body.as_bytes())), "8cb01f8988ac125bbc3f0e3bc1b247c617e107026542199bad095ed20fc9deeb");
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(body.as_bytes())),
+            "8cb01f8988ac125bbc3f0e3bc1b247c617e107026542199bad095ed20fc9deeb"
+        );
     }
 
     /// ① 槽位空闲：拒收返回 sealed 失败证据（原 sealed failure ＋ 原 typed
@@ -226,21 +266,30 @@ mod author_structure_gate_reredrive {
             )
             .await
             .expect("槽位空闲时的拒收必须交还失败证据，不得 Err");
-        let SingleCandidateAuthorCompletion::Rejected { failure, structure_failures } = completion
+        let SingleCandidateAuthorCompletion::Rejected {
+            failure,
+            structure_failures,
+        } = completion
         else {
             panic!("槽位空闲时必须返回 Rejected（sealed 失败证据），得到 {completion:?}");
         };
 
         // sealed 失败仍是 Operational 形态 ＋ 原稳定码（不得迁移 kind）。
         let PlanningCompileFailureKind::Operational { stable_code, cause } = &failure.kind else {
-            panic!("作者阶段结构拒收必须保持 Operational 形态：{:?}", failure.kind);
+            panic!(
+                "作者阶段结构拒收必须保持 Operational 形态：{:?}",
+                failure.kind
+            );
         };
         assert_eq!(
             stable_code.as_str(),
             STRUCTURE_STABLE_CODE,
             "结构拒收的稳定码必须原样保留"
         );
-        assert!(!cause.is_empty(), "sealed 失败必须携带原 detail（cause 非空）");
+        assert!(
+            !cause.is_empty(),
+            "sealed 失败必须携带原 detail（cause 非空）"
+        );
         assert!(
             !failure.failure_id.is_empty(),
             "拒收必须返回已 seal 的失败身份（failure_id 非空）"
@@ -297,10 +346,7 @@ mod author_structure_gate_reredrive {
             .iter()
             .filter(|node| matches!(node.node_type, TimelineNodeType::HumanConfirm))
             .count();
-        assert_eq!(
-            confirm_nodes, 0,
-            "重驱机会还在时不得出现 HumanConfirm 节点"
-        );
+        assert_eq!(confirm_nodes, 0, "重驱机会还在时不得出现 HumanConfirm 节点");
 
         // 每次尝试都进流水：恰好一行失败（通过率读数靠它）。
         let attempts: Attempts = lifecycle
@@ -358,8 +404,16 @@ mod author_structure_gate_reredrive {
 
         let rejected_source = failed_revision_source(&lifecycle, &engine, &rejected_source_ref);
         assert_eq!(rejected_source.as_bytes(), failed_source.as_bytes());
-        let prompt = structure_prompt(&failure, &structure_failures, &rejected_source, &rejected_source_ref);
-        assert_eq!(prompt_source_body(&prompt).as_bytes(), failed_source.as_bytes());
+        let prompt = structure_prompt(
+            &failure,
+            &structure_failures,
+            &rejected_source,
+            &rejected_source_ref,
+        );
+        assert_eq!(
+            prompt_source_body(&prompt).as_bytes(),
+            failed_source.as_bytes()
+        );
         assert_eq!(prompt_typed_failures(&prompt), structure_failures.failures);
 
         // 不虚记自动重写预算：durable 不留 running，auto_rewrites_used 不变。
@@ -367,7 +421,10 @@ mod author_structure_gate_reredrive {
             .load_candidate_compile_status(&session_id)
             .expect("load candidate compile status")
             .expect("durable candidate compile status must exist");
-        assert!(status.auto_rewrite.is_none(), "不得留下 auto_rewrite running 记录");
+        assert!(
+            status.auto_rewrite.is_none(),
+            "不得留下 auto_rewrite running 记录"
+        );
         assert_eq!(status.auto_rewrites_used, 0, "作者阶段重驱不扣自动重写预算");
 
         // 合法候选随后提升 last-valid：被拒候选的 sealed source_ref 仍不是
@@ -398,10 +455,19 @@ mod author_structure_gate_reredrive {
             "被拒候选的 sealed source_ref 必须是失败 revision，不得是 last-valid"
         );
         let last_valid_source = failed_revision_source(&lifecycle, &engine, &last_valid);
-        let still_rejected_source = failed_revision_source(&lifecycle, &engine, &rejected_source_ref);
+        let still_rejected_source =
+            failed_revision_source(&lifecycle, &engine, &rejected_source_ref);
         assert_ne!(still_rejected_source, last_valid_source);
-        let prompt = structure_prompt(&failure, &structure_failures, &still_rejected_source, &rejected_source_ref);
-        assert_eq!(prompt_source_body(&prompt).as_bytes(), failed_source.as_bytes());
+        let prompt = structure_prompt(
+            &failure,
+            &structure_failures,
+            &still_rejected_source,
+            &rejected_source_ref,
+        );
+        assert_eq!(
+            prompt_source_body(&prompt).as_bytes(),
+            failed_source.as_bytes()
+        );
         assert_ne!(prompt_source_body(&prompt), last_valid_source);
     }
 
@@ -480,12 +546,16 @@ mod author_structure_gate_reredrive {
             .list_candidate_attempts(&session_id)
             .expect("read candidate attempt log");
         assert_eq!(attempt_outcomes(&attempts), vec!["failed", "failed"]);
-        assert!(attempts.iter().all(|record| record
-            .failure
-            .as_ref()
-            .is_some_and(|failure| failure.code == STRUCTURE_STABLE_CODE)));
-        assert!(attempts.iter().all(|record| record.stage
-            == crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage::Structure));
+        assert!(attempts.iter().all(|record| {
+            record
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.code == STRUCTURE_STABLE_CODE)
+        }));
+        assert!(attempts.iter().all(|record| {
+            record.stage
+            == crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage::Structure
+        }));
         assert_ne!(
             attempts[0].attempt_seq, attempts[1].attempt_seq,
             "两次尝试序号必须不同（两次真实尝试）"
@@ -523,14 +593,23 @@ mod author_structure_gate_reredrive {
             )
             .await
             .expect("非环拒收同样不得 Err");
-        let SingleCandidateAuthorCompletion::Rejected { failure, structure_failures } = completion
+        let SingleCandidateAuthorCompletion::Rejected {
+            failure,
+            structure_failures,
+        } = completion
         else {
             panic!("非环拒收在槽位空闲时同样返回 Rejected（sealed 失败证据）：{completion:?}");
         };
-        let source_ref = failure.source_revision_ref.as_deref().expect("sealed source revision");
+        let source_ref = failure
+            .source_revision_ref
+            .as_deref()
+            .expect("sealed source revision");
         let source = failed_revision_source(&lifecycle, &engine, source_ref);
         let prompt = structure_prompt(&failure, &structure_failures, &source, source_ref);
-        assert_eq!(prompt_source_body(&prompt).as_bytes(), failed_source.as_bytes());
+        assert_eq!(
+            prompt_source_body(&prompt).as_bytes(),
+            failed_source.as_bytes()
+        );
         assert_eq!(prompt_typed_failures(&prompt), structure_failures.failures);
         let PlanningCompileFailureKind::Operational { stable_code, .. } = &failure.kind else {
             panic!("非环拒收同样保持 Operational 形态：{:?}", failure.kind);
@@ -557,10 +636,10 @@ mod author_structure_gate_reredrive {
             structure_failures.failures
         );
         assert!(
-            structure_failures
-                .failures
-                .iter()
-                .all(|failure| !matches!(failure.kind, PlanningFailureKind::DependencyCycle { .. })),
+            structure_failures.failures.iter().all(|failure| !matches!(
+                failure.kind,
+                PlanningFailureKind::DependencyCycle { .. }
+            )),
             "非环拒收不得虚构依赖环事实：{:?}",
             structure_failures.failures
         );
@@ -610,8 +689,16 @@ mod author_structure_gate_reredrive {
             set.failures
         );
 
-        assert!(set.failures.iter().any(|failure| matches!(failure.kind, PlanningFailureKind::DependencyCycle { .. })));
-        assert!(set.failures.iter().any(|failure| matches!(failure.kind, PlanningFailureKind::UnknownProvider { .. })));
+        assert!(
+            set.failures
+                .iter()
+                .any(|failure| matches!(failure.kind, PlanningFailureKind::DependencyCycle { .. }))
+        );
+        assert!(
+            set.failures
+                .iter()
+                .any(|failure| matches!(failure.kind, PlanningFailureKind::UnknownProvider { .. }))
+        );
         // A supplied duplicate remains a separate member; no deduplication or sorting.
         set.failures.push(set.failures[0].clone());
         let failure = author_structure_gate_failure(&ir, &context, &set);
@@ -625,8 +712,10 @@ mod author_structure_gate_reredrive {
                 true,
             )
             .await;
-        let SingleCandidateAuthorCompletion::Rejected { failure: sealed, structure_failures } =
-            completion
+        let SingleCandidateAuthorCompletion::Rejected {
+            failure: sealed,
+            structure_failures,
+        } = completion
         else {
             panic!("槽位空闲时必须返回 Rejected（sealed 失败证据）：{completion:?}");
         };
@@ -636,23 +725,28 @@ mod author_structure_gate_reredrive {
         );
 
         let source = " \t失败候选：中文\r\n```\n正文\n```\n``````\n尾部  ";
-        let prompt = structure_prompt(&sealed, &structure_failures, source, &context.source_revision_ref);
+        let prompt = structure_prompt(
+            &sealed,
+            &structure_failures,
+            source,
+            &context.source_revision_ref,
+        );
         assert_eq!(prompt_source_body(&prompt).as_bytes(), source.as_bytes());
         assert_eq!(prompt_typed_failures(&prompt), set.failures);
 
         // sealed 身份：仍是 Operational ＋ 原稳定码（不得迁移 kind）。
         let PlanningCompileFailureKind::Operational { stable_code, .. } = &sealed.kind else {
-            panic!("作者阶段结构拒收必须保持 Operational 形态：{:?}", sealed.kind);
+            panic!(
+                "作者阶段结构拒收必须保持 Operational 形态：{:?}",
+                sealed.kind
+            );
         };
         assert_eq!(
             stable_code.as_str(),
             STRUCTURE_STABLE_CODE,
             "结构拒收的稳定码必须原样保留"
         );
-        assert!(
-            !sealed.failure_id.is_empty(),
-            "sealed 失败身份不得为空"
-        );
+        assert!(!sealed.failure_id.is_empty(), "sealed 失败身份不得为空");
         assert_eq!(
             sealed.source_revision_ref.as_deref(),
             Some(context.source_revision_ref.as_str()),

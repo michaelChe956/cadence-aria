@@ -14,7 +14,10 @@ async fn work_item_plan_initial_compile_phase2_normal_records_transaction_journa
     let (_tmp, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let outline_payload = engine.session.artifact.clone().expect("outline artifact");
-    engine.update_artifact(outline_payload).await.expect("fixture artifact write");
+    engine
+        .update_artifact(outline_payload)
+        .await
+        .expect("fixture artifact write");
     let session_record = lifecycle
         .get_workspace_session(&engine.session.session_id)
         .expect("persisted plan session");

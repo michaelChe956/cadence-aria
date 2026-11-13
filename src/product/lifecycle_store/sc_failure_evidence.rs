@@ -180,14 +180,22 @@ pub(crate) fn sc_failure_chain_id(
         ("original_node_id", original_node_id),
     ] {
         if value.is_empty() || value.contains('/') || value.contains('\\') {
-            return Err(chain_invalid_error("sc_failure_chain_id", format!("{name} 不能为空或含路径分隔符")));
+            return Err(chain_invalid_error(
+                "sc_failure_chain_id",
+                format!("{name} 不能为空或含路径分隔符"),
+            ));
         }
     }
     // §2.3 冻结配方：四段各用 u64 大端字节长度前缀 + UTF-8 正文；seq 先十进制
     // 字符串化再加前缀；无额外 domain tag（尚无生产 P05 链，不留旧链 alias）。
     let seq_text = original_role_run_seq.to_string();
     let mut hasher = Sha256::new();
-    for part in [session_id, business_key, original_node_id, seq_text.as_str()] {
+    for part in [
+        session_id,
+        business_key,
+        original_node_id,
+        seq_text.as_str(),
+    ] {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
     }
@@ -346,7 +354,11 @@ impl LifecycleStore {
             if existing.event == event {
                 return Ok(evidence);
             }
-            let mut conflict = entry_conflict_error(step, Some(failed_round_id.to_string()), "同一教学提示槽位已存在不同正文");
+            let mut conflict = entry_conflict_error(
+                step,
+                Some(failed_round_id.to_string()),
+                "同一教学提示槽位已存在不同正文",
+            );
             conflict.verified_prefix = Some(Box::new(read));
             return Err(conflict);
         }
@@ -365,7 +377,9 @@ impl LifecycleStore {
             {
                 continue;
             }
-            if let ScEvidenceRef::Available { sha256: recorded, .. } = &evidence.prompt
+            if let ScEvidenceRef::Available {
+                sha256: recorded, ..
+            } = &evidence.prompt
                 && recorded != &digest
             {
                 body_conflict = true;
@@ -373,7 +387,11 @@ impl LifecycleStore {
             }
         }
         if body_conflict {
-            let mut conflict = entry_conflict_error(step, Some(failed_round_id.to_string()), "同一教学提示槽位已存在不同正文");
+            let mut conflict = entry_conflict_error(
+                step,
+                Some(failed_round_id.to_string()),
+                "同一教学提示槽位已存在不同正文",
+            );
             conflict.verified_prefix = Some(Box::new(read));
             return Err(conflict);
         }
@@ -399,12 +417,9 @@ impl LifecycleStore {
         const STEP: &str = "read_sc_teaching_prompt";
         let _session = self.sc_failure_session(chain, STEP)?;
         let directory = self.sc_failure_evidence_dir(chain, STEP)?;
-        let (ordinal, digest) = parse_sc_failure_prompt_locator(
-            locator,
-            &chain.scope.session_id,
-            &chain.chain_id,
-        )
-        .map_err(|detail| locator_invalid_error(STEP, None, detail))?;
+        let (ordinal, digest) =
+            parse_sc_failure_prompt_locator(locator, &chain.scope.session_id, &chain.chain_id)
+                .map_err(|detail| locator_invalid_error(STEP, None, detail))?;
         let path = directory
             .join(SC_FAILURE_PROMPT_DIR)
             .join(format!("{ordinal}-{digest}.txt"));
@@ -414,12 +429,15 @@ impl LifecycleStore {
                 return Err(prompt_missing_error(STEP, "教学提示正文文件不存在"));
             }
             Err(failure) => {
-                return Err(io_error(STEP, None, format!("读取教学提示正文失败: {failure}")));
+                return Err(io_error(
+                    STEP,
+                    None,
+                    format!("读取教学提示正文失败: {failure}"),
+                ));
             }
         };
-        let text = String::from_utf8(bytes).map_err(|_| {
-            prompt_digest_error(STEP, "教学提示正文不是 UTF-8")
-        })?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| prompt_digest_error(STEP, "教学提示正文不是 UTF-8"))?;
         if sha256_hex(text.as_bytes()) != digest {
             return Err(prompt_digest_error(STEP, "教学提示正文摘要与 locator 不符"));
         }
@@ -434,23 +452,43 @@ impl LifecycleStore {
     ) -> Result<String, ScFailureEvidenceError> {
         const STEP: &str = "read_sc_split_output";
         if scope.session_id != round.workspace_session_id {
-            return Err(scope_mismatch_error(STEP, Some(round.round_id.clone()), "scope 的 session 与 round 的 workspace_session_id 不一致"));
+            return Err(scope_mismatch_error(
+                STEP,
+                Some(round.round_id.clone()),
+                "scope 的 session 与 round 的 workspace_session_id 不一致",
+            ));
         }
         if round.run_ref.is_empty() || round.workspace_session_id.is_empty() {
-            return Err(locator_invalid_error(STEP, Some(round.round_id.clone()), "round 身份不完整（run_ref / workspace_session_id）"));
+            return Err(locator_invalid_error(
+                STEP,
+                Some(round.round_id.clone()),
+                "round 身份不完整（run_ref / workspace_session_id）",
+            ));
         }
         // scope 必须等于该 session 的真实归属（project / issue / plan）。
         let session = self
             .get_workspace_session(&round.workspace_session_id)
             .map_err(|failure| match failure {
-                ProductStoreError::NotFound { .. } => scope_mismatch_error(STEP, Some(round.round_id.clone()), "round 的 workspace_session_id 没有对应会话"),
-                other => io_error(STEP, Some(round.round_id.clone()), format!("读取会话失败: {other}")),
+                ProductStoreError::NotFound { .. } => scope_mismatch_error(
+                    STEP,
+                    Some(round.round_id.clone()),
+                    "round 的 workspace_session_id 没有对应会话",
+                ),
+                other => io_error(
+                    STEP,
+                    Some(round.round_id.clone()),
+                    format!("读取会话失败: {other}"),
+                ),
             })?;
         if session.project_id != scope.project_id
             || session.issue_id != scope.issue_id
             || session.entity_id != scope.plan_id
         {
-            return Err(scope_mismatch_error(STEP, Some(round.round_id.clone()), "scope 与真实会话归属不一致"));
+            return Err(scope_mismatch_error(
+                STEP,
+                Some(round.round_id.clone()),
+                "scope 与真实会话归属不一致",
+            ));
         }
         let handle = WorkItemSplitProviderRunHandle {
             run_ref: round.run_ref.clone(),
@@ -459,7 +497,13 @@ impl LifecycleStore {
         };
         let directory = self
             .work_item_split_provider_run_dir(&handle)
-            .map_err(|failure| io_error(STEP, Some(round.round_id.clone()), format!("定位 split run 目录失败: {failure}")))?;
+            .map_err(|failure| {
+                io_error(
+                    STEP,
+                    Some(round.round_id.clone()),
+                    format!("定位 split run 目录失败: {failure}"),
+                )
+            })?;
         // run.json 身份核对：调用方的 run_ref 必须就是盘上这条 run 的 provider_run_id
         // （错绑 → locator_invalid）；盘上 session/seq 被改写 → 盘上元数据不属于该
         // round（scope_mismatch）。
@@ -467,36 +511,85 @@ impl LifecycleStore {
         let run_bytes = match std::fs::read(&run_path) {
             Ok(bytes) => bytes,
             Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
-                return Err(raw_missing_error(STEP, Some(round.round_id.clone()), "split run 记录不存在"));
+                return Err(raw_missing_error(
+                    STEP,
+                    Some(round.round_id.clone()),
+                    "split run 记录不存在",
+                ));
             }
             Err(failure) => {
-                return Err(raw_missing_error(STEP, Some(round.round_id.clone()), format!("读取 split run 记录失败: {failure}")));
+                return Err(raw_missing_error(
+                    STEP,
+                    Some(round.round_id.clone()),
+                    format!("读取 split run 记录失败: {failure}"),
+                ));
             }
         };
-        let run: serde_json::Value = serde_json::from_slice(&run_bytes).map_err(|failure| raw_missing_error(STEP, Some(round.round_id.clone()), format!("split run 记录不是合法 JSON: {failure}")))?;
-        let recorded_ref = run.get("provider_run_id").and_then(serde_json::Value::as_str).unwrap_or_default();
+        let run: serde_json::Value = serde_json::from_slice(&run_bytes).map_err(|failure| {
+            raw_missing_error(
+                STEP,
+                Some(round.round_id.clone()),
+                format!("split run 记录不是合法 JSON: {failure}"),
+            )
+        })?;
+        let recorded_ref = run
+            .get("provider_run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
         if recorded_ref != round.run_ref {
-            return Err(locator_invalid_error(STEP, Some(round.round_id.clone()), "split run 的 provider_run_id 与 round.run_ref 不符"));
+            return Err(locator_invalid_error(
+                STEP,
+                Some(round.round_id.clone()),
+                "split run 的 provider_run_id 与 round.run_ref 不符",
+            ));
         }
-        let recorded_session = run.get("workspace_session_id").and_then(serde_json::Value::as_str).unwrap_or_default();
-        let recorded_seq = run.get("role_run_seq").and_then(serde_json::Value::as_u64).unwrap_or_default();
+        let recorded_session = run
+            .get("workspace_session_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let recorded_seq = run
+            .get("role_run_seq")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
         if recorded_session != round.workspace_session_id || recorded_seq != round.role_run_seq {
-            return Err(scope_mismatch_error(STEP, Some(round.round_id.clone()), "split run 记录的 session/seq 与 round 不符"));
+            return Err(scope_mismatch_error(
+                STEP,
+                Some(round.round_id.clone()),
+                "split run 记录的 session/seq 与 round 不符",
+            ));
         }
         let path = directory.join("structured_output.json");
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
             Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
-                return Err(raw_missing_error(STEP, Some(round.round_id.clone()), "split run 产物不存在"));
+                return Err(raw_missing_error(
+                    STEP,
+                    Some(round.round_id.clone()),
+                    "split run 产物不存在",
+                ));
             }
             Err(failure) => {
-                return Err(raw_missing_error(STEP, Some(round.round_id.clone()), format!("读取 split run 产物失败: {failure}")));
+                return Err(raw_missing_error(
+                    STEP,
+                    Some(round.round_id.clone()),
+                    format!("读取 split run 产物失败: {failure}"),
+                ));
             }
         };
-        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|failure| raw_missing_error(STEP, Some(round.round_id.clone()), format!("split run 产物不是合法 JSON: {failure}")))?;
+        let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|failure| {
+            raw_missing_error(
+                STEP,
+                Some(round.round_id.clone()),
+                format!("split run 产物不是合法 JSON: {failure}"),
+            )
+        })?;
         match value {
             serde_json::Value::String(text) => Ok(text),
-            _ => Err(raw_missing_error(STEP, Some(round.round_id.clone()), "split run 产物不是 JSON 字符串")),
+            _ => Err(raw_missing_error(
+                STEP,
+                Some(round.round_id.clone()),
+                "split run 产物不是 JSON 字符串",
+            )),
         }
     }
 
@@ -508,7 +601,13 @@ impl LifecycleStore {
     ) -> Result<PathBuf, ScFailureEvidenceError> {
         let root = self
             .workspace_timeline_root_for_session(&chain.scope.session_id)
-            .map_err(|failure| io_error(step, None, format!("定位 workspace timeline 失败: {failure}")))?;
+            .map_err(|failure| {
+                io_error(
+                    step,
+                    None,
+                    format!("定位 workspace timeline 失败: {failure}"),
+                )
+            })?;
         Ok(root.join(SC_FAILURE_EVIDENCE_DIR).join(&chain.chain_id))
     }
 
@@ -522,19 +621,28 @@ impl LifecycleStore {
         let session = self
             .get_workspace_session(&chain.scope.session_id)
             .map_err(|failure| match failure {
-                ProductStoreError::NotFound { .. } => session_not_live_error(step, "会话不存在或已不可用"),
+                ProductStoreError::NotFound { .. } => {
+                    session_not_live_error(step, "会话不存在或已不可用")
+                }
                 other => io_error(step, None, format!("读取会话失败: {other}")),
             })?;
         if session.workspace_type != WorkspaceType::WorkItemPlan
             || session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
         {
-            return Err(session_not_sc_error(step, "会话不是 SC single-candidate WorkItemPlan"));
+            return Err(session_not_sc_error(
+                step,
+                "会话不是 SC single-candidate WorkItemPlan",
+            ));
         }
         if chain.scope.project_id != session.project_id
             || chain.scope.issue_id != session.issue_id
             || chain.scope.plan_id != session.entity_id
         {
-            return Err(scope_mismatch_error(step, None, "chain scope 与真实会话身份不一致"));
+            return Err(scope_mismatch_error(
+                step,
+                None,
+                "chain scope 与真实会话身份不一致",
+            ));
         }
         Ok(session)
     }
@@ -586,7 +694,10 @@ impl LifecycleStore {
             .get(&scope)
             .map_err(|failure| io_error(step, None, format!("读取删除事实失败: {failure}")))?;
         if tombstone.is_some() {
-            return Err(session_not_live_error(step, "所属实体处于删除墓碑（purging/deleted）"));
+            return Err(session_not_live_error(
+                step,
+                "所属实体处于删除墓碑（purging/deleted）",
+            ));
         }
         Ok(())
     }
@@ -619,11 +730,8 @@ impl LifecycleStore {
         directory: &Path,
         step: &str,
     ) -> Result<ExclusiveFileLock, ScFailureEvidenceError> {
-        ExclusiveFileLock::acquire_at(&directory.join(SC_FAILURE_EVIDENCE_LOCK)).map_err(
-            |failure| {
-                io_error(step, None, format!("取证据日志锁失败: {failure}"))
-            },
-        )
+        ExclusiveFileLock::acquire_at(&directory.join(SC_FAILURE_EVIDENCE_LOCK))
+            .map_err(|failure| io_error(step, None, format!("取证据日志锁失败: {failure}")))
     }
 
     /// 追加一条日志条目（序号连续 + append + sync + 回读校验）。
@@ -669,7 +777,9 @@ fn sc_failure_entry_key(event: &ScFailureEvidenceEvent) -> String {
             sc_failure_disposition_key(&evidence.disposition)
         ),
         ScFailureEvidenceEvent::ChainTerminal { .. } => "terminal".to_string(),
-        ScFailureEvidenceEvent::TeachingDecision { failed_round_id, .. } => {
+        ScFailureEvidenceEvent::TeachingDecision {
+            failed_round_id, ..
+        } => {
             format!("teachingdecision/{failed_round_id}")
         }
     }
@@ -771,8 +881,26 @@ fn read_sc_failure_log(
         if line.is_empty() {
             continue;
         }
-        let text = std::str::from_utf8(line).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, Some(chain), &entries, &bytes[..verified_bytes], format!("证据日志行不是 UTF-8: {failure}"), ))?;
-        let entry: ScFailureEvidenceEntry = serde_json::from_str(text).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, Some(chain), &entries, &bytes[..verified_bytes], format!("证据日志行不是合法条目: {failure}"), ))?;
+        let text = std::str::from_utf8(line).map_err(|failure| {
+            sc_failure_log_failure(
+                CODE_LOG_CORRUPT,
+                step,
+                Some(chain),
+                &entries,
+                &bytes[..verified_bytes],
+                format!("证据日志行不是 UTF-8: {failure}"),
+            )
+        })?;
+        let entry: ScFailureEvidenceEntry = serde_json::from_str(text).map_err(|failure| {
+            sc_failure_log_failure(
+                CODE_LOG_CORRUPT,
+                step,
+                Some(chain),
+                &entries,
+                &bytes[..verified_bytes],
+                format!("证据日志行不是合法条目: {failure}"),
+            )
+        })?;
         if entry.schema_version != SC_FAILURE_EVIDENCE_SCHEMA_VERSION {
             return Err(sc_failure_log_failure(
                 CODE_LOG_CORRUPT,
@@ -780,10 +908,7 @@ fn read_sc_failure_log(
                 Some(chain),
                 &entries,
                 &bytes[..verified_bytes],
-                format!(
-                    "证据日志 schema 版本不支持: {}",
-                    entry.schema_version
-                ),
+                format!("证据日志 schema 版本不支持: {}", entry.schema_version),
             ));
         }
         if entry.entry_seq != expected_seq {
@@ -793,7 +918,10 @@ fn read_sc_failure_log(
                 Some(chain),
                 &entries,
                 &bytes[..verified_bytes],
-                format!("证据日志序号断档: 期望 {expected_seq}, 实际 {}", entry.entry_seq),
+                format!(
+                    "证据日志序号断档: 期望 {expected_seq}, 实际 {}",
+                    entry.entry_seq
+                ),
             ));
         }
         if entry.chain != *chain {
@@ -830,25 +958,32 @@ fn append_sc_failure_log_line(
     if let Some(parent) = log_path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent).map_err(|failure| io_error(step, None, format!("创建证据日志目录失败: {failure}")))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|failure| io_error(step, None, format!("创建证据日志目录失败: {failure}")))?;
     }
-    let mut payload = serde_json::to_vec(entry).map_err(|failure| io_error(step, None, format!("序列化证据条目失败: {failure}")))?;
+    let mut payload = serde_json::to_vec(entry)
+        .map_err(|failure| io_error(step, None, format!("序列化证据条目失败: {failure}")))?;
     payload.push(b'\n');
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_path)
         .map_err(|failure| io_error(step, None, format!("打开证据日志失败: {failure}")))?;
-    file.write_all(&payload).map_err(|failure| io_error(step, None, format!("写入证据日志失败: {failure}")))?;
-    file.flush().map_err(|failure| io_error(step, None, format!("刷写证据日志失败: {failure}")))?;
-    file.sync_all().map_err(|failure| io_error(step, None, format!("同步证据日志失败: {failure}")))?;
-    let readback = std::fs::read(log_path).map_err(|failure| io_error(step, None, format!("回读证据日志失败: {failure}")))?;
+    file.write_all(&payload)
+        .map_err(|failure| io_error(step, None, format!("写入证据日志失败: {failure}")))?;
+    file.flush()
+        .map_err(|failure| io_error(step, None, format!("刷写证据日志失败: {failure}")))?;
+    file.sync_all()
+        .map_err(|failure| io_error(step, None, format!("同步证据日志失败: {failure}")))?;
+    let readback = std::fs::read(log_path)
+        .map_err(|failure| io_error(step, None, format!("回读证据日志失败: {failure}")))?;
     let last = readback
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .next_back()
         .ok_or_else(|| io_error(step, None, "回读证据日志为空"))?;
-    let parsed: ScFailureEvidenceEntry = serde_json::from_slice(last).map_err(|failure| io_error(step, None, format!("回读证据日志条目不可解析: {failure}")))?;
+    let parsed: ScFailureEvidenceEntry = serde_json::from_slice(last)
+        .map_err(|failure| io_error(step, None, format!("回读证据日志条目不可解析: {failure}")))?;
     if parsed != *entry {
         return Err(io_error(step, None, "回读证据日志与写入条目不一致"));
     }
@@ -865,7 +1000,8 @@ fn write_sc_failure_prompt_file(
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
-        std::fs::create_dir_all(parent).map_err(|failure| io_error(step, None, format!("创建提示目录失败: {failure}")))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|failure| io_error(step, None, format!("创建提示目录失败: {failure}")))?;
     }
     match std::fs::read_to_string(path) {
         Ok(existing) => {
@@ -876,7 +1012,11 @@ fn write_sc_failure_prompt_file(
         }
         Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
         Err(failure) => {
-            return Err(io_error(step, None, format!("读取既有提示正文失败: {failure}")));
+            return Err(io_error(
+                step,
+                None,
+                format!("读取既有提示正文失败: {failure}"),
+            ));
         }
     }
     let mut file = OpenOptions::new()
@@ -884,10 +1024,14 @@ fn write_sc_failure_prompt_file(
         .create_new(true)
         .open(path)
         .map_err(|failure| io_error(step, None, format!("创建提示正文失败: {failure}")))?;
-    file.write_all(text.as_bytes()).map_err(|failure| io_error(step, None, format!("写入提示正文失败: {failure}")))?;
-    file.flush().map_err(|failure| io_error(step, None, format!("刷写提示正文失败: {failure}")))?;
-    file.sync_all().map_err(|failure| io_error(step, None, format!("同步提示正文失败: {failure}")))?;
-    let written = std::fs::read_to_string(path).map_err(|failure| io_error(step, None, format!("回读提示正文失败: {failure}")))?;
+    file.write_all(text.as_bytes())
+        .map_err(|failure| io_error(step, None, format!("写入提示正文失败: {failure}")))?;
+    file.flush()
+        .map_err(|failure| io_error(step, None, format!("刷写提示正文失败: {failure}")))?;
+    file.sync_all()
+        .map_err(|failure| io_error(step, None, format!("同步提示正文失败: {failure}")))?;
+    let written = std::fs::read_to_string(path)
+        .map_err(|failure| io_error(step, None, format!("回读提示正文失败: {failure}")))?;
     if sha256_hex(written.as_bytes()) != digest {
         return Err(prompt_digest_error(step, "回读提示正文摘要与写入不符"));
     }
@@ -953,7 +1097,13 @@ fn prompt_disposition_invalid_error(
     round_id: Option<String>,
     detail: impl Into<String>,
 ) -> ScFailureEvidenceError {
-    error(CODE_PROMPT_DISPOSITION_INVALID, step, round_id, detail, false)
+    error(
+        CODE_PROMPT_DISPOSITION_INVALID,
+        step,
+        round_id,
+        detail,
+        false,
+    )
 }
 
 /// `CODE_PROMPT_DIGEST_MISMATCH` 的统一构造（`publication_incomplete = true`）。
@@ -1035,22 +1185,22 @@ mod parts;
 use parts::sc_failure_log_failure;
 
 #[cfg(test)]
-#[path = "tests/sc_failure_evidence_fixture.rs"]
-mod fixture;
-#[cfg(test)]
-#[path = "tests/sc_failure_evidence.rs"]
-mod tests;
-#[cfg(test)]
 #[path = "tests/sc_failure_evidence_boundaries.rs"]
 mod boundary_tests;
+#[cfg(test)]
+#[path = "tests/sc_failure_evidence_fixture.rs"]
+mod fixture;
+#[path = "sc_failure_evidence_lookup.rs"]
+mod lookup;
 #[cfg(test)]
 #[path = "tests/sc_failure_evidence_prompt_contract.rs"]
 mod prompt_contract_tests;
 #[cfg(test)]
+#[path = "tests/sc_failure_round_lookup.rs"]
+mod round_lookup_tests;
+#[cfg(test)]
 #[path = "tests/sc_failure_evidence_teaching_decision.rs"]
 mod teaching_decision_tests;
 #[cfg(test)]
-#[path = "tests/sc_failure_round_lookup.rs"]
-mod round_lookup_tests;
-#[path = "sc_failure_evidence_lookup.rs"]
-mod lookup;
+#[path = "tests/sc_failure_evidence.rs"]
+mod tests;

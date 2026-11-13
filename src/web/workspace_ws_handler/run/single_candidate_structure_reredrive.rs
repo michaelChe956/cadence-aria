@@ -29,7 +29,7 @@ use crate::product::work_item_plan_policy::{
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use crate::web::types::GenerateWorkItemsRequest;
 use crate::web::workspace_ws_types::{
-    ScEvidenceRef, ScFailureClass, ScFailureChainIdentity, ScFailureScope, ScPromptDisposition,
+    ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScFailureScope, ScPromptDisposition,
     ScRoundIdentity, ScTeachingDecision, ScTeachingPromptEvidence,
 };
 
@@ -271,7 +271,11 @@ pub(super) fn structure_source_digest(
             code: "sc_failure_source_unavailable".to_string(),
             step: "structure_source_digest".to_string(),
             round_id: None,
-            detail: format!("读取 source revision 失败: {} ({:?})", failure.code(), failure),
+            detail: format!(
+                "读取 source revision 失败: {} ({:?})",
+                failure.code(),
+                failure
+            ),
             publication_incomplete: false,
             verified_prefix: None,
         })?;
@@ -457,7 +461,9 @@ pub(super) fn begin_sc_teaching_reredrive_run(
         Ok(entry) => Ok(entry),
         Err(failure) => {
             engine.persist_single_candidate_terminal_phase(SingleCandidatePhase::Failed);
-            Err(SingleCandidateProviderRunError::Message(format!("{failure}")))
+            Err(SingleCandidateProviderRunError::Message(format!(
+                "{failure}"
+            )))
         }
     }
 }

@@ -3,13 +3,12 @@
 //! Existing cancellation test uses manager.abort_active_run; do not duplicate it.
 
 use super::sc_failure_driver_fixture::{
-    chain_ids, durable_sc_package_versions, evidence_entries, events_of,
-    failure_message, markdown_missing_five_sections, markdown_unknown_requirement_ref,
-    only_chain_id, start_run, start_run_with,
+    chain_ids, durable_sc_package_versions, events_of, evidence_entries, failure_message,
+    markdown_missing_five_sections, markdown_unknown_requirement_ref, only_chain_id, start_run,
+    start_run_with,
 };
 use super::single_candidate_provider_run::{
-    single_candidate_markdown, wait_for_single_candidate_phase, wait_for_stage,
-    ProviderRunFixture,
+    ProviderRunFixture, single_candidate_markdown, wait_for_single_candidate_phase, wait_for_stage,
 };
 use super::*;
 use crate::cross_cutting::provider_adapter::ProviderAdapterError;
@@ -33,31 +32,45 @@ struct InterruptedProvider {
 
 #[async_trait::async_trait]
 impl StreamingProviderAdapter for InterruptedProvider {
-    async fn start(&self, input: StreamingProviderInput, _cancel: CancellationToken)
-        -> Result<ProviderSession, ProviderAdapterError>
-    {
+    async fn start(
+        &self,
+        input: StreamingProviderInput,
+        _cancel: CancellationToken,
+    ) -> Result<ProviderSession, ProviderAdapterError> {
         self.inputs.send(input).unwrap();
         let ordinal = self.callbacks.fetch_add(1, Ordering::SeqCst);
         if ordinal > 0 && self.refuse {
-            return Err(ProviderAdapterError::provider_unavailable("fixture start refusal"));
+            return Err(ProviderAdapterError::provider_unavailable(
+                "fixture start refusal",
+            ));
         }
         let (events, receiver) = mpsc::channel(4);
         let (commands, _command_rx) = mpsc::channel(1);
         if ordinal == 0 {
             let output = self.first.clone();
             tokio::spawn(async move {
-                events.send(ProviderEvent::Completed(
-                    ProviderCompletion::plain(output, None))).await.unwrap();
+                events
+                    .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                        output, None,
+                    )))
+                    .await
+                    .unwrap();
             });
         } else {
             drop(events);
         }
-        Ok(ProviderSession { native_session_id: None, events: receiver, commands })
+        Ok(ProviderSession {
+            native_session_id: None,
+            events: receiver,
+            commands,
+        })
     }
 
-    async fn run_streaming(&self, _: &crate::protocol::contracts::AdapterInput,
-        _: CancellationToken) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError>
-    {
+    async fn run_streaming(
+        &self,
+        _: &crate::protocol::contracts::AdapterInput,
+        _: CancellationToken,
+    ) -> Result<mpsc::Receiver<StreamChunk>, ProviderAdapterError> {
         unreachable!("SC driver uses start")
     }
 }
@@ -66,12 +79,19 @@ impl StreamingProviderAdapter for InterruptedProvider {
 async fn wait_for_waiting(fixture: &ProviderRunFixture) -> serde_json::Value {
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            let record = fixture.lifecycle.get_workspace_session(&fixture.record.id).unwrap();
+            let record = fixture
+                .lifecycle
+                .get_workspace_session(&fixture.record.id)
+                .unwrap();
             let value = serde_json::to_value(record).unwrap();
-            if value["lc_resume_recovery"]["state"] == "waiting" { return value; }
+            if value["lc_resume_recovery"]["state"] == "waiting" {
+                return value;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-    }).await.expect("real Unknown branch must durably enter Waiting")
+    })
+    .await
+    .expect("real Unknown branch must durably enter Waiting")
 }
 
 fn assert_no_terminal_package(fixture: &ProviderRunFixture) {
@@ -87,7 +107,10 @@ async fn sc_failure_teaching_interrupted_has_started_observation() {
     let first = markdown_missing_five_sections(&fixture.story_id, &fixture.design_id, "Excluded.");
     let (inputs, receiver) = mpsc::unbounded_channel();
     let provider = Arc::new(InterruptedProvider {
-        first, refuse: false, inputs, callbacks: AtomicUsize::new(0),
+        first,
+        refuse: false,
+        inputs,
+        callbacks: AtomicUsize::new(0),
     });
     let mut run = start_run_with(fixture, provider, receiver).await;
     let _ = run.queue.next_input().await;
@@ -106,11 +129,20 @@ async fn sc_failure_teaching_interrupted_has_started_observation() {
     assert_eq!(terminal["completeness"], "incomplete");
     let interrupted = &terminal["last_physical_round_id"];
     assert_ne!(*interrupted, failures[0]["event"]["round_id"]);
-    let observation = terminal["launch_observations"].as_array().unwrap().iter()
-        .find(|pair| pair[0] == *interrupted).unwrap();
+    let observation = terminal["launch_observations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|pair| pair[0] == *interrupted)
+        .unwrap();
     assert_eq!(observation[1], "started");
-    assert!(terminal["missing_evidence"].as_array().unwrap().iter()
-        .any(|item| item["round_id"] == *interrupted && item["kind"] == "provider_output"));
+    assert!(
+        terminal["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["round_id"] == *interrupted && item["kind"] == "provider_output")
+    );
     let versions = durable_sc_package_versions(&run.fixture);
     assert_eq!(versions.len(), 1);
     let package = &versions[0]["sc_failure_repair_package"];
@@ -119,8 +151,10 @@ async fn sc_failure_teaching_interrupted_has_started_observation() {
     assert_eq!(package["rounds"].as_array().unwrap().len(), 2);
     assert_eq!(package["rounds"][1]["launch_state"], "started");
     assert_eq!(package["last_provider_output"]["status"], "missing");
-    assert_eq!(package["last_failure_source"]["source_round_id"],
-        failures[0]["event"]["round_id"]);
+    assert_eq!(
+        package["last_failure_source"]["source_round_id"],
+        failures[0]["event"]["round_id"]
+    );
 }
 
 #[tokio::test]
@@ -129,7 +163,10 @@ async fn sc_failure_teaching_start_refused_is_real_unknown_waiting() {
     let first = markdown_missing_five_sections(&fixture.story_id, &fixture.design_id, "Excluded.");
     let (inputs, receiver) = mpsc::unbounded_channel();
     let provider = Arc::new(InterruptedProvider {
-        first, refuse: true, inputs, callbacks: AtomicUsize::new(0),
+        first,
+        refuse: true,
+        inputs,
+        callbacks: AtomicUsize::new(0),
     });
     let mut run = start_run_with(fixture, provider, receiver).await;
     let _ = run.queue.next_input().await;
@@ -137,12 +174,27 @@ async fn sc_failure_teaching_start_refused_is_real_unknown_waiting() {
     let state = wait_for_waiting(&run.fixture).await;
     assert_ne!(state["single_candidate_phase"], "failed");
     run.queue.expect_no_further_input().await;
-    assert_eq!(run.queue.received_count(), 2, "callbacks are not successful launches");
-    let record = run.fixture.lifecycle.get_workspace_session(&run.fixture.record.id).unwrap();
+    assert_eq!(
+        run.queue.received_count(),
+        2,
+        "callbacks are not successful launches"
+    );
+    let record = run
+        .fixture
+        .lifecycle
+        .get_workspace_session(&run.fixture.record.id)
+        .unwrap();
     let window = record.sc_generation_teaching_windows.last().unwrap();
-    let attempt = window.attempts.iter().find(|attempt| attempt.attempt_no == 2).unwrap();
-    let ledger: Vec<_> = record.provider_start_ledger.iter().filter(|entry|
-        entry.provider_attempt_key.as_deref() == Some(attempt.attempt_key.as_str())).collect();
+    let attempt = window
+        .attempts
+        .iter()
+        .find(|attempt| attempt.attempt_no == 2)
+        .unwrap();
+    let ledger: Vec<_> = record
+        .provider_start_ledger
+        .iter()
+        .filter(|entry| entry.provider_attempt_key.as_deref() == Some(attempt.attempt_key.as_str()))
+        .collect();
     assert_eq!(ledger.len(), 1, "claimed placeholder remains attributable");
     assert!(!ledger[0].is_actual_launch_observation());
     let entries = evidence_entries(&run.fixture, &only_chain_id(&run.fixture));
@@ -158,9 +210,13 @@ async fn sc_failure_teaching_start_refused_is_real_unknown_waiting() {
 /// test adds the missing durable zero-A4/zero-chain-terminal assertions.
 #[tokio::test]
 async fn sc_failure_nonterminal_five_cases_publish_no_failure_package() {
-    for scenario in ["success", "compile_recovered", "ir_recovered",
-        "structure_recovered", "admission_waiting"]
-    {
+    for scenario in [
+        "success",
+        "compile_recovered",
+        "ir_recovered",
+        "structure_recovered",
+        "admission_waiting",
+    ] {
         let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
         let good = single_candidate_markdown(&fixture.story_id, &fixture.design_id);
         let outputs = match scenario {
@@ -174,21 +230,39 @@ async fn sc_failure_nonterminal_five_cases_publish_no_failure_package() {
             _ => vec![good],
         };
         if scenario == "admission_waiting" {
-            std::fs::remove_file(fixture.member_checkout_root()
-                .join(".claude/rules/language.md")).unwrap();
+            std::fs::remove_file(
+                fixture
+                    .member_checkout_root()
+                    .join(".claude/rules/language.md"),
+            )
+            .unwrap();
         }
-        let expected = if scenario == "admission_waiting" { 0 }
-            else if scenario == "success" { 1 } else { 2 };
+        let expected = if scenario == "admission_waiting" {
+            0
+        } else if scenario == "success" {
+            1
+        } else {
+            2
+        };
         let mut run = start_run(fixture, outputs).await;
-        for _ in 0..expected { let _ = run.queue.next_input().await; }
+        for _ in 0..expected {
+            let _ = run.queue.next_input().await;
+        }
         if scenario == "admission_waiting" {
             assert!(!failure_message(&mut run.outbound).await.is_empty());
-            let record = run.fixture.lifecycle.get_workspace_session(&run.fixture.record.id).unwrap();
+            let record = run
+                .fixture
+                .lifecycle
+                .get_workspace_session(&run.fixture.record.id)
+                .unwrap();
             // 成员语言规则缺失属「准入期 fail-closed，先于 provider 启动」：
             // 既有产品用例 `single_candidate_author_rejects_missing_language_rules_before_provider_start`
             // 明确要求 phase = Failed 且零 provider 输入（本矩阵已断言 received_count()==0）。
             // 该路径没有观察到机械失败 ⇒ 不应产生终局包（下方 assert_no_terminal_package）。
-            assert_eq!(record.single_candidate_phase, Some(SingleCandidatePhase::Failed));
+            assert_eq!(
+                record.single_candidate_phase,
+                Some(SingleCandidatePhase::Failed)
+            );
         } else {
             wait_for_stage(&run.fixture.engine, WorkspaceStage::HumanConfirm).await;
         }
@@ -197,8 +271,11 @@ async fn sc_failure_nonterminal_five_cases_publish_no_failure_package() {
         assert_no_terminal_package(&run.fixture);
         for chain in chain_ids(&run.fixture) {
             let entries = evidence_entries(&run.fixture, &chain);
-            assert_eq!(events_of(&entries, "failure_observed").len(),
-                usize::from(expected == 2), "{scenario}");
+            assert_eq!(
+                events_of(&entries, "failure_observed").len(),
+                usize::from(expected == 2),
+                "{scenario}"
+            );
         }
     }
 }

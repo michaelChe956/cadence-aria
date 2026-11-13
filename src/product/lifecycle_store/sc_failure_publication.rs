@@ -13,11 +13,11 @@ use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
 
+use super::LifecycleStore;
 use super::sc_failure_evidence::{
-    sc_failure_chain_id, ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceRead,
+    ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceRead, sc_failure_chain_id,
 };
 use super::utils::path_exists;
-use super::LifecycleStore;
 use crate::product::coding_attempt_store::locking::ExclusiveFileLock;
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::{ArtifactRef, WorkspaceType};
@@ -221,7 +221,7 @@ impl LifecycleStore {
                     STEP,
                     "版本不是 SC 失败修复包",
                     true,
-                ))
+                ));
             }
         };
         if package.session_id != scope.session_id
@@ -269,16 +269,15 @@ impl LifecycleStore {
         }
         let bytes = std::fs::read(&receipt_path)
             .map_err(|error| publication_error(CODE_IO, STEP, format!("{error}"), true))?;
-        let receipt: ScArtifactPublishedReceipt = serde_json::from_slice(&bytes).map_err(
-            |error| {
+        let receipt: ScArtifactPublishedReceipt =
+            serde_json::from_slice(&bytes).map_err(|error| {
                 publication_error(
                     CODE_RECEIPT_CORRUPT,
                     STEP,
                     format!("回执无法解析: {error}"),
                     true,
                 )
-            },
-        )?;
+            })?;
         if receipt.schema_version != 1
             || receipt.package_id != package.package_id
             || receipt.chain_id != package.chain_id

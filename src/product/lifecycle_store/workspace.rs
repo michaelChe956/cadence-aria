@@ -1636,11 +1636,11 @@ impl LcFreshClaimOutcome {
 }
 
 #[cfg(test)]
-#[path = "workspace_tests.rs"]
-mod tests;
-#[cfg(test)]
 #[path = "tests/fresh_operation_binding_tests.rs"]
 mod fresh_operation_binding_tests;
+#[cfg(test)]
+#[path = "workspace_tests.rs"]
+mod tests;
 
 // ---------------------------------------------------------------------------
 // 批 2 T2（REQ-WIGA-09）：Terminated 终态防迟到覆盖与 Confirmed 保留。

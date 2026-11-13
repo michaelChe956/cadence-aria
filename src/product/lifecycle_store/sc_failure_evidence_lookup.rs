@@ -8,13 +8,13 @@
 use std::path::Path;
 
 use super::{
+    CODE_LOG_CORRUPT, CODE_SCOPE_MISMATCH, SC_FAILURE_EVIDENCE_DIR, SC_FAILURE_EVIDENCE_LOG,
+    ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceEvent, ScFailureEvidenceRead,
     error, io_error, read_sc_failure_log, sc_failure_log_failure, scope_mismatch_error,
-    session_not_live_error, session_not_sc_error, ScFailureEvidenceEntry, ScFailureEvidenceError,
-    ScFailureEvidenceEvent, ScFailureEvidenceRead, CODE_LOG_CORRUPT, CODE_SCOPE_MISMATCH,
-    SC_FAILURE_EVIDENCE_DIR, SC_FAILURE_EVIDENCE_LOG,
+    session_not_live_error, session_not_sc_error,
 };
-use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::json_store::ProductStoreError;
+use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::WorkspaceType;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
 use crate::web::workspace_ws_types::{ScFailureChainIdentity, ScFailureScope, ScRoundIdentity};
@@ -40,7 +40,13 @@ impl LifecycleStore {
         self.sc_failure_lookup_session(scope, STEP)?;
         let root = self
             .workspace_timeline_root_for_session(&scope.session_id)
-            .map_err(|failure| io_error(STEP, None, format!("定位 workspace timeline 失败: {failure}")))?
+            .map_err(|failure| {
+                io_error(
+                    STEP,
+                    None,
+                    format!("定位 workspace timeline 失败: {failure}"),
+                )
+            })?
             .join(SC_FAILURE_EVIDENCE_DIR);
         let entries = match std::fs::read_dir(&root) {
             Ok(entries) => entries,
@@ -100,24 +106,31 @@ impl LifecycleStore {
         scope: &ScFailureScope,
         step: &str,
     ) -> Result<(), ScFailureEvidenceError> {
-        let session = self.get_workspace_session(&scope.session_id).map_err(|failure| {
-            match failure {
-                ProductStoreError::NotFound { .. } => {
-                    session_not_live_error(step, "会话不存在或已不可用")
-                }
-                other => io_error(step, None, format!("读取会话失败: {other}")),
-            }
-        })?;
+        let session =
+            self.get_workspace_session(&scope.session_id)
+                .map_err(|failure| match failure {
+                    ProductStoreError::NotFound { .. } => {
+                        session_not_live_error(step, "会话不存在或已不可用")
+                    }
+                    other => io_error(step, None, format!("读取会话失败: {other}")),
+                })?;
         if session.workspace_type != WorkspaceType::WorkItemPlan
             || session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
         {
-            return Err(session_not_sc_error(step, "会话不是 SC single-candidate WorkItemPlan"));
+            return Err(session_not_sc_error(
+                step,
+                "会话不是 SC single-candidate WorkItemPlan",
+            ));
         }
         if scope.project_id != session.project_id
             || scope.issue_id != session.issue_id
             || scope.plan_id != session.entity_id
         {
-            return Err(scope_mismatch_error(step, None, "scope 与真实会话身份不一致"));
+            return Err(scope_mismatch_error(
+                step,
+                None,
+                "scope 与真实会话身份不一致",
+            ));
         }
         Ok(())
     }

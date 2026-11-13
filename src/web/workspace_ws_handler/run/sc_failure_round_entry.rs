@@ -102,7 +102,11 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
         });
     };
     // 旧 original-node 锚：run_context business 与 failed_provider_node_id 必须一致。
-    let business_original = business.original_node_id.as_deref().unwrap_or_default().trim();
+    let business_original = business
+        .original_node_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim();
     let failed_node = recovery.failed_provider_node_id.trim();
     if !business_original.is_empty() && !failed_node.is_empty() && business_original != failed_node
     {
@@ -145,9 +149,7 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
         .entries
         .iter()
         .filter_map(|entry| match &entry.event {
-            ScFailureEvidenceEvent::RoundBound { round } => {
-                Some(round.clone())
-            }
+            ScFailureEvidenceEvent::RoundBound { round } => Some(round.clone()),
             _ => None,
         })
         .collect();
@@ -260,8 +262,7 @@ pub(in crate::web::workspace_ws_handler::run) async fn begin_sc_author_round_ent
                     "SC 轮入场锚不可用（code={} step={}）：{}",
                     failure.code, failure.step, failure.detail
                 ))
-            })?
-        {
+            })? {
             FreshRoundAnchor::Bound(entry) => Ok(entry),
             FreshRoundAnchor::Fresh { original, ordinal } => {
                 let node_id = engine.begin_work_item_plan_author_run().await;
@@ -361,7 +362,9 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_ready_sc_round(
             engine.persist_single_candidate_terminal_phase(
                 crate::product::models::SingleCandidatePhase::Failed,
             );
-            return Err(SingleCandidateProviderRunError::Message(format!("{failure}")));
+            return Err(SingleCandidateProviderRunError::Message(format!(
+                "{failure}"
+            )));
         }
     };
     let delivery = prepare_author_delivery_for_compile(&full_output);
@@ -470,22 +473,24 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_sc_teaching_entry(
     sent_boundary: super::sc_failure_transport::ScTeachingSentBoundary<'_>,
 ) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
     match entry {
-        ScRoundEntry::Ready(bound) => drive_single_candidate_reredrive(
-            engine,
-            launch,
-            provider_for_run,
-            run_cancel,
-            command_rx,
-            node_id,
-            author_provider,
-            reredrive_prompt,
-            repository_path,
-            &bound,
-            lifecycle,
-            sc_teaching_attempt,
-            Some(sent_boundary),
-        )
-        .await,
+        ScRoundEntry::Ready(bound) => {
+            drive_single_candidate_reredrive(
+                engine,
+                launch,
+                provider_for_run,
+                run_cancel,
+                command_rx,
+                node_id,
+                author_provider,
+                reredrive_prompt,
+                repository_path,
+                &bound,
+                lifecycle,
+                sc_teaching_attempt,
+                Some(sent_boundary),
+            )
+            .await
+        }
         ScRoundEntry::Completed {
             bound,
             raw_text,

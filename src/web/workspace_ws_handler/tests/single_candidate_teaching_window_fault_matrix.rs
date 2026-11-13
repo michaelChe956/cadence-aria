@@ -27,10 +27,10 @@ use super::single_candidate_provider_run::{
     wait_for_single_candidate_phase,
 };
 use super::*;
-use crate::product::models::{SingleCandidatePhase, WorkspaceSessionRecord};
 use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceEvent, sc_failure_chain_id, sc_failure_split_locator,
 };
+use crate::product::models::{SingleCandidatePhase, WorkspaceSessionRecord};
 use crate::product::work_item_plan_policy::{
     ProviderStartLedgerEntry, RunPolicy, ScTeachingWindowRequest, ScTeachingWindowStatus,
     WorkItemPlanFlowKind,
@@ -346,7 +346,10 @@ async fn takeover_does_not_mint_new_chance() {
     // ② 父会话经真实 establish 面建立已批准教学窗口（父链的 C 事实）。
     let established = match fixture
         .lifecycle
-        .establish_sc_teaching_window(&generate, &seed_teaching_request(&fixture, &fixture.record.id))
+        .establish_sc_teaching_window(
+            &generate,
+            &seed_teaching_request(&fixture, &fixture.record.id),
+        )
         .expect("seed establish teaching window on parent")
     {
         crate::product::lifecycle_store::ScTeachingEstablishOutcome::Established {

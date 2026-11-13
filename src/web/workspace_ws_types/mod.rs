@@ -12,8 +12,8 @@ pub mod common;
 pub mod in_;
 pub mod out;
 pub mod plan_candidate;
-pub mod sc_failure_repair;
 pub mod review;
+pub mod sc_failure_repair;
 pub mod stage;
 pub mod timeline;
 
@@ -26,7 +26,7 @@ pub use common::*;
 pub use in_::*;
 pub use out::*;
 pub use plan_candidate::*;
-pub use sc_failure_repair::*;
 pub use review::*;
+pub use sc_failure_repair::*;
 pub use stage::*;
 pub use timeline::*;

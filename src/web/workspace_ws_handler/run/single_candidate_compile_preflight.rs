@@ -1089,7 +1089,10 @@ mod tests {
             let block = format!(
                 "missing_section:5:结构化 section 缺少必需字段。\n  缺失字段: {field}\n  正确形状: - {field}: value"
             );
-            assert!(payload.parse_reasons.contains(&block), "{field} 投影逐条可区分");
+            assert!(
+                payload.parse_reasons.contains(&block),
+                "{field} 投影逐条可区分"
+            );
         }
     }
 }

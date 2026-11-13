@@ -4,13 +4,16 @@ async fn work_item_plan_item_required_revision_feedback_includes_findings() {
         make_work_item_plan_engine_with_draft_candidate("sess_wip_item_required_review_feedback");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     save_serial_work_item_plan_index(&engine, &plan_id, "outline_a");
-    engine.update_artifact(work_item_draft_artifact_payload(
-        &lifecycle,
-        &plan_id,
-        "outline_a",
-        "draft_a",
-        WorkItemDraftStatus::Accepted,
-    )).await.expect("fixture artifact write");
+    engine
+        .update_artifact(work_item_draft_artifact_payload(
+            &lifecycle,
+            &plan_id,
+            "outline_a",
+            "draft_a",
+            WorkItemDraftStatus::Accepted,
+        ))
+        .await
+        .expect("fixture artifact write");
     let review_node_id = engine
         .create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::WorkItemDraftReview,

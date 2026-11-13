@@ -635,9 +635,7 @@ async fn sc_round_bound_is_durable_at_the_physical_start_edge() {
     let _first = sc_start_and_capture_first_input(&fixture, provider.clone(), &mut input_rx).await;
 
     assert_eq!(
-        provider
-            .starts
-            .load(std::sync::atomic::Ordering::SeqCst),
+        provider.starts.load(std::sync::atomic::Ordering::SeqCst),
         1,
         "SC 原轮恰一次物理启动"
     );
@@ -687,8 +685,11 @@ async fn sc_bound_write_failure_blocks_physical_start_and_teaching_claim() {
         .workspace_timeline_root_for_session(&fixture.record.id)
         .expect("timeline root");
     std::fs::create_dir_all(&timeline_root).expect("timeline dir");
-    std::fs::write(timeline_root.join("sc-failure-evidence"), b"not-a-directory")
-        .expect("inject file-instead-of-dir");
+    std::fs::write(
+        timeline_root.join("sc-failure-evidence"),
+        b"not-a-directory",
+    )
+    .expect("inject file-instead-of-dir");
 
     let (provider, _input_rx) = start_order_provider(&fixture);
     let (context, mut outbound_rx) = single_candidate_context(&fixture, provider.clone());
@@ -715,9 +716,7 @@ async fn sc_bound_write_failure_blocks_physical_start_and_teaching_claim() {
     .await;
 
     assert_eq!(
-        provider
-            .starts
-            .load(std::sync::atomic::Ordering::SeqCst),
+        provider.starts.load(std::sync::atomic::Ordering::SeqCst),
         0,
         "绑定落盘失败不得新增任何 provider start"
     );

@@ -20,16 +20,16 @@
 // 只新增这 2 条消费者转换：不复刻 publisher 用例（写入顺序/故障 pending/载荷不
 // 一致拒发）。
 
-use crate::product::workspace_engine::WorkspaceEngine;
-use crate::product::work_item_plan_policy::PolicyDiagnostic;
-use crate::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, ScFailureRepairPackage, WsOutMessage,
-};
 use super::publication_fixture::{
     ORDINARY_MARKDOWN, ordinary_version, publication_fixture, receipt_from_disk, receipt_path,
     seed_timeline_node,
 };
 use super::publication_tests::engine_for_fixture;
+use crate::product::work_item_plan_policy::PolicyDiagnostic;
+use crate::product::workspace_engine::WorkspaceEngine;
+use crate::web::workspace_ws_types::{
+    ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, ScFailureRepairPackage, WsOutMessage,
+};
 
 /// 公开视图切片：只取消费者真正读到的字段（版本表 / 摘要 / 当前产物 / 诊断）。
 struct PublicArtifactView {
@@ -77,7 +77,10 @@ async fn published_package_is_public_after_durable_engine_rebuild() {
     seed_timeline_node(&fixture.store, &fixture.session_id);
     fixture
         .store
-        .save_artifact_versions(&fixture.session_id, std::slice::from_ref(&ordinary_version()))
+        .save_artifact_versions(
+            &fixture.session_id,
+            std::slice::from_ref(&ordinary_version()),
+        )
         .expect("seed ordinary current version");
 
     let (mut engine, _event_rx) = engine_for_fixture(&fixture);
@@ -113,12 +116,27 @@ async fn published_package_is_public_after_durable_engine_rebuild() {
     assert_eq!(public_package.plan_id, fixture.scope.plan_id);
     assert_eq!(public_package.chain_id, fixture.chain.chain_id);
     assert_eq!(public_package.rounds.len(), fixture.package.rounds.len());
-    for (public_round, published_round) in public_package.rounds.iter().zip(fixture.package.rounds.iter())
+    for (public_round, published_round) in public_package
+        .rounds
+        .iter()
+        .zip(fixture.package.rounds.iter())
     {
-        assert_eq!(public_round.identity.round_id, published_round.identity.round_id);
-        assert_eq!(public_round.identity.run_ref, published_round.identity.run_ref);
-        assert_eq!(public_round.identity.node_id, published_round.identity.node_id);
-        assert_eq!(public_round.identity.chain_id, published_round.identity.chain_id);
+        assert_eq!(
+            public_round.identity.round_id,
+            published_round.identity.round_id
+        );
+        assert_eq!(
+            public_round.identity.run_ref,
+            published_round.identity.run_ref
+        );
+        assert_eq!(
+            public_round.identity.node_id,
+            published_round.identity.node_id
+        );
+        assert_eq!(
+            public_round.identity.chain_id,
+            published_round.identity.chain_id
+        );
         assert_eq!(
             public_round.identity.role_run_seq,
             published_round.identity.role_run_seq
@@ -131,19 +149,31 @@ async fn published_package_is_public_after_durable_engine_rebuild() {
             public_round.identity.round_ordinal,
             published_round.identity.round_ordinal
         );
-        assert_eq!(public_round.identity.provider, published_round.identity.provider);
+        assert_eq!(
+            public_round.identity.provider,
+            published_round.identity.provider
+        );
         assert_eq!(public_round.raw, published_round.raw);
         assert_eq!(public_round.source, published_round.source);
         assert_eq!(public_round.launch_state, published_round.launch_state);
         assert_eq!(public_round.failure_class, published_round.failure_class);
-        assert_eq!(public_round.blocking_reasons, published_round.blocking_reasons);
+        assert_eq!(
+            public_round.blocking_reasons,
+            published_round.blocking_reasons
+        );
         assert_eq!(
             public_round.repair_instructions,
             published_round.repair_instructions
         );
-        assert_eq!(public_round.teaching_decision, published_round.teaching_decision);
+        assert_eq!(
+            public_round.teaching_decision,
+            published_round.teaching_decision
+        );
         assert_eq!(public_round.prompts, published_round.prompts);
-        assert_eq!(public_round.existing_failure_id, published_round.existing_failure_id);
+        assert_eq!(
+            public_round.existing_failure_id,
+            published_round.existing_failure_id
+        );
         assert_eq!(public_round.attempt_key, published_round.attempt_key);
     }
     assert_eq!(
@@ -163,7 +193,10 @@ async fn published_package_is_public_after_durable_engine_rebuild() {
         public_package.missing_evidence,
         fixture.package.missing_evidence
     );
-    assert_eq!(public_package.evidence_digest, fixture.package.evidence_digest);
+    assert_eq!(
+        public_package.evidence_digest,
+        fixture.package.evidence_digest
+    );
     assert_eq!(
         public_package.evidence_through_entry_key,
         fixture.package.evidence_through_entry_key
@@ -218,7 +251,10 @@ async fn published_package_is_public_after_durable_engine_rebuild() {
         .iter()
         .find(|entry| entry.get("sc_failure_repair_package").is_some())
         .expect("wire package version");
-    assert_eq!(wire_package["version"].as_u64(), Some(published.version as u64));
+    assert_eq!(
+        wire_package["version"].as_u64(),
+        Some(published.version as u64)
+    );
     assert_eq!(
         wire_package["sc_failure_repair_package"]["package_id"].as_str(),
         Some(fixture.package.package_id.as_str())
@@ -260,10 +296,14 @@ async fn pending_and_corrupt_packages_stay_out_of_the_public_view() {
     seed_timeline_node(&fixture.store, &fixture.session_id);
     fixture
         .store
-        .save_artifact_versions(&fixture.session_id, std::slice::from_ref(&ordinary_version()))
+        .save_artifact_versions(
+            &fixture.session_id,
+            std::slice::from_ref(&ordinary_version()),
+        )
         .expect("seed ordinary current version");
     // 真实回执落盘故障：把回执文件路径占成目录 → 回执写入必失败（真实 store 原因）。
-    let pending_receipt_file = receipt_path(&fixture.store, &fixture.chain, &fixture.package.package_id);
+    let pending_receipt_file =
+        receipt_path(&fixture.store, &fixture.chain, &fixture.package.package_id);
     std::fs::create_dir_all(&pending_receipt_file).expect("occupy the receipt path");
 
     let (mut engine, _event_rx) = engine_for_fixture(&fixture);
@@ -275,7 +315,10 @@ async fn pending_and_corrupt_packages_stay_out_of_the_public_view() {
         error.publication_incomplete,
         "回执落盘失败必须标记 publication_incomplete"
     );
-    assert_eq!(error.code, "sc_failure_receipt_failed", "回执故障必须是稳定契约码");
+    assert_eq!(
+        error.code, "sc_failure_receipt_failed",
+        "回执故障必须是稳定契约码"
+    );
     assert!(!error.step.is_empty());
     assert!(
         !error.detail.is_empty(),
@@ -300,7 +343,9 @@ async fn pending_and_corrupt_packages_stay_out_of_the_public_view() {
     let (rebuilt, _rebuilt_rx) = engine_for_fixture(&fixture);
     let view = public_artifact_view(&rebuilt);
     assert!(
-        view.versions.iter().all(|version| sc_package_of(version).is_none()),
+        view.versions
+            .iter()
+            .all(|version| sc_package_of(version).is_none()),
         "pending 包不得进入公开版本表"
     );
     assert!(
@@ -327,7 +372,10 @@ async fn pending_and_corrupt_packages_stay_out_of_the_public_view() {
     seed_timeline_node(&corrupt.store, &corrupt.session_id);
     corrupt
         .store
-        .save_artifact_versions(&corrupt.session_id, std::slice::from_ref(&ordinary_version()))
+        .save_artifact_versions(
+            &corrupt.session_id,
+            std::slice::from_ref(&ordinary_version()),
+        )
         .expect("seed ordinary current version");
     let (mut corrupt_engine, _corrupt_rx) = engine_for_fixture(&corrupt);
     let published = corrupt_engine
@@ -337,8 +385,9 @@ async fn pending_and_corrupt_packages_stay_out_of_the_public_view() {
 
     // 真实腐坏：改写已落盘回执的摘要字节（回执还在，但不再绑定真实包）。
     let receipt_file = receipt_path(&corrupt.store, &corrupt.chain, &corrupt.package.package_id);
-    let mut receipt = receipt_from_disk(&corrupt.store, &corrupt.chain, &corrupt.package.package_id)
-        .expect("published receipt on disk");
+    let mut receipt =
+        receipt_from_disk(&corrupt.store, &corrupt.chain, &corrupt.package.package_id)
+            .expect("published receipt on disk");
     receipt.package_digest = "f".repeat(64);
     std::fs::write(
         &receipt_file,

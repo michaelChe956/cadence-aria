@@ -1,7 +1,7 @@
 //! `ArtifactVersion` -> `ArtifactVersionSummary` 的摘要构造（自 session_state 等价搬迁的单一实现）。
 
-use super::preview;
 use super::WorkspaceEngine;
+use super::preview;
 use crate::product::work_item_plan_policy::PolicyDiagnostic;
 use crate::web::workspace_ws_types::ScFailureScope;
 use crate::web::workspace_ws_types::ScPackageCompleteness;
@@ -90,7 +90,9 @@ pub(crate) fn build_artifact_version_summary(version: &ArtifactVersion) -> Artif
             let size = serde_json::to_string(manifest).map_or(0, |s| s.len());
             (size, preview(&manifest.id))
         }
-        ArtifactPayload::ScFailureRepairPackage { sc_failure_repair_package } => {
+        ArtifactPayload::ScFailureRepairPackage {
+            sc_failure_repair_package,
+        } => {
             // A4 修复包不是 markdown：size 是包 JSON 的真实字节数；preview 是只读
             // 摘要（真实轮次/缺失数/完整性与字节数），不截断包正文、不回显序列化。
             let size = serde_json::to_string(sc_failure_repair_package).map_or(0, |s| s.len());
@@ -177,8 +179,7 @@ mod tests {
     use crate::product::models::ProviderName;
     use crate::web::workspace_ws_types::*;
 
-    const SHA256_HEX: &str =
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const SHA256_HEX: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     fn available_ref(locator: &str, bytes: u64) -> ScEvidenceRef {
         ScEvidenceRef::Available {
@@ -230,10 +231,7 @@ mod tests {
             terminal_reason: "compile failed".to_string(),
             completeness,
             rounds,
-            last_provider_output: available_ref(
-                "work-item-split-runs/issue-1/run-1/run.json",
-                42,
-            ),
+            last_provider_output: available_ref("work-item-split-runs/issue-1/run-1/run.json", 42),
             last_failure_source: ScFailureSourceEvidence {
                 source_round_id: "round-1".to_string(),
                 source: available_ref("work-item-split-runs/issue-1/run-1/source.txt", 17),
@@ -269,7 +267,9 @@ mod tests {
             vec![round_evidence(1), round_evidence(2)],
             Vec::new(),
         );
-        let complete_bytes = serde_json::to_string(&complete).expect("package json").len();
+        let complete_bytes = serde_json::to_string(&complete)
+            .expect("package json")
+            .len();
         let summary = build_artifact_version_summary(&artifact_version(complete));
         assert_eq!(summary.markdown_size, complete_bytes);
         let preview: serde_json::Value =
@@ -290,7 +290,9 @@ mod tests {
                 locator: None,
             }],
         );
-        let incomplete_bytes = serde_json::to_string(&incomplete).expect("package json").len();
+        let incomplete_bytes = serde_json::to_string(&incomplete)
+            .expect("package json")
+            .len();
         let summary = build_artifact_version_summary(&artifact_version(incomplete));
         assert_eq!(summary.markdown_size, incomplete_bytes);
         let preview: serde_json::Value =

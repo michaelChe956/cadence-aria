@@ -38,7 +38,9 @@ use crate::web::workspace_ws_types::{ReviewGate, ReviewVerdict, ReviewVerdictTyp
 ///   ——平台已在自动重写或人工门态，调用方**不得**再把它当硬失败。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SingleCandidateAuthorCompletion {
-    Candidate { item_count: usize },
+    Candidate {
+        item_count: usize,
+    },
     Rejected {
         /// 已 seal 的原失败身份（kind／stable_code／failure_id／detail 逐字不变）。
         failure: crate::product::workspace_engine::types::PlanningCompileFailure,

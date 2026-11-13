@@ -554,17 +554,12 @@ impl WorkspaceEngine {
     ) {
         // A4（SC 失败修复包）恒 is_current=false：review 标记落在最后一个
         // **普通**版本上，末尾 A4 不被标记。
-        if let Some(version) = self
-            .artifact_versions
-            .iter_mut()
-            .rev()
-            .find(|version| {
-                !matches!(
-                    version.payload,
-                    ArtifactPayload::ScFailureRepairPackage { .. }
-                )
-            })
-        {
+        if let Some(version) = self.artifact_versions.iter_mut().rev().find(|version| {
+            !matches!(
+                version.payload,
+                ArtifactPayload::ScFailureRepairPackage { .. }
+            )
+        }) {
             version.reviewed_by = reviewed_by;
             version.review_verdict = review_verdict;
             self.persist_artifact_versions();
@@ -573,17 +568,12 @@ impl WorkspaceEngine {
 
     pub(crate) fn mark_latest_artifact_confirmed(&mut self, confirmed_by: Option<String>) {
         // 同上：confirm 标记只落在最后一个普通版本上。
-        if let Some(version) = self
-            .artifact_versions
-            .iter_mut()
-            .rev()
-            .find(|version| {
-                !matches!(
-                    version.payload,
-                    ArtifactPayload::ScFailureRepairPackage { .. }
-                )
-            })
-        {
+        if let Some(version) = self.artifact_versions.iter_mut().rev().find(|version| {
+            !matches!(
+                version.payload,
+                ArtifactPayload::ScFailureRepairPackage { .. }
+            )
+        }) {
             version.confirmed_by = confirmed_by;
             self.persist_artifact_versions();
         }
@@ -766,8 +756,8 @@ mod sc_published_mark_tests {
     use crate::product::lifecycle_store::CreateWorkspaceSessionInput;
     use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::lifecycle_store::WorkItemPlanSessionOptions;
-    use crate::product::models::provider::ProviderName;
     use crate::product::models::WorkspaceType;
+    use crate::product::models::provider::ProviderName;
     use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
     use crate::web::workspace_ws_types::ScEvidenceRef;
     use crate::web::workspace_ws_types::ScFailureRepairPackage;
@@ -824,8 +814,7 @@ mod sc_published_mark_tests {
         // 夹具诚实性：canonical 链身份（store 真实校验 chain-v1-<64 hex>）＋显式
         // Missing 证据（夹具不构造证据存储），不用 all-zero 的假 Available。
         // chain-v1- 后缀 = sha256("p14b-mark-sc-fixture")。
-        let chain_id =
-            "chain-v1-9e3d26b7950437fe339152e4ccdad90ed0f76b9d580b9a280b6b0042105a09d0";
+        let chain_id = "chain-v1-9e3d26b7950437fe339152e4ccdad90ed0f76b9d580b9a280b6b0042105a09d0";
         let raw_missing = || ScEvidenceRef::Missing {
             code: "sc_failure_raw_missing".to_string(),
             detail: "夹具未落盘证据：终局没有 provider 原始输出".to_string(),

@@ -17,11 +17,10 @@ use super::single_candidate_compile_preflight::{
     prepare_author_delivery_for_compile,
 };
 use super::*;
-use crate::product::lifecycle_store::sc_failure_evidence::{
-    ScFailureEvidenceError, ScFailureEvidenceEvent, sc_failure_chain_id,
-    sc_failure_split_locator,
-};
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::lifecycle_store::sc_failure_evidence::{
+    ScFailureEvidenceError, ScFailureEvidenceEvent, sc_failure_chain_id, sc_failure_split_locator,
+};
 use crate::product::models::ProviderName;
 use crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandle;
 use crate::web::workspace_ws_handler::run::PlanSplitRunContext;
@@ -380,25 +379,32 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_failure_round(
         // 恢复失败（run.json 缺失/损坏/身份不符）不是「可启动」：既没有 context，
         // 也不能证明未启动 ⇒ 无 bound 的可见 Waiting（不伪造 context、不新 seq、
         // 不落 Failed、零 start）。
-        let split = match crate::web::workspace_ws_handler::run::gateway_start::
-            plan_split_run_for_handle(
+        let split =
+            match crate::web::workspace_ws_handler::run::gateway_start::plan_split_run_for_handle(
                 lifecycle,
                 &scope.project_id,
                 &scope.issue_id,
                 provider,
                 handle,
             ) {
-            Ok(split) => split,
-            Err(message) => {
-                return Ok(ScRoundEntry::Waiting {
-                    round,
-                    reason_code: SC_ROUND_LAUNCH_STATE_UNAVAILABLE,
-                    detail: format!("重放轮 run 上下文不可恢复（{message}）"),
-                });
-            }
-        };
+                Ok(split) => split,
+                Err(message) => {
+                    return Ok(ScRoundEntry::Waiting {
+                        round,
+                        reason_code: SC_ROUND_LAUNCH_STATE_UNAVAILABLE,
+                        detail: format!("重放轮 run 上下文不可恢复（{message}）"),
+                    });
+                }
+            };
         // replay：同一契约身份只复用既有 handle，启动分类必须成立才允许 start。
-        return classify_sc_round_launch(lifecycle, ScBoundProviderRound { chain, round, split });
+        return classify_sc_round_launch(
+            lifecycle,
+            ScBoundProviderRound {
+                chain,
+                round,
+                split,
+            },
+        );
     }
     // 首绑：真实 handle（LC 与非 LC 一致）→ chain 身份 → RoundBound 先落盘。
     let split = crate::web::workspace_ws_handler::run::gateway_start::begin_plan_split_run(
@@ -409,13 +415,7 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_failure_round(
         &scope.session_id,
     )
     .map_err(|message| {
-        sc_transport_error(
-            "sc_failure_split_begin_failed",
-            STEP,
-            None,
-            message,
-            true,
-        )
+        sc_transport_error("sc_failure_split_begin_failed", STEP, None, message, true)
     })?;
     let chain = match original {
         Some(chain) => chain.clone(),
@@ -441,7 +441,9 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_failure_round(
             failure.step = STEP.to_string();
             failure
         })?;
-    if !persisted.is_some_and(|(saved_chain, saved_round)| saved_chain == chain && saved_round == round) {
+    if !persisted
+        .is_some_and(|(saved_chain, saved_round)| saved_chain == chain && saved_round == round)
+    {
         return Err(sc_transport_error(
             "sc_failure_round_readback_mismatch",
             STEP,
@@ -451,7 +453,14 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_failure_round(
         ));
     }
     // 首绑也要过同一分类：新 seq 必须真的没有既有启动事实（审计/run 严格可读）。
-    classify_sc_round_launch(lifecycle, ScBoundProviderRound { chain, round, split })
+    classify_sc_round_launch(
+        lifecycle,
+        ScBoundProviderRound {
+            chain,
+            round,
+            split,
+        },
+    )
 }
 
 /// 教学轮开局：沿用原轮链身份（同一 scope/business_key/原节点），教学轮是新
@@ -551,9 +560,10 @@ pub(in crate::web::workspace_ws_handler::run) fn close_sc_split_round(
             &bound.round.workspace_session_id,
             bound.round.role_run_seq,
         ),
-        sha256: crate::web::workspace_ws_handler::run::single_candidate_structure_reredrive::sc_sha256(
-            raw,
-        ),
+        sha256:
+            crate::web::workspace_ws_handler::run::single_candidate_structure_reredrive::sc_sha256(
+                raw,
+            ),
         bytes: raw.len() as u64,
     })
 }
@@ -740,13 +750,13 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_single_candidate_re
 mod tests {
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
+    use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::lifecycle_store::inputs::{
         CreateWorkspaceSessionInput, WorkItemPlanSessionOptions,
     };
     use crate::product::lifecycle_store::sc_failure_evidence::{
         ScFailureEvidenceEvent, ScFailureEvidenceRead, sc_failure_chain_id,
     };
-    use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::models::{ProviderName, WorkspaceType};
     use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
     use crate::web::workspace_ws_types::{
@@ -839,7 +849,10 @@ mod tests {
         let (_tmp, lifecycle, scope) = sc_round_fixture();
         let original = begin(&lifecycle, &scope, None, 0);
         assert_eq!(
-            (original.round.round_ordinal, original.round.node_id.as_str()),
+            (
+                original.round.round_ordinal,
+                original.round.node_id.as_str()
+            ),
             (0, NODE_ID)
         );
         assert_eq!(original.round.workspace_session_id, scope.session_id);
@@ -866,10 +879,12 @@ mod tests {
 
         let raw_original = "{\"work_items\":[{\"id\":\"a\",\"raw\":\"original\"}]}";
         let raw_teaching = "{\"work_items\":[{\"id\":\"a\",\"raw\":\"teaching-revision\"}]}";
-        let original_ref = close_sc_split_round(&lifecycle, &original, "original prompt", raw_original)
-            .expect("original close reads its own raw back verbatim");
-        let teaching_ref = close_sc_split_round(&lifecycle, &teaching, "teaching prompt", raw_teaching)
-            .expect("teaching close reads its own raw back verbatim");
+        let original_ref =
+            close_sc_split_round(&lifecycle, &original, "original prompt", raw_original)
+                .expect("original close reads its own raw back verbatim");
+        let teaching_ref =
+            close_sc_split_round(&lifecycle, &teaching, "teaching prompt", raw_teaching)
+                .expect("teaching close reads its own raw back verbatim");
         assert!(matches!(original_ref, ScEvidenceRef::Available { .. }));
         assert!(matches!(teaching_ref, ScEvidenceRef::Available { .. }));
 
@@ -935,9 +950,10 @@ mod tests {
             .expect("bound row readable");
         assert_eq!(bound_rounds(&read), vec![bound.round.clone()]);
         assert!(
-            read.entries
-                .iter()
-                .all(|entry| !matches!(entry.event, ScFailureEvidenceEvent::FailureObserved { .. })),
+            read.entries.iter().all(|entry| !matches!(
+                entry.event,
+                ScFailureEvidenceEvent::FailureObserved { .. }
+            )),
             "no failure row before any provider ran"
         );
         assert_eq!(actual_starts(&lifecycle, &scope.session_id), 0);
@@ -962,7 +978,11 @@ mod tests {
             failed.err().expect("empty business key refused").code,
             "sc_failure_chain_invalid"
         );
-        assert_eq!(actual_starts(&lifecycle, &scope.session_id), 0, "failed binding adds no start");
+        assert_eq!(
+            actual_starts(&lifecycle, &scope.session_id),
+            0,
+            "failed binding adds no start"
+        );
         assert_eq!(
             lifecycle
                 .read_sc_failure_evidence(&bound.chain)
@@ -991,7 +1011,10 @@ mod tests {
         assert_eq!(replay.round.round_id, first.round.round_id);
         assert_eq!(replay.round.run_ref, first.round.run_ref);
         assert_eq!(replay.round.role_run_seq, first.round.role_run_seq);
-        assert_eq!(replay.split.handle.role_run_seq, first.split.handle.role_run_seq);
+        assert_eq!(
+            replay.split.handle.role_run_seq,
+            first.split.handle.role_run_seq
+        );
         assert_eq!(replay.split.handle.run_ref, first.split.handle.run_ref);
         assert_eq!(
             lifecycle

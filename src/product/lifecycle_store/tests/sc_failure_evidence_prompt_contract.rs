@@ -6,11 +6,11 @@
 // 断言只落在消费者可见面：稳定 code / step / round_id / publication_incomplete /
 // verified_prefix / missing_evidence / 正文逐字；不钉 detail 措辞。
 
-use super::fixture::{
-    begin, bound_round, chain_dir, live_sc_session, setup, PROMPT_TEXT,
-};
+use super::fixture::{PROMPT_TEXT, begin, bound_round, chain_dir, live_sc_session, setup};
 use crate::product::lifecycle_store::sc_failure_evidence::ScFailureEvidenceEvent;
-use crate::web::workspace_ws_types::{ScEvidenceRef, ScPromptDisposition, ScTeachingPromptEvidence};
+use crate::web::workspace_ws_types::{
+    ScEvidenceRef, ScPromptDisposition, ScTeachingPromptEvidence,
+};
 
 /// A：Unavailable 不是 put 的合法处置——必须在 mkdir/lease/写之前拒绝且不留副作用；
 /// 缺提示只能走 append 的 PromptUnavailable + Missing 真实原因（不许伪 Available）。

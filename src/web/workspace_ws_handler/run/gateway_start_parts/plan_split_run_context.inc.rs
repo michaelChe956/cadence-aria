@@ -146,10 +146,8 @@ pub(crate) fn plan_split_run_for_handle(
         .work_item_split_provider_run_dir(&handle)
         .map_err(|error| reject("split_run_path", error.to_string()))?
         .join("run.json");
-    let run: serde_json::Value =
-        crate::product::json_store::read_json(&run_path).map_err(|error| {
-            reject("split_run_read", format!("{}: {error}", run_path.display()))
-        })?;
+    let run: serde_json::Value = crate::product::json_store::read_json(&run_path)
+        .map_err(|error| reject("split_run_read", format!("{}: {error}", run_path.display())))?;
     let provider_run_id = run
         .get("provider_run_id")
         .and_then(serde_json::Value::as_str)
@@ -266,7 +264,8 @@ impl PlanSplitRunContext {
     ) -> Result<(), crate::product::json_store::ProductStoreError> {
         use crate::product::models::{
             LcFreshOperationState, LcResumeRecoveryState, LogicalLaunchBasis,
-            LogicalLaunchFingerprintRecord, LogicalLaunchFingerprintState, ProviderConversationRole,
+            LogicalLaunchFingerprintRecord, LogicalLaunchFingerprintState,
+            ProviderConversationRole,
         };
 
         let role = ProviderConversationRole::Author;
@@ -279,11 +278,9 @@ impl PlanSplitRunContext {
             if let Some((expected_recovery_id, expected_operation_id)) =
                 self.fresh_operation.clone()
             {
-                let binding_conflict = || {
-                    crate::product::json_store::ProductStoreError::Conflict {
-                        kind: "lc_fresh_operation_binding",
-                        id: expected_operation_id.clone(),
-                    }
+                let binding_conflict = || crate::product::json_store::ProductStoreError::Conflict {
+                    kind: "lc_fresh_operation_binding",
+                    id: expected_operation_id.clone(),
                 };
                 let recovery = record
                     .lc_resume_recovery

@@ -994,7 +994,8 @@ pub(crate) async fn run_single_candidate_author(
                 structure_failures,
             }) => {
                 let detail =
-                    super::single_candidate_structure_reredrive::structure_gate_first_round_failure();
+                    super::single_candidate_structure_reredrive::structure_gate_first_round_failure(
+                    );
                 // 结构臂不重算 typed 集：原 sealed failure + 原 typed 失败集
                 // 原样进事实写读，重驱资格仍由同一窗口 claim 决定。
                 let outcome = sc_failure_evidence::gate_structure_failure(

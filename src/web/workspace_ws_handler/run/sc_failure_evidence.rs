@@ -46,9 +46,7 @@ use crate::product::workspace_engine::WorkspaceEngine;
 use crate::product::workspace_engine::single_candidate_structure_failure::{
     STRUCTURE_STABLE_CODE, legacy_author_structure_repair_body,
 };
-use crate::web::workspace_ws_types::{
-    ScFailureChainIdentity, ScFailureClass, ScTeachingDecision,
-};
+use crate::web::workspace_ws_types::{ScFailureChainIdentity, ScFailureClass, ScTeachingDecision};
 
 /// 三臂的审计用构造器名（**不进 `prompt_ref`**——与 P22 facade 的 builder
 /// id 同名同值，供既有 prompt 证据对照）。
@@ -58,7 +56,6 @@ const STRUCTURE_BUILDER_ID: &str = "author_structure_repair_prompt";
 
 /// 教学 prompt 超预算的稳定码（真实未请求消费窗口，不是假 Denied）。
 const SC_TEACHING_PROMPT_BUDGET_EXCEEDED: &str = "sc_teaching_prompt_budget_exceeded";
-
 
 /// compile 失败面：逐条 `code:line:message`（复用既有单源形态；顺序即
 /// diagnostics 顺序，不去重、不排序）后**全量**追加修复指令行——不设呈现
@@ -665,17 +662,12 @@ fn fail_sc_teaching_chain(
     ) {
         return evidence_store_failure(engine, &error, original);
     }
-    if let Err(error) = observe_sc_teaching_decision(
-        lifecycle,
-        chain,
-        observed,
-        ScTeachingDecision::NotRequested,
-    ) {
+    if let Err(error) =
+        observe_sc_teaching_decision(lifecycle, chain, observed, ScTeachingDecision::NotRequested)
+    {
         return evidence_store_failure(engine, &error, original);
     }
-    SingleCandidateProviderRunError::Message(format!(
-        "{code}: {cause}；原始失败原因：{original}"
-    ))
+    SingleCandidateProviderRunError::Message(format!("{code}: {cause}；原始失败原因：{original}"))
 }
 
 /// 预算拒绝的收口：全文已写已读（可审计）⇒ 只补显式 `NotRequested` 判定
@@ -690,12 +682,9 @@ fn reject_sc_teaching_budget(
     max_bytes: u64,
     original: &str,
 ) -> SingleCandidateProviderRunError {
-    if let Err(error) = observe_sc_teaching_decision(
-        lifecycle,
-        chain,
-        observed,
-        ScTeachingDecision::NotRequested,
-    ) {
+    if let Err(error) =
+        observe_sc_teaching_decision(lifecycle, chain, observed, ScTeachingDecision::NotRequested)
+    {
         return evidence_store_failure(engine, &error, original);
     }
     SingleCandidateProviderRunError::Message(format!(

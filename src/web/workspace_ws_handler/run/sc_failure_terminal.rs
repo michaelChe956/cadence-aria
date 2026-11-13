@@ -7,9 +7,9 @@
 //! 本模块是 `sc_failure_evidence` 的子模块：P19d 在此实现真实组包与发布
 //! （`Durable`/`Prefix` 两条出口），调用点只取终局出口，不在本模块外重复
 //! 终局 fold。
-use super::evidence_store_failure;
 use super::super::sc_teaching_audit::sc_failure_step_error;
 use super::SingleCandidateProviderRunError;
+use super::evidence_store_failure;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceError, ScFailureEvidenceEvent, ScFailureEvidenceRead,
@@ -30,8 +30,8 @@ pub(in crate::web::workspace_ws_handler::run) const SC_TERMINAL_CLASS_IR_PREFLIG
     "ir_preflight";
 pub(in crate::web::workspace_ws_handler::run) const SC_TERMINAL_CLASS_STRUCTURE_GATE: &str =
     "structure_gate";
-pub(in crate::web::workspace_ws_handler::run) const SC_TERMINAL_CLASS_TEACHING_INTERRUPTED:
-    &str = "teaching_interrupted";
+pub(in crate::web::workspace_ws_handler::run) const SC_TERMINAL_CLASS_TEACHING_INTERRUPTED: &str =
+    "teaching_interrupted";
 
 const SC_TERMINAL_STEP: &str = "finalize_sc_failure_chain";
 const SC_TERMINAL_UNKNOWN_CODE: &str = "sc_failure_launch_observation_unknown";
@@ -170,8 +170,12 @@ pub(in crate::web::workspace_ws_handler::run) fn finalize_sc_failure_chain(
             let Some(prefix) = error.verified_prefix.take() else {
                 return Err(error);
             };
-            let mut terminal =
-                terminal_facts(&prefix, terminal_class, original_message, &launch_observations)?;
+            let mut terminal = terminal_facts(
+                &prefix,
+                terminal_class,
+                original_message,
+                &launch_observations,
+            )?;
             // 坏日志路径恒 Incomplete：缺项沿用 store 原 code/detail，不 hardcode 新码。
             terminal.completeness = ScPackageCompleteness::Incomplete;
             let round_id = prefix
@@ -199,7 +203,12 @@ pub(in crate::web::workspace_ws_handler::run) fn finalize_sc_failure_chain(
             });
         }
     };
-    let terminal = terminal_facts(&read, terminal_class, original_message, &launch_observations)?;
+    let terminal = terminal_facts(
+        &read,
+        terminal_class,
+        original_message,
+        &launch_observations,
+    )?;
     lifecycle.append_sc_failure_evidence(chain, &terminal_event(terminal))?;
     let read = lifecycle.read_sc_failure_evidence(chain)?;
     Ok(ScFailureTerminalOutcome::Durable(read))
@@ -324,9 +333,7 @@ async fn terminal_outcome_error(
             )
         });
     match (published, confirmed) {
-        (Ok(_artifact_ref), Ok(true)) => {
-            SingleCandidateProviderRunError::Message(original_message)
-        }
+        (Ok(_artifact_ref), Ok(true)) => SingleCandidateProviderRunError::Message(original_message),
         (Ok(_artifact_ref), Ok(false)) => SingleCandidateProviderRunError::Message(format!(
             "{SC_TERMINAL_PHASE_UNCONFIRMED_CODE}: 失败相位回读不是 Failed；\
              原始失败原因：{original_message}"

@@ -17,7 +17,7 @@
 //! 登记：`src/web/workspace_ws_handler/tests.rs`（与既有 `mod` 登记同区）
 
 use super::sc_failure_driver_fixture::{
-    durable_sc_package_versions, evidence_entries, events_of, failure_message,
+    durable_sc_package_versions, events_of, evidence_entries, failure_message,
     markdown_missing_five_sections, only_chain_id, sha256_hex, start_run_with,
 };
 use super::single_candidate_provider_run::{ProviderRunFixture, wait_for_single_candidate_phase};
@@ -56,7 +56,9 @@ impl StreamingProviderAdapter for FailAfterStartProvider {
             let output = self.output.clone();
             tokio::spawn(async move {
                 let _ = event_tx
-                    .send(ProviderEvent::Completed(ProviderCompletion::plain(output, None)))
+                    .send(ProviderEvent::Completed(ProviderCompletion::plain(
+                        output, None,
+                    )))
                     .await;
             });
             return Ok(ProviderSession {
@@ -128,7 +130,12 @@ async fn sc_failure_package_teaching_started_without_delivery_records_sent_promp
     let compile_round_id = observed
         .iter()
         .find(|entry| entry["event"]["failure_class"] == "compile")
-        .map(|entry| entry["event"]["round_id"].as_str().unwrap_or_default().to_string())
+        .map(|entry| {
+            entry["event"]["round_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
         .expect("首轮 compile 失败事实");
 
     // durable prompt 审计：处置必须是 sent；正文哈希/引用与已准备正文一致。

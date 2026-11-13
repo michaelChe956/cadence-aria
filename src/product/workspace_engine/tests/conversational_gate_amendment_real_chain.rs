@@ -42,10 +42,13 @@ async fn real_approval_fixture(budget: u32) -> (TempDir, LifecycleStore, String,
     // 为 artifact version（single_candidate 流程）；recovery 式 fixture 需补齐这
     // 一 durable 形态，否则批准链 compile 后 durable versions 完全无 Markdown，
     // 修订回落的「批准时计划文本」无从取材。
-    engine.update_artifact(ArtifactPayload::Markdown {
-        markdown: "# Work Item Plan\n\n## Work Item WI-001: candidate\n".to_string(),
-        diff: None,
-    }).await.expect("fixture artifact write");
+    engine
+        .update_artifact(ArtifactPayload::Markdown {
+            markdown: "# Work Item Plan\n\n## Work Item WI-001: candidate\n".to_string(),
+            diff: None,
+        })
+        .await
+        .expect("fixture artifact write");
     let mut record = lifecycle
         .get_workspace_session(&engine.session().session_id)
         .expect("session");

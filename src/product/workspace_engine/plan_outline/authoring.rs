@@ -147,7 +147,8 @@ impl WorkspaceEngine {
                 .map_err(|e| format!("build candidate dto failed: {e}"))?;
         self.update_artifact(ArtifactPayload::WorkItemPlanCandidate {
             candidate: Box::new(candidate),
-        }).await?;
+        })
+        .await?;
 
         self.complete_active_node(Some("WorkItemPlan provider 输出完成".to_string()))
             .await;
@@ -235,7 +236,8 @@ impl WorkspaceEngine {
                 current_generation_round_id: None,
                 selected_generation_mode: None,
             }),
-        }).await?;
+        })
+        .await?;
         self.complete_active_node(Some("WorkItemPlan Outline provider 输出完成".to_string()))
             .await;
         self.enter_work_item_plan_outline_confirm(Some(

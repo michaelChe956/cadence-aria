@@ -54,12 +54,12 @@ use crate::web::types::GenerateWorkItemsRequest;
 #[cfg(test)]
 use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, ChoiceOption, ChoiceQuestion,
-    NodeDetailSummary, ProviderConfigSnapshot, RecoverableInterruptedOperation,
-    RecoverableInterruptedRun, RepositoryProfileDto, ReviewFinding, ReviewFindingSeverity,
-    ReviewGate, ReviewVerdict, ReviewVerdictType, StructuredOutputDiagnostic, TimelineNode,
-    TimelineNodeRetry, TimelineNodeRetryError, TimelineNodeStatus, TimelineNodeType,
-    ValidatorFindingDto, VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
+    ArtifactPayload, ArtifactVersion, ChoiceOption, ChoiceQuestion, NodeDetailSummary,
+    ProviderConfigSnapshot, RecoverableInterruptedOperation, RecoverableInterruptedRun,
+    RepositoryProfileDto, ReviewFinding, ReviewFindingSeverity, ReviewGate, ReviewVerdict,
+    ReviewVerdictType, StructuredOutputDiagnostic, TimelineNode, TimelineNodeRetry,
+    TimelineNodeRetryError, TimelineNodeStatus, TimelineNodeType, ValidatorFindingDto,
+    VerificationCommandDto, VerificationManualCheckDto, VerificationPlanDto,
     WorkItemBatchFailureSummaryDto, WorkItemBatchStatePayload, WorkItemCandidateDto,
     WorkItemCandidateMetaDto, WorkItemDependencyEdgeDto, WorkItemDraftCandidatePayload,
     WorkItemPlanCandidateDto, WorkItemPlanCompileRecoveryActionDto,

@@ -169,10 +169,8 @@ pub(crate) fn author_structure_repair_prompt(
     previous_source: &str,
     source: &crate::product::workspace_engine::ScTeachingSourceMetadata<'_>,
 ) -> Result<String, crate::product::workspace_engine::ScTeachingPromptError> {
-    let source_block = crate::product::workspace_engine::render_sc_previous_source_block(
-        previous_source,
-        source,
-    )?;
+    let source_block =
+        crate::product::workspace_engine::render_sc_previous_source_block(previous_source, source)?;
     let mut prompt = render_author_structure_repair_instructions(failure);
     prompt.push_str("\n结构失败事实（按原失败集顺序逐项保留）：\n");
     for structure_failure in &structure_failures.failures {

@@ -303,7 +303,10 @@ impl WorkspaceEngine {
     ///
     /// 保存成功后以磁盘合并结果为权威提交 `session.artifact` / `artifact_versions`；
     /// 其后的 ref 登记与事件广播保持既有 best-effort 语义（本次不顺带收紧全局）。
-    pub async fn update_artifact(&mut self, payload: ArtifactPayload) -> Result<ArtifactRef, String> {
+    pub async fn update_artifact(
+        &mut self,
+        payload: ArtifactPayload,
+    ) -> Result<ArtifactRef, String> {
         let session_id = self.session.session_id.clone();
         let generated_by = self.session.author_provider.clone();
         let source_node_id = self
@@ -344,7 +347,12 @@ impl WorkspaceEngine {
             None => {
                 // 无持久存储时只维护内存版本表：同样是 checked max+1，溢出直接报错，
                 // 不伪造持久化回退。
-                let version = match self.artifact_versions.iter().map(|entry| entry.version).max() {
+                let version = match self
+                    .artifact_versions
+                    .iter()
+                    .map(|entry| entry.version)
+                    .max()
+                {
                     None => 1,
                     Some(max) => max.checked_add(1).ok_or_else(|| {
                         "artifact_versions_write_failed: artifact_versions version space exhausted"
@@ -426,12 +434,8 @@ mod update_artifact_tests {
             .unwrap();
         let session_id = session_record.id.clone();
         let session = WorkspaceSession::from_record(session_record);
-        let engine = WorkspaceEngine::new_persistent(
-            checkpoint_store,
-            lifecycle_store.clone(),
-            tx,
-            session,
-        );
+        let engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
         (tmp, lifecycle_store, engine, rx, session_id)
     }
 
@@ -503,7 +507,10 @@ mod update_artifact_tests {
             error.starts_with("artifact_versions_write_failed:"),
             "错误必须带步骤前缀：{error}"
         );
-        assert!(engine.session.artifact.is_none(), "失败不得提交 session.artifact");
+        assert!(
+            engine.session.artifact.is_none(),
+            "失败不得提交 session.artifact"
+        );
         assert!(
             engine.artifact_versions.is_empty(),
             "失败不得提交 engine.artifact_versions"
@@ -547,7 +554,10 @@ mod update_artifact_tests {
             error.contains("version_space_exhausted"),
             "错误必须指明版本空间耗尽：{error}"
         );
-        assert!(engine.session.artifact.is_none(), "失败不得提交 session.artifact");
+        assert!(
+            engine.session.artifact.is_none(),
+            "失败不得提交 session.artifact"
+        );
         assert!(
             engine.artifact_versions.is_empty(),
             "失败不得提交 engine.artifact_versions"
@@ -573,7 +583,10 @@ mod update_artifact_tests {
             error.starts_with("artifact_versions_write_failed:"),
             "错误必须带步骤前缀：{error}"
         );
-        assert!(engine.session.artifact.is_none(), "失败不得提交 session.artifact");
+        assert!(
+            engine.session.artifact.is_none(),
+            "失败不得提交 session.artifact"
+        );
         assert_eq!(
             engine.artifact_versions.len(),
             1,

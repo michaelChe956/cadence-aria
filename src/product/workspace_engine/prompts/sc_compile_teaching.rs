@@ -497,8 +497,7 @@ mod reredrive_prompt_tests {
         let instructions: Vec<String> = (0..10)
             .map(|index| format!("rule-{index}: 修复动作"))
             .collect();
-        let prompt = build(&[], &[], &[], &instructions, &[])
-            .expect("合法来源元数据必须构造成功");
+        let prompt = build(&[], &[], &[], &instructions, &[]).expect("合法来源元数据必须构造成功");
         assert!(
             prompt.contains("rule-3: 修复动作"),
             "上限内的指令必须在场: {prompt}"
@@ -657,10 +656,7 @@ mod reredrive_prompt_tests {
             prompt.contains("unknown_requirement_ref:199:"),
             "末条在场（旧材料不截断）: {prompt}"
         );
-        assert!(
-            !prompt.contains("共 200 条"),
-            "旧材料无省略记账: {prompt}"
-        );
+        assert!(!prompt.contains("共 200 条"), "旧材料无省略记账: {prompt}");
     }
 
     /// A1（REQ-WSC-32）：unknown_structured_key 类失败附 40 个合法

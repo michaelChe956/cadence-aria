@@ -17,7 +17,10 @@ const NODE_ID: &str = "node_sc_0001";
 const BUSINESS_KEY: &str = "workspace_author:session:0";
 
 /// 一次真实绑定（首绑必须 Ready：新 seq 无任何启动事实）。
-pub(super) fn bind_original(lifecycle: &LifecycleStore, scope: &ScFailureScope) -> ScBoundProviderRound {
+pub(super) fn bind_original(
+    lifecycle: &LifecycleStore,
+    scope: &ScFailureScope,
+) -> ScBoundProviderRound {
     match begin_sc_failure_round(
         lifecycle,
         scope,

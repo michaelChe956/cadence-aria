@@ -1292,11 +1292,7 @@ mod tests {
             .await;
 
         engine
-            .complete_assistant_message(
-                "assistant_msg_001".to_string(),
-                artifact,
-                false,
-            )
+            .complete_assistant_message("assistant_msg_001".to_string(), artifact, false)
             .await;
 
         let mut saw_error = false;

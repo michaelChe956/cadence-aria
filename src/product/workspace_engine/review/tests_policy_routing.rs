@@ -1,7 +1,7 @@
 use crate::product::work_item_plan_policy::{
     ClassifiedFinding, FatalReason, FindingClass, FindingFingerprint, HumanReason, PlanOutcome,
-    PolicyDiagnostic, ReviewFindingCategory, ReviewInvocationScope, RunBudgets,
-    RunHistory, RunPolicy,
+    PolicyDiagnostic, ReviewFindingCategory, ReviewInvocationScope, RunBudgets, RunHistory,
+    RunPolicy,
 };
 use crate::product::workspace_engine::review::policy_routing::{
     GateSnapshotContext, RoutingAction, route_outcome,
@@ -604,17 +604,18 @@ async fn structured_needs_human_batch_review_in_auto_mode_stops_with_durable_gat
     let persisted = lifecycle
         .get_workspace_session(&engine.session.session_id)
         .expect("persisted auto terminal session");
-    assert_eq!(
-        persisted.status,
-        WorkspaceSessionStatus::StoppedNeedsHuman
-    );
+    assert_eq!(persisted.status, WorkspaceSessionStatus::StoppedNeedsHuman);
     assert_eq!(persisted.run_history.initial_review_count, 1);
     assert_eq!(persisted.run_history.transitions_used, 1);
-    assert_eq!(persisted.human_gate_snapshot, engine.session.human_gate_snapshot);
+    assert_eq!(
+        persisted.human_gate_snapshot,
+        engine.session.human_gate_snapshot
+    );
 }
 
 #[tokio::test]
-async fn structured_revise_batch_and_plan_reopen_consume_the_cycle_repair_budget_before_legacy_repair() {
+async fn structured_revise_batch_and_plan_reopen_consume_the_cycle_repair_budget_before_legacy_repair()
+ {
     let (_tmp, _checkpoint_store, lifecycle, plan_id, mut revise_batch) =
         make_work_item_plan_engine_with_draft_candidate("structured_revise_batch_budgeted");
     prepare_work_item_plan_outline_artifact(&mut revise_batch).await;
@@ -632,7 +633,10 @@ async fn structured_revise_batch_and_plan_reopen_consume_the_cycle_repair_budget
 
     assert_eq!(revise_batch.current_stage(), WorkspaceStage::Running);
     assert_eq!(
-        revise_batch.timeline_nodes.last().map(|node| &node.node_type),
+        revise_batch
+            .timeline_nodes
+            .last()
+            .map(|node| &node.node_type),
         Some(&TimelineNodeType::WorkItemBatchRun),
         "the first repairable batch verdict must invoke the legacy batch rewrite mechanism"
     );
@@ -673,11 +677,17 @@ async fn structured_revise_batch_and_plan_reopen_consume_the_cycle_repair_budget
 
     assert_eq!(revise_batch.current_stage(), WorkspaceStage::HumanConfirm);
     assert_eq!(
-        revise_batch.timeline_nodes.last().map(|node| &node.node_type),
+        revise_batch
+            .timeline_nodes
+            .last()
+            .map(|node| &node.node_type),
         Some(&TimelineNodeType::HumanConfirm),
         "a verification repairable verdict must not start a second batch generation"
     );
-    assert_eq!(revise_batch.session.run_history.verification_review_count, 1);
+    assert_eq!(
+        revise_batch.session.run_history.verification_review_count,
+        1
+    );
     assert_eq!(revise_batch.session.run_history.repairs_used, 1);
     assert_eq!(
         revise_batch
@@ -769,7 +779,10 @@ async fn structured_revise_batch_and_plan_reopen_consume_the_cycle_repair_budget
     let persisted_reopen = lifecycle
         .get_workspace_session(&reopen.session.session_id)
         .expect("persisted plan-reopen human gate");
-    assert_eq!(persisted_reopen.status, WorkspaceSessionStatus::WaitingForHuman);
+    assert_eq!(
+        persisted_reopen.status,
+        WorkspaceSessionStatus::WaitingForHuman
+    );
     assert_eq!(persisted_reopen.run_history.repairs_used, 1);
 }
 
@@ -927,7 +940,10 @@ async fn legacy_batch_pass_routes_through_compile_to_human_confirmation_in_inter
         engine.timeline_nodes.last().map(|node| &node.status),
         Some(&TimelineNodeStatus::Active)
     );
-    assert_eq!(engine.session.session_status, WorkspaceSessionStatus::WaitingForHuman);
+    assert_eq!(
+        engine.session.session_status,
+        WorkspaceSessionStatus::WaitingForHuman
+    );
 }
 
 #[tokio::test]
@@ -947,7 +963,10 @@ async fn auto_if_valid_batch_pass_skips_final_human_confirmation_and_completes()
         .await;
 
     assert_eq!(engine.current_stage(), WorkspaceStage::Completed);
-    assert_eq!(engine.session.session_status, WorkspaceSessionStatus::Confirmed);
+    assert_eq!(
+        engine.session.session_status,
+        WorkspaceSessionStatus::Confirmed
+    );
     assert!(
         !engine
             .timeline_nodes
@@ -1096,8 +1115,11 @@ async fn sc_repeated_fingerprint_gate_compares_both_rounds_in_the_session_effect
     )
     .await;
     engine.start_review().await;
-    complete_sc_routing_review(&mut engine, sc_revise_verdict(vec![sc_out_of_scope_finding()]))
-        .await;
+    complete_sc_routing_review(
+        &mut engine,
+        sc_revise_verdict(vec![sc_out_of_scope_finding()]),
+    )
+    .await;
     assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
     let gate_summary = engine
         .timeline_nodes
@@ -1136,7 +1158,10 @@ async fn sc_suggestion_only_revise_never_escalates_until_the_cycle_budget_really
     let gate = snapshot.expect("耗尽停机门在场");
     assert_eq!(gate.trigger, HumanReason::RepairBudgetExhausted);
     assert_eq!(engine.session.run_history.verification_review_count, 1);
-    assert_eq!(engine.session.run_history.repairs_used, 0, "三轮均零作者返修");
+    assert_eq!(
+        engine.session.run_history.repairs_used, 0,
+        "三轮均零作者返修"
+    );
 }
 
 /// controller 追加（B1 评审 Minor-2）：真实 SC 会话 verdict 恒带
@@ -1147,9 +1172,9 @@ async fn sc_suggestion_only_revise_never_escalates_until_the_cycle_budget_really
 #[test]
 fn sc_narrow_projection_renormalizes_the_extension_face_not_must_fix() {
     let (_tmp, _lifecycle, engine) = sc_routing_engine();
-    let projected = engine.apply_sc_effective_review_verdict(sc_extension_revise_verdict(
-        vec![sc_demotable_suggestion("建议补完备度说明行")],
-    ));
+    let projected = engine.apply_sc_effective_review_verdict(sc_extension_revise_verdict(vec![
+        sc_demotable_suggestion("建议补完备度说明行"),
+    ]));
     assert_eq!(projected.verdict, ReviewVerdictType::Pass);
     let extension = projected
         .work_item_plan_review
@@ -1159,19 +1184,22 @@ fn sc_narrow_projection_renormalizes_the_extension_face_not_must_fix() {
     assert_eq!(extension.review_action, WorkItemPlanReviewAction::Continue);
     assert!(extension.gates.is_empty());
 
-    let retained = engine.apply_sc_effective_review_verdict(sc_extension_revise_verdict(
-        vec![sc_routing_finding(
+    let retained = engine.apply_sc_effective_review_verdict(sc_extension_revise_verdict(vec![
+        sc_routing_finding(
             ReviewFindingSeverity::MustFix,
             "契约缺口：CT-001 能力未覆盖",
             Some(ReviewFindingCategory::ContractGap),
             Some(crate::product::work_item_plan_policy::FindingClassHint::Repairable),
-        )],
-    ));
+        ),
+    ]));
     let retained_extension = retained
         .work_item_plan_review
         .as_ref()
         .expect("extension survives the projection");
-    assert_eq!(retained_extension.verdict, WorkItemPlanReviewVerdict::Revise);
+    assert_eq!(
+        retained_extension.verdict,
+        WorkItemPlanReviewVerdict::Revise
+    );
     assert_eq!(
         retained_extension.review_action,
         WorkItemPlanReviewAction::ReviseCurrentItem

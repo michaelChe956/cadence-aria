@@ -3,7 +3,10 @@ async fn compile_recovery_abort_rejects_prepared_publication_and_preserves_conti
     let (_tmp, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let outline_payload = engine.session.artifact.clone().unwrap();
-    engine.update_artifact(outline_payload).await.expect("fixture artifact write");
+    engine
+        .update_artifact(outline_payload)
+        .await
+        .expect("fixture artifact write");
     let (compile_tx, accepted_drafts) = prepare_initial_compile_transaction(
         &engine,
         &lifecycle,
@@ -26,9 +29,9 @@ async fn compile_recovery_abort_rejects_prepared_publication_and_preserves_conti
         .compile_initial_plan_revision(&accepted_drafts)
         .unwrap_err();
     assert!(publication_error.to_string().contains("LineageWritten"));
-    assert!(engine.mark_latest_compile_transaction_recovery_required(
-        &publication_error.to_string()
-    ));
+    assert!(
+        engine.mark_latest_compile_transaction_recovery_required(&publication_error.to_string())
+    );
     engine
         .enter_work_item_plan_compile_recovery(Some(publication_error.to_string()))
         .await;
@@ -51,7 +54,10 @@ async fn compile_recovery_abort_rejects_prepared_publication_and_preserves_conti
             &compile_tx.compile_id,
         )
         .unwrap();
-    assert_eq!(recovery_tx.status, WorkItemPlanCompileStatus::RecoveryRequired);
+    assert_eq!(
+        recovery_tx.status,
+        WorkItemPlanCompileStatus::RecoveryRequired
+    );
     assert_eq!(recovery_tx.step_cursor, "committing");
     assert_eq!(
         revision_store
@@ -106,7 +112,7 @@ async fn compile_recovery_abort_rejects_prepared_publication_and_preserves_conti
 
 #[tokio::test]
 async fn work_item_plan_initial_compile_non_topological_outline_finds_tx_and_publishes_topological_projection()
-{
+ {
     let (_tmp, _lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let Some(ArtifactPayload::WorkItemPlanOutlineCandidate { outline_candidate }) =
@@ -144,10 +150,7 @@ async fn work_item_plan_initial_compile_non_topological_outline_finds_tx_and_pub
         .unwrap();
     assert_eq!(
         tx.active_draft_ids,
-        vec![
-            "draft_outline_a".to_string(),
-            "draft_outline_b".to_string()
-        ]
+        vec!["draft_outline_a".to_string(), "draft_outline_b".to_string()]
     );
     assert_eq!(tx.status, WorkItemPlanCompileStatus::Committed);
 }
@@ -184,11 +187,9 @@ fn work_item_plan_initial_compile_rejects_ambiguous_matching_transactions() {
             .contains("current initial plan compile transaction is ambiguous")
     );
     assert!(matches!(
-        engine.revision_store().get_plan_lineage(
-            "project_0001",
-            "issue_0001",
-            &plan_id,
-        ),
+        engine
+            .revision_store()
+            .get_plan_lineage("project_0001", "issue_0001", &plan_id,),
         Err(ProductStoreError::NotFound { .. })
     ));
 }
@@ -255,10 +256,7 @@ async fn work_item_plan_reviewer_prompt_rejects_mismatched_persisted_projection_
                     .get_plan_lineage("project_0001", "issue_0001", &plan_id)
                     .unwrap();
                 lineage.active_revision_id = None;
-                overwrite_persisted_review_context_json(
-                    plan_root.join("lineage.json"),
-                    &lineage,
-                );
+                overwrite_persisted_review_context_json(plan_root.join("lineage.json"), &lineage);
             }
             PlanReviewContextCorruption::DependencyGraph => {
                 let mut revision = outcome.plan_revision.clone();
@@ -350,10 +348,22 @@ async fn work_item_plan_reviewer_prompt_uses_explicit_initial_context_without_us
 
     let input = engine.build_work_item_plan_review_input().unwrap();
 
-    assert!(input.prompt.contains("initial_plan_publication: no previous contract delta"));
+    assert!(
+        input
+            .prompt
+            .contains("initial_plan_publication: no previous contract delta")
+    );
     assert!(input.prompt.contains("initial_full_set"));
-    assert!(input.prompt.contains("initial_plan_publication: no repair evidence"));
-    assert!(!input.prompt.contains("ordinary user message must not become repair evidence"));
+    assert!(
+        input
+            .prompt
+            .contains("initial_plan_publication: no repair evidence")
+    );
+    assert!(
+        !input
+            .prompt
+            .contains("ordinary user message must not become repair evidence")
+    );
 }
 
 fn overwrite_persisted_review_context_json(
@@ -452,12 +462,18 @@ async fn work_item_plan_projection_artifact_updates_are_persisted_after_initial_
         )
     }));
     assert!(engine.artifact_versions.iter().any(|version| {
-        matches!(version.payload, ArtifactPayload::WorkItemRevisionHistory { .. })
+        matches!(
+            version.payload,
+            ArtifactPayload::WorkItemRevisionHistory { .. }
+        )
     }));
-    let history = engine.artifact_versions.iter().find_map(|version| match &version.payload {
-        ArtifactPayload::WorkItemRevisionHistory { history } => Some(history),
-        _ => None,
-    });
+    let history = engine
+        .artifact_versions
+        .iter()
+        .find_map(|version| match &version.payload {
+            ArtifactPayload::WorkItemRevisionHistory { history } => Some(history),
+            _ => None,
+        });
     let history = history.expect("initial revision history artifact");
     assert_eq!(history.entries.len(), outcome.work_items.len() * 2);
     for item in &outcome.work_items {
@@ -481,7 +497,10 @@ async fn work_item_plan_projection_artifact_updates_are_persisted_after_initial_
     ));
     assert!(engine.artifact_versions.last().is_some_and(|version| {
         version.is_current
-            && matches!(version.payload, ArtifactPayload::WorkItemPlanProjection { .. })
+            && matches!(
+                version.payload,
+                ArtifactPayload::WorkItemPlanProjection { .. }
+            )
     }));
 
     let session_record = lifecycle
@@ -516,31 +535,44 @@ async fn work_item_plan_projection_artifact_updates_are_persisted_after_initial_
     );
     assert_eq!(artifact_versions.len(), outcome.work_items.len() + 3);
     for item in &outcome.work_items {
-        let restored = artifact_versions.iter().find_map(|version| match &version.payload {
-            ArtifactPayload::WorkItemProjection { projection }
-                if projection.id == item.projection_bundle.id =>
-            {
-                Some(projection)
-            }
-            _ => None,
-        });
+        let restored = artifact_versions
+            .iter()
+            .find_map(|version| match &version.payload {
+                ArtifactPayload::WorkItemProjection { projection }
+                    if projection.id == item.projection_bundle.id =>
+                {
+                    Some(projection)
+                }
+                _ => None,
+            });
         let restored = restored.expect("work item projection restored in snapshot");
         assert_eq!(
             restored.canonical_contract_hash,
             item.projection_bundle.canonical_contract_hash
         );
-        assert_eq!(restored.compiler_version, item.projection_bundle.compiler_version);
+        assert_eq!(
+            restored.compiler_version,
+            item.projection_bundle.compiler_version
+        );
     }
     assert!(artifact_versions.iter().any(|version| {
-        matches!(version.payload, ArtifactPayload::ProjectionValidation { .. })
+        matches!(
+            version.payload,
+            ArtifactPayload::ProjectionValidation { .. }
+        )
     }));
     assert!(artifact_versions.iter().any(|version| {
-        matches!(version.payload, ArtifactPayload::WorkItemRevisionHistory { .. })
+        matches!(
+            version.payload,
+            ArtifactPayload::WorkItemRevisionHistory { .. }
+        )
     }));
-    let restored_plan = artifact_versions.iter().find_map(|version| match &version.payload {
-        ArtifactPayload::WorkItemPlanProjection { projection } => Some(projection),
-        _ => None,
-    });
+    let restored_plan = artifact_versions
+        .iter()
+        .find_map(|version| match &version.payload {
+            ArtifactPayload::WorkItemPlanProjection { projection } => Some(projection),
+            _ => None,
+        });
     let restored_plan = restored_plan.expect("plan projection restored in snapshot");
     assert_eq!(
         restored_plan.human_group_projection_hash,
@@ -566,15 +598,19 @@ fn workspace_artifact_version_binding_recovers_for_story_design_and_work_item() 
         let (tmp, checkpoint_store) = setup();
         let lifecycle = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
         let session_record = lifecycle
-            .create_workspace_session(CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: entity_id.to_string(),
-            workspace_type: workspace_type.clone(),
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: Some(ProviderName::Codex),
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: entity_id.to_string(),
+                workspace_type: workspace_type.clone(),
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
 
-            review_rounds: 1,
-            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, })
+                review_rounds: 1,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+                work_item_plan_options: None,
+            })
             .unwrap();
         let session_id = session_record.id.clone();
         let source_node_id = format!("node_{workspace_type:?}").to_lowercase();
@@ -618,7 +654,8 @@ fn workspace_artifact_version_binding_recovers_for_story_design_and_work_item() 
                         author: ProviderName::ClaudeCode,
                         reviewer: Some(ProviderName::Codex),
                         review_rounds: 1,
-                        permission_modes: crate::product::models::WorkspaceRolePermissionModes::default(),
+                        permission_modes:
+                            crate::product::models::WorkspaceRolePermissionModes::default(),
                     },
                     retry: None,
                 }],

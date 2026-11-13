@@ -279,19 +279,21 @@ impl ScFailureRepairPackage {
             )?;
         }
         match self.completeness {
-            ScPackageCompleteness::Complete if !self.missing_evidence.is_empty() => Err(
-                "completeness mismatch: complete package carries missing_evidence".to_string(),
-            ),
-            ScPackageCompleteness::Incomplete if self.missing_evidence.is_empty() => Err(
-                "completeness mismatch: incomplete package lacks missing_evidence".to_string(),
-            ),
+            ScPackageCompleteness::Complete if !self.missing_evidence.is_empty() => {
+                Err("completeness mismatch: complete package carries missing_evidence".to_string())
+            }
+            ScPackageCompleteness::Incomplete if self.missing_evidence.is_empty() => {
+                Err("completeness mismatch: incomplete package lacks missing_evidence".to_string())
+            }
             _ => Ok(()),
         }
     }
 
     fn check_digest_hex(path: &str, value: &str) -> Result<(), String> {
-        let is_hex64 =
-            value.len() == 64 && value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        let is_hex64 = value.len() == 64
+            && value
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
         if is_hex64 {
             Ok(())
         } else {
@@ -387,10 +389,16 @@ mod tests {
             identity: round_identity(1),
             launch_state: ScRoundLaunchState::Started,
             failure_class: Some(ScFailureClass::Compile),
-            blocking_reasons: vec!["compile_failed".to_string(), "plan_shape_invalid".to_string()],
+            blocking_reasons: vec![
+                "compile_failed".to_string(),
+                "plan_shape_invalid".to_string(),
+            ],
             repair_instructions: vec!["fix dependency edge".to_string()],
             raw: available_ref("work-item-split-runs/issue-1/run-1/run.json", ROUND1_RAW),
-            source: available_ref("work-item-split-runs/issue-1/run-1/source.txt", ROUND1_SOURCE),
+            source: available_ref(
+                "work-item-split-runs/issue-1/run-1/source.txt",
+                ROUND1_SOURCE,
+            ),
             existing_failure_id: Some("failure-101".to_string()),
             attempt_key: Some("attempt-7-3".to_string()),
             prompts: Vec::new(),
@@ -403,7 +411,10 @@ mod tests {
             blocking_reasons: vec!["ir_preflight_rejected".to_string()],
             repair_instructions: Vec::new(),
             raw: available_ref("work-item-split-runs/issue-1/run-2/run.json", ROUND2_RAW),
-            source: available_ref("work-item-split-runs/issue-1/run-1/source.txt", ROUND1_SOURCE),
+            source: available_ref(
+                "work-item-split-runs/issue-1/run-1/source.txt",
+                ROUND1_SOURCE,
+            ),
             existing_failure_id: None,
             attempt_key: None,
             prompts: vec![sent_teaching_prompt()],
@@ -549,7 +560,10 @@ mod tests {
     fn sc_failure_dto_enum_wire_names_are_snake_case() {
         assert_eq!(wire_name(&ScFailureClass::Compile), "\"compile\"");
         assert_eq!(wire_name(&ScFailureClass::IrPreflight), "\"ir_preflight\"");
-        assert_eq!(wire_name(&ScFailureClass::StructureGate), "\"structure_gate\"");
+        assert_eq!(
+            wire_name(&ScFailureClass::StructureGate),
+            "\"structure_gate\""
+        );
         assert_eq!(
             wire_name(&ScTeachingSourceOrigin::CompileSplitOutput),
             "\"compile_split_output\""
@@ -562,7 +576,10 @@ mod tests {
             wire_name(&ScTeachingSourceOrigin::StructureRevision),
             "\"structure_revision\""
         );
-        assert_eq!(wire_name(&ScRoundLaunchState::NotStarted), "\"not_started\"");
+        assert_eq!(
+            wire_name(&ScRoundLaunchState::NotStarted),
+            "\"not_started\""
+        );
         assert_eq!(wire_name(&ScRoundLaunchState::Started), "\"started\"");
         assert_eq!(wire_name(&ScRoundLaunchState::Unknown), "\"unknown\"");
         assert_eq!(wire_name(&ScPromptDisposition::Prepared), "\"prepared\"");
@@ -571,7 +588,10 @@ mod tests {
             wire_name(&ScPromptDisposition::RejectedBudget),
             "\"rejected_budget\""
         );
-        assert_eq!(wire_name(&ScPromptDisposition::Unavailable), "\"unavailable\"");
+        assert_eq!(
+            wire_name(&ScPromptDisposition::Unavailable),
+            "\"unavailable\""
+        );
         assert_eq!(
             wire_name(&ScTeachingDecision::NotRequested),
             "\"not_requested\""
@@ -617,7 +637,10 @@ mod tests {
         let (raw_locator, raw_sha, raw_bytes) = available_parts(&first.raw);
         let (source_locator, source_sha, _) = available_parts(&first.source);
         assert_eq!(raw_locator, "work-item-split-runs/issue-1/run-1/run.json");
-        assert_eq!(source_locator, "work-item-split-runs/issue-1/run-1/source.txt");
+        assert_eq!(
+            source_locator,
+            "work-item-split-runs/issue-1/run-1/source.txt"
+        );
         assert_eq!(raw_sha, sha256_hex(ROUND1_RAW));
         assert_eq!(source_sha, sha256_hex(ROUND1_SOURCE));
         assert_ne!(raw_sha, source_sha);
@@ -670,7 +693,10 @@ mod tests {
             decoded.terminal_reason,
             "教学中断：原始编译失败原因保留在 rounds 与 terminal_reason"
         );
-        assert_eq!(decoded.evidence_digest, sha256_hex("evidence log body for chain-sc-issue-1"));
+        assert_eq!(
+            decoded.evidence_digest,
+            sha256_hex("evidence log body for chain-sc-issue-1")
+        );
 
         // Full round-trip equality on top of the targeted pins above.
         assert_eq!(decoded, package);

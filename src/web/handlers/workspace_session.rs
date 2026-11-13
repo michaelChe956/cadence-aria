@@ -828,8 +828,7 @@ mod tests {
         // （store 的 is_valid_chain_id 真实校验），且本夹具不构造证据存储——
         // 证据缺失用显式 Missing 表达，不用 all-zero sha/bytes 的假 Available。
         // chain-v1- 后缀 = sha256("p14b-rest-sc-fixture")。
-        let chain_id =
-            "chain-v1-dbe95414d2ad5c3bd5aebb60385ab08f71ec064c11d36d65c6fbd4a929373b2f";
+        let chain_id = "chain-v1-dbe95414d2ad5c3bd5aebb60385ab08f71ec064c11d36d65c6fbd4a929373b2f";
         let raw_missing = || ScEvidenceRef::Missing {
             code: "sc_failure_raw_missing".to_string(),
             detail: "夹具未落盘证据：终局没有 provider 原始输出".to_string(),
@@ -947,24 +946,20 @@ mod tests {
         };
 
         // ① pending（缺发布回执）→ A4 版本在 REST 公开视图不可读。
-        let pending = workspace_session_artifact_version(
-            State(state.clone()),
-            Path((session.id.clone(), 2)),
-        )
-        .await
-        .expect_err("pending SC repair package must not be readable");
+        let pending =
+            workspace_session_artifact_version(State(state.clone()), Path((session.id.clone(), 2)))
+                .await
+                .expect_err("pending SC repair package must not be readable");
         assert_eq!(pending.code, "artifact_version_not_found");
 
         // ② 坏回执 → 显式 HTTP 错误（不吞成 404 not found）。
         std::fs::create_dir_all(receipt_path.parent().expect("receipt dir"))
             .expect("create receipt dir");
         std::fs::write(&receipt_path, b"{corrupt").expect("write corrupt receipt");
-        let corrupt = workspace_session_artifact_version(
-            State(state.clone()),
-            Path((session.id.clone(), 2)),
-        )
-        .await
-        .expect_err("corrupt receipt must surface an explicit error");
+        let corrupt =
+            workspace_session_artifact_version(State(state.clone()), Path((session.id.clone(), 2)))
+                .await
+                .expect_err("corrupt receipt must surface an explicit error");
         assert_ne!(corrupt.code, "artifact_version_not_found");
 
         // ③ 真实回执 → A4 版本可读。

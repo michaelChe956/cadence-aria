@@ -153,9 +153,15 @@ fn observe_sc_failure_persists_full_untruncated_facts_in_real_store() {
     };
     assert_eq!(round_id.as_str(), bound.round.round_id.as_str());
     assert_eq!(failure_class.as_ref(), Some(&ScFailureClass::Compile));
-    assert_eq!(blocking_reasons.len(), diagnostics.len() + instructions.len());
+    assert_eq!(
+        blocking_reasons.len(),
+        diagnostics.len() + instructions.len()
+    );
     assert_eq!(blocking_reasons[0], "missing_section:0:first reason");
-    assert_eq!(blocking_reasons[1], "unknown_structured_key:12:second reason");
+    assert_eq!(
+        blocking_reasons[1],
+        "unknown_structured_key:12:second reason"
+    );
     assert_eq!(
         &blocking_reasons[diagnostics.len()..],
         instructions.as_slice(),
@@ -225,14 +231,13 @@ fn evidence_write_failure_leaves_no_failure_observed_rows() {
         .read_sc_failure_evidence(&bound.chain)
         .expect("strict evidence log readable");
     assert!(
-        !read.entries.iter().any(|entry| matches!(
-            &entry.event,
-            ScFailureEvidenceEvent::FailureObserved { .. }
-        )),
+        !read
+            .entries
+            .iter()
+            .any(|entry| matches!(&entry.event, ScFailureEvidenceEvent::FailureObserved { .. })),
         "写失败不得留下半截失败事实"
     );
 }
-
 
 /// P10 终局 RED：`finalize_sc_failure_chain` / `ScFailureTerminalOutcome` /
 /// `terminal_exit_error` 尚未实现 ⇒ 编译红。真实 store 边界，无 engine、无 provider。
@@ -242,8 +247,9 @@ fn evidence_write_failure_leaves_no_failure_observed_rows() {
 mod terminal {
     use super::super::super::sc_failure_transport::{ScBoundProviderRound, begin_sc_failure_round};
     use super::super::sc_failure_terminal::{
-        SC_TERMINAL_CLASS_COMPILE, SC_TERMINAL_CLASS_IR_PREFLIGHT, SC_TERMINAL_CLASS_STRUCTURE_GATE,
-        SC_TERMINAL_CLASS_TEACHING_INTERRUPTED, ScFailureTerminalOutcome, finalize_sc_failure_chain,
+        SC_TERMINAL_CLASS_COMPILE, SC_TERMINAL_CLASS_IR_PREFLIGHT,
+        SC_TERMINAL_CLASS_STRUCTURE_GATE, SC_TERMINAL_CLASS_TEACHING_INTERRUPTED,
+        ScFailureTerminalOutcome, finalize_sc_failure_chain,
     };
     use crate::product::lifecycle_store::LifecycleStore;
     use crate::product::lifecycle_store::sc_failure_evidence::ScFailureEvidenceEvent;
@@ -417,7 +423,10 @@ mod terminal {
         else {
             panic!("terminal")
         };
-        assert_eq!(last_failure_round_id.as_str(), first.round.round_id.as_str());
+        assert_eq!(
+            last_failure_round_id.as_str(),
+            first.round.round_id.as_str()
+        );
         assert_eq!(
             last_physical_round_id.as_deref(),
             Some(interrupted.round.round_id.as_str())

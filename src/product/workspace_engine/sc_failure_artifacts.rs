@@ -9,11 +9,11 @@
 // 广播成功帧。纯组包器在本文件之外（子模块），本文件只保留发布面实现与用例挂载。
 
 use crate::product::json_store::ProductStoreError;
+use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceError, ScFailureEvidenceRead, sc_failure_split_locator,
 };
 use crate::product::lifecycle_store::sc_failure_publication::{ScLocalTerminal, ScTerminalInput};
-use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::ArtifactRef;
 use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use crate::web::workspace_ws_types::{
@@ -35,7 +35,6 @@ use self::sc_failure_artifact_builder::{
 /// `crate::product::workspace_engine::build_sc_failure_repair_package`。
 /// 摘要助手与共享错误码保持私有导入，不导出；无转发方法、无二次 fold、无同名 shim。
 pub(crate) use self::sc_failure_artifact_builder::build_sc_failure_repair_package;
-
 
 // ── P11 严格 publisher（Plan §2.5）────────────────────────────────────
 //
@@ -123,34 +122,39 @@ impl WorkspaceEngine {
         };
 
         // 真实证据：strict read → 纯组包器重建 → 与调用方给的包逐字段相等。
-        let (identity, rebuilt) = match store
-            .read_sc_failure_chain_for_publication(&scope, &package.chain_id)
-        {
-            Ok((identity, evidence)) => {
-                let rebuilt =
-                    build_sc_failure_repair_package(&identity, &evidence, ScTerminalInput::Durable)?;
-                (identity, rebuilt)
-            }
-            Err(failure) => {
-                // 腐坏日志：只有真实已验证前缀能组真实 Incomplete 包；没有前缀就
-                // 原样上浮，不伪造包、不伪造 durable 终局。
-                let Some(prefix) = failure.verified_prefix.as_deref() else {
-                    return Err(publish_error(
-                        &failure.code,
-                        PUBLISH_STEP,
-                        failure.round_id.clone(),
-                        format!("读取真实证据失败: {}", failure.detail),
-                        failure.publication_incomplete,
-                    ));
-                };
-                let prefix = prefix.clone();
-                let identity = prefix_chain_identity(&prefix, &scope, &package.chain_id)?;
-                let local = local_terminal_from_package(&package);
-                let rebuilt =
-                    build_sc_failure_repair_package(&identity, &prefix, ScTerminalInput::Local(&local))?;
-                (identity, rebuilt)
-            }
-        };
+        let (identity, rebuilt) =
+            match store.read_sc_failure_chain_for_publication(&scope, &package.chain_id) {
+                Ok((identity, evidence)) => {
+                    let rebuilt = build_sc_failure_repair_package(
+                        &identity,
+                        &evidence,
+                        ScTerminalInput::Durable,
+                    )?;
+                    (identity, rebuilt)
+                }
+                Err(failure) => {
+                    // 腐坏日志：只有真实已验证前缀能组真实 Incomplete 包；没有前缀就
+                    // 原样上浮，不伪造包、不伪造 durable 终局。
+                    let Some(prefix) = failure.verified_prefix.as_deref() else {
+                        return Err(publish_error(
+                            &failure.code,
+                            PUBLISH_STEP,
+                            failure.round_id.clone(),
+                            format!("读取真实证据失败: {}", failure.detail),
+                            failure.publication_incomplete,
+                        ));
+                    };
+                    let prefix = prefix.clone();
+                    let identity = prefix_chain_identity(&prefix, &scope, &package.chain_id)?;
+                    let local = local_terminal_from_package(&package);
+                    let rebuilt = build_sc_failure_repair_package(
+                        &identity,
+                        &prefix,
+                        ScTerminalInput::Local(&local),
+                    )?;
+                    (identity, rebuilt)
+                }
+            };
         if rebuilt != package {
             return Err(publish_error(
                 CODE_PACKAGE_MISMATCH,
@@ -181,12 +185,10 @@ impl WorkspaceEngine {
                     if sc_failure_repair_package.package_id != package_for_write.package_id {
                         continue;
                     }
-                    let stored_digest =
-                        sc_failure_package_digest(sc_failure_repair_package).map_err(|failure| {
-                            ProductStoreError::InvalidRecord {
-                                kind: "artifact_versions",
-                                reason: failure.detail,
-                            }
+                    let stored_digest = sc_failure_package_digest(sc_failure_repair_package)
+                        .map_err(|failure| ProductStoreError::InvalidRecord {
+                            kind: "artifact_versions",
+                            reason: failure.detail,
                         })?;
                     if stored_digest != digest {
                         return Err(ProductStoreError::InvalidRecord {
@@ -222,19 +224,20 @@ impl WorkspaceEngine {
                         "落盘字节与合并表序列化结果不一致".to_string(),
                     ));
                 }
-                let parsed: Vec<ArtifactVersion> = serde_json::from_slice(&bytes).map_err(|failure| {
-                    ProductStoreError::Json(format!("回读解析失败: {failure}"))
-                })?;
+                let parsed: Vec<ArtifactVersion> =
+                    serde_json::from_slice(&bytes).map_err(|failure| {
+                        ProductStoreError::Json(format!("回读解析失败: {failure}"))
+                    })?;
                 if parsed != merged {
-                    return Err(ProductStoreError::Json("回读版本表与合并表不一致".to_string()));
+                    return Err(ProductStoreError::Json(
+                        "回读版本表与合并表不一致".to_string(),
+                    ));
                 }
                 let row = merged
                     .iter()
                     .find(|entry| entry.version == next)
                     .cloned()
-                    .ok_or_else(|| {
-                        ProductStoreError::Json("合并表缺少新版本行".to_string())
-                    })?;
+                    .ok_or_else(|| ProductStoreError::Json("合并表缺少新版本行".to_string()))?;
                 let ArtifactPayload::ScFailureRepairPackage {
                     sc_failure_repair_package,
                 } = &row.payload
@@ -582,3 +585,7 @@ mod publication_tests;
 #[cfg(test)]
 #[path = "tests/sc_failure_publication_rebuild.rs"]
 mod publication_rebuild_tests;
+
+#[cfg(test)]
+#[path = "/tmp/wig-a4-ui-export.rs"]
+mod ui_export;

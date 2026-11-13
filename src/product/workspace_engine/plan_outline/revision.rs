@@ -488,7 +488,8 @@ impl WorkspaceEngine {
                 .map_err(|e| format!("build candidate dto failed: {e}"))?;
         self.update_artifact(ArtifactPayload::WorkItemPlanCandidate {
             candidate: Box::new(candidate),
-        }).await?;
+        })
+        .await?;
 
         self.complete_active_node(Some("WorkItemPlan 返修 provider 输出完成".to_string()))
             .await;

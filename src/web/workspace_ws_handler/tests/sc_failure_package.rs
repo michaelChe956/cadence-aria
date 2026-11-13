@@ -25,10 +25,10 @@
 
 use super::sc_failure_driver_fixture::{
     author_start_count, candidate_attempts, chain_ids, durable_artifact_versions,
-    durable_sc_package_versions, evidence_entries, events_of, failure_message,
+    durable_sc_package_versions, events_of, evidence_entries, failure_message,
     markdown_duplicate_trusted_command, markdown_missing_five_sections,
-    markdown_unknown_requirement_ref, only_chain_id, session_json_bytes, start_run,
-    start_run_with, window_snapshot,
+    markdown_unknown_requirement_ref, only_chain_id, session_json_bytes, start_run, start_run_with,
+    window_snapshot,
 };
 use super::single_candidate_provider_run::{ProviderRunFixture, wait_for_single_candidate_phase};
 use super::*;
@@ -110,10 +110,7 @@ async fn sc_failure_package_compile_terminal_publishes_durable_package() {
     let reasons = failure["blocking_reasons"]
         .as_array()
         .expect("blocking reasons array");
-    assert!(
-        !reasons.is_empty(),
-        "真实阻断原因必须在场（不被摘要替代）"
-    );
+    assert!(!reasons.is_empty(), "真实阻断原因必须在场（不被摘要替代）");
     assert!(
         !failure["repair_instructions"]
             .as_array()
@@ -153,11 +150,17 @@ async fn sc_failure_package_compile_terminal_publishes_durable_package() {
     assert_eq!(round["failure_class"], "compile");
     assert_eq!(round["launch_state"], "started");
     assert_eq!(
-        round["blocking_reasons"].as_array().expect("round reasons").len(),
+        round["blocking_reasons"]
+            .as_array()
+            .expect("round reasons")
+            .len(),
         reasons.len(),
         "包内 cause 数组与 durable 证据逐条一致（不被摘要替代）"
     );
-    assert_eq!(round["raw"], failure["raw"], "包内 raw 引用与 durable 证据逐字一致");
+    assert_eq!(
+        round["raw"], failure["raw"],
+        "包内 raw 引用与 durable 证据逐字一致"
+    );
     assert_eq!(
         round["source"], failure["source"],
         "包内 source 引用与 durable 证据逐字一致"
@@ -240,9 +243,10 @@ async fn sc_failure_package_second_failure_keeps_both_rounds_in_durable_package(
         .as_array()
         .expect("second round reasons");
     assert!(
-        second_reasons
-            .iter()
-            .any(|reason| reason.as_str().unwrap_or_default().contains("unknown_requirement_ref")),
+        second_reasons.iter().any(|reason| reason
+            .as_str()
+            .unwrap_or_default()
+            .contains("unknown_requirement_ref")),
         "次轮 typed 原因在场: {second_reasons:?}"
     );
 
@@ -254,7 +258,10 @@ async fn sc_failure_package_second_failure_keeps_both_rounds_in_durable_package(
     let version = published_failure_package(&run.fixture);
     let package = &version["sc_failure_repair_package"];
     assert_eq!(package["chain_id"], chain_id, "A4 包必须绑定本轮真实失败链");
-    assert_eq!(package["terminal_class"], "ir_preflight", "终局类取最后一轮");
+    assert_eq!(
+        package["terminal_class"], "ir_preflight",
+        "终局类取最后一轮"
+    );
     let rounds = package["rounds"].as_array().expect("package rounds");
     assert_eq!(rounds.len(), 2, "包内两轮齐全");
     assert_eq!(rounds[0]["failure_class"], "compile");

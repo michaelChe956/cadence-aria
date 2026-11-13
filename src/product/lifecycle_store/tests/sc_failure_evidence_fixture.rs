@@ -8,11 +8,11 @@ pub(crate) use std::path::PathBuf;
 pub(crate) use tempfile::TempDir;
 
 pub(crate) use crate::product::app_paths::ProductAppPaths;
-pub(crate) use crate::product::lifecycle_store::{
-    CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
-};
 pub(crate) use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceError, ScFailureEvidenceEvent, ScFailureEvidenceRead, sc_failure_chain_id,
+};
+pub(crate) use crate::product::lifecycle_store::{
+    CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
 };
 pub(crate) use crate::product::models::{ProviderName, WorkspaceType};
 pub(crate) use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
@@ -21,7 +21,6 @@ pub(crate) use crate::web::workspace_ws_types::{
     ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScFailureScope, ScPromptDisposition,
     ScRoundIdentity, ScTeachingPromptEvidence,
 };
-
 
 pub(crate) const PROJECT_ID: &str = "project_0001";
 pub(crate) const ISSUE_ID: &str = "issue_0001";
@@ -65,16 +64,15 @@ pub(crate) fn live_sc_session(store: &LifecycleStore) -> String {
 /// handle/seq 只来自真实 begin，不猜最新目录。
 pub(crate) fn begin(store: &LifecycleStore, session_id: &str) -> WorkItemSplitProviderRunHandle {
     store
-        .begin_work_item_split_provider_run(
-            PROJECT_ID,
-            ISSUE_ID,
-            &ProviderName::Codex,
-            session_id,
-        )
+        .begin_work_item_split_provider_run(PROJECT_ID, ISSUE_ID, &ProviderName::Codex, session_id)
         .expect("begin")
 }
 
-pub(crate) fn complete_raw(store: &LifecycleStore, handle: &WorkItemSplitProviderRunHandle, raw: &str) {
+pub(crate) fn complete_raw(
+    store: &LifecycleStore,
+    handle: &WorkItemSplitProviderRunHandle,
+    raw: &str,
+) {
     store
         .complete_work_item_split_provider_run(
             handle,
@@ -181,7 +179,10 @@ pub(crate) fn parts(reference: &ScEvidenceRef) -> (String, String, u64) {
 }
 
 /// 错误必须带稳定 code/step 与可消费的已验证前缀（坏行不被跳过）。
-pub(crate) fn expect_prefix<'a>(err: &'a ScFailureEvidenceError, code: &str) -> &'a ScFailureEvidenceRead {
+pub(crate) fn expect_prefix<'a>(
+    err: &'a ScFailureEvidenceError,
+    code: &str,
+) -> &'a ScFailureEvidenceRead {
     assert_eq!(err.code, code, "detail={}", err.detail);
     assert!(!err.step.is_empty());
     err.verified_prefix.as_deref().expect("verified prefix")
@@ -197,4 +198,3 @@ pub(crate) fn sha256_hex(body: &str) -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
-

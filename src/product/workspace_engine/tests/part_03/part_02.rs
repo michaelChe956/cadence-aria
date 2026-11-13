@@ -15,7 +15,10 @@ async fn work_item_plan_item_optional_findings_pause_for_user_choice() {
         "draft_a",
         WorkItemDraftStatus::Draft,
     );
-    engine.update_artifact(draft_payload).await.expect("fixture artifact write");
+    engine
+        .update_artifact(draft_payload)
+        .await
+        .expect("fixture artifact write");
     let review_node_id = engine
         .create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::WorkItemDraftReview,
@@ -89,20 +92,23 @@ async fn work_item_plan_batch_optional_findings_pause_for_user_choice() {
         make_work_item_plan_engine_with_draft_candidate("sess_wip_batch_optional_review");
     prepare_work_item_plan_outline_artifact(&mut engine).await;
     let draft_records = save_batch_work_item_plan_index_with_accepted_drafts(&engine, &plan_id);
-    engine.update_artifact(ArtifactPayload::WorkItemBatchState {
-        batch_state: Box::new(WorkItemBatchStatePayload {
-            batch_id: "batch_0001".to_string(),
-            generation_round_id: "round_0001".to_string(),
-            queue: vec![
-                "outline_a".to_string(),
-                "outline_b".to_string(),
-                "outline_c".to_string(),
-            ],
-            draft_records,
-            batch_status: WorkItemBatchStatus::ReviewPending,
-            failure_summary: vec![],
-        }),
-    }).await.expect("fixture artifact write");
+    engine
+        .update_artifact(ArtifactPayload::WorkItemBatchState {
+            batch_state: Box::new(WorkItemBatchStatePayload {
+                batch_id: "batch_0001".to_string(),
+                generation_round_id: "round_0001".to_string(),
+                queue: vec![
+                    "outline_a".to_string(),
+                    "outline_b".to_string(),
+                    "outline_c".to_string(),
+                ],
+                draft_records,
+                batch_status: WorkItemBatchStatus::ReviewPending,
+                failure_summary: vec![],
+            }),
+        })
+        .await
+        .expect("fixture artifact write");
     let review_node_id = engine
         .create_timeline_node(TimelineNodeDraft {
             node_type: TimelineNodeType::WorkItemBatchReview,
@@ -211,7 +217,10 @@ async fn prepare_work_item_plan_outline_artifact(engine: &mut WorkspaceEngine) {
         .lifecycle_store
         .as_ref()
         .map(fixture_logical_member_id);
-    engine.update_artifact(work_item_plan_outline_artifact(logical_target)).await.expect("fixture artifact write");
+    engine
+        .update_artifact(work_item_plan_outline_artifact(logical_target))
+        .await
+        .expect("fixture artifact write");
 }
 
 fn work_item_plan_outline_artifact(

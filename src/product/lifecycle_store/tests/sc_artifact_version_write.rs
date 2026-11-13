@@ -117,17 +117,27 @@ fn p14_closure_reads_raw_allocates_max_plus_one_and_saves_merged() {
     let (merged, bytes_first) = store
         .with_artifact_versions_write(&sid, |ctx| {
             assert_eq!(ctx.raw().len(), 2, "raw must be the disk truth");
-            assert_eq!(ctx.next_version()?, 6, "must be max(raw.version)+1, not len()+1");
+            assert_eq!(
+                ctx.next_version()?,
+                6,
+                "must be max(raw.version)+1, not len()+1"
+            );
             let mut proposed = ctx.raw().to_vec();
             proposed.push(p14_version(6, "# v6"));
             let merged = ctx.save(&proposed)?;
             let bytes = ctx.read_bytes()?;
             let parsed: Vec<ArtifactVersion> = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(parsed, merged, "read_bytes must be exactly the merged table");
+            assert_eq!(
+                parsed, merged,
+                "read_bytes must be exactly the merged table"
+            );
             Ok((merged, bytes))
         })
         .unwrap();
-    assert_eq!(merged.iter().map(|v| v.version).collect::<Vec<_>>(), vec![1, 5, 6]);
+    assert_eq!(
+        merged.iter().map(|v| v.version).collect::<Vec<_>>(),
+        vec![1, 5, 6]
+    );
 
     let bytes_second = store
         .with_artifact_versions_write(&sid, |ctx| {
@@ -135,7 +145,10 @@ fn p14_closure_reads_raw_allocates_max_plus_one_and_saves_merged() {
             ctx.read_bytes()
         })
         .unwrap();
-    assert_eq!(bytes_second, bytes_first, "same content must serialize byte-identically");
+    assert_eq!(
+        bytes_second, bytes_first,
+        "same content must serialize byte-identically"
+    );
     assert_eq!(store.list_artifact_versions(&sid).unwrap(), merged);
 }
 
@@ -143,14 +156,19 @@ fn p14_closure_reads_raw_allocates_max_plus_one_and_saves_merged() {
 fn p14_next_version_overflow_is_typed_error_and_file_untouched() {
     let (_tmp, store, session) = p14_store();
     let sid = session.id.clone();
-    store.save_artifact_versions(&sid, &[p14_version(u32::MAX, "# max")]).unwrap();
+    store
+        .save_artifact_versions(&sid, &[p14_version(u32::MAX, "# max")])
+        .unwrap();
     let before = std::fs::read(p14_artifact_path(&store, &sid)).unwrap();
 
     match store.with_artifact_versions_write(&sid, |ctx| ctx.next_version()) {
         Err(ProductStoreError::InvalidRecord { kind, .. }) => assert_eq!(kind, "artifact_versions"),
         other => panic!("expected typed version-overflow error, got {other:?}"),
     }
-    assert_eq!(std::fs::read(p14_artifact_path(&store, &sid)).unwrap(), before);
+    assert_eq!(
+        std::fs::read(p14_artifact_path(&store, &sid)).unwrap(),
+        before
+    );
 }
 
 #[test]
@@ -164,7 +182,11 @@ fn p14_ordinary_save_is_proposed_authoritative_and_does_not_resurrect() {
     let merged = store
         .with_artifact_versions_write(&sid, |ctx| ctx.save(&[p14_version(1, "# old")]))
         .unwrap();
-    assert_eq!(merged, vec![p14_version(1, "# old")], "disk-absent entries must not resurrect");
+    assert_eq!(
+        merged,
+        vec![p14_version(1, "# old")],
+        "disk-absent entries must not resurrect"
+    );
     assert_eq!(store.list_artifact_versions(&sid).unwrap(), merged);
 
     // 普通回滚合法：同 version 不同 payload 以 proposed 为准（A4-only 拒绝不得泛化）。
@@ -184,29 +206,44 @@ fn p14_ordinary_save_is_proposed_authoritative_and_does_not_resurrect() {
 fn p14_rejected_save_and_closure_error_leave_bytes_intact() {
     let (_tmp, store, session) = p14_store();
     let sid = session.id.clone();
-    store.save_artifact_versions(&sid, &[p14_version(1, "# a")]).unwrap();
+    store
+        .save_artifact_versions(&sid, &[p14_version(1, "# a")])
+        .unwrap();
     let before = std::fs::read(p14_artifact_path(&store, &sid)).unwrap();
 
     let duplicate = store.with_artifact_versions_write(&sid, |ctx| {
         ctx.save(&[p14_version(1, "# a"), p14_version(1, "# b")])
     });
-    assert!(duplicate.is_err(), "duplicate version numbers must be rejected before write");
-    assert_eq!(std::fs::read(p14_artifact_path(&store, &sid)).unwrap(), before);
+    assert!(
+        duplicate.is_err(),
+        "duplicate version numbers must be rejected before write"
+    );
+    assert_eq!(
+        std::fs::read(p14_artifact_path(&store, &sid)).unwrap(),
+        before
+    );
 
     let closure_error = store.with_artifact_versions_write(&sid, |ctx| {
         assert_eq!(ctx.raw().len(), 1);
-        Err::<(), _>(ProductStoreError::Io("p14 injected closure failure".to_string()))
+        Err::<(), _>(ProductStoreError::Io(
+            "p14 injected closure failure".to_string(),
+        ))
     });
     assert!(closure_error.is_err());
     let after = std::fs::read(p14_artifact_path(&store, &sid)).unwrap();
-    assert_eq!(after, before, "aborting a write closure must not erode the durable table");
+    assert_eq!(
+        after, before,
+        "aborting a write closure must not erode the durable table"
+    );
 }
 
 #[test]
 fn p14_public_save_blocks_on_the_same_file_lock() {
     let (_tmp, store, session) = p14_store();
     let sid = session.id.clone();
-    store.save_artifact_versions(&sid, &[p14_version(1, "# a")]).unwrap();
+    store
+        .save_artifact_versions(&sid, &[p14_version(1, "# a")])
+        .unwrap();
     let seeded = std::fs::read(p14_artifact_path(&store, &sid)).unwrap();
 
     let (holder, release_tx) = p14_hold_write_lock(store.app_paths(), sid.clone());
@@ -221,7 +258,10 @@ fn p14_public_save_blocks_on_the_same_file_lock() {
         })
     };
     let blocked = done_rx.recv_timeout(Duration::from_millis(200));
-    assert!(blocked.is_err(), "public save must block on the same artifact_versions.json file lock");
+    assert!(
+        blocked.is_err(),
+        "public save must block on the same artifact_versions.json file lock"
+    );
     assert_eq!(
         std::fs::read(p14_artifact_path(&store, &sid)).unwrap(),
         seeded,
@@ -230,7 +270,10 @@ fn p14_public_save_blocks_on_the_same_file_lock() {
 
     release_tx.send(()).unwrap();
     holder.join().unwrap();
-    done_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
     contender.join().unwrap();
     assert_eq!(p14_versions(&store, &sid), vec![1, 2]);
 }
@@ -241,21 +284,31 @@ fn p14_append_allocates_max_plus_one_in_lock_not_caller_version() {
     let sid = session.id.clone();
 
     // 空表：分配 1（caller 传 99 被忽略）。
-    store.append_artifact_version(&sid, p14_version(99, "# first")).unwrap();
+    store
+        .append_artifact_version(&sid, p14_version(99, "# first"))
+        .unwrap();
     assert_eq!(p14_versions(&store, &sid), vec![1]);
 
     // 有空洞：max(raw)+1 = 6，而非 len+1 = 2，也不是 caller 的 99。
-    store.save_artifact_versions(&sid, &[p14_version(1, "# v1"), p14_version(5, "# v5")]).unwrap();
-    store.append_artifact_version(&sid, p14_version(99, "# sixth")).unwrap();
+    store
+        .save_artifact_versions(&sid, &[p14_version(1, "# v1"), p14_version(5, "# v5")])
+        .unwrap();
+    store
+        .append_artifact_version(&sid, p14_version(99, "# sixth"))
+        .unwrap();
     assert_eq!(p14_versions(&store, &sid), vec![1, 5, 6]);
 
     // 连续追加单调，永不撞号。
-    store.append_artifact_version(&sid, p14_version(99, "# seventh")).unwrap();
+    store
+        .append_artifact_version(&sid, p14_version(99, "# seventh"))
+        .unwrap();
     assert_eq!(p14_versions(&store, &sid), vec![1, 5, 6, 7]);
 
     // 单独 session 的序号空间独立。
     let other = p14_create_session(&store, "plan_p14_other");
-    store.append_artifact_version(&other.id, p14_version(99, "# other")).unwrap();
+    store
+        .append_artifact_version(&other.id, p14_version(99, "# other"))
+        .unwrap();
     assert_eq!(p14_versions(&store, &other.id), vec![1]);
 }
 
@@ -321,7 +374,10 @@ fn p14_concurrent_appends_allocate_unique_contiguous_versions_without_lost_paylo
     let persisted = store.list_artifact_versions(&sid).unwrap();
     let versions: Vec<u32> = persisted.iter().map(|entry| entry.version).collect();
     let expected: Vec<u32> = (1..=total as u32).collect();
-    assert_eq!(versions, expected, "versions must be unique, contiguous and in append order");
+    assert_eq!(
+        versions, expected,
+        "versions must be unique, contiguous and in append order"
+    );
 
     // payload→source_node_id 归属：并发写不得串号或丢失任一写者的 node 归属。
     let mut pairs: Vec<(String, String)> = persisted
@@ -332,10 +388,16 @@ fn p14_concurrent_appends_allocate_unique_contiguous_versions_without_lost_paylo
     let mut wanted: Vec<(String, String)> = (0..WRITERS)
         .flat_map(|writer| {
             (0..APPENDS_PER_WRITER).map(move |seq| {
-                (format!("# writer{writer}-seq{seq}"), format!("node_w{writer}_s{seq}"))
+                (
+                    format!("# writer{writer}-seq{seq}"),
+                    format!("node_w{writer}_s{seq}"),
+                )
             })
         })
         .collect();
     wanted.sort();
-    assert_eq!(pairs, wanted, "every payload must survive exactly once with its own source_node_id");
+    assert_eq!(
+        pairs, wanted,
+        "every payload must survive exactly once with its own source_node_id"
+    );
 }

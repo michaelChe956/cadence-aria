@@ -12,12 +12,11 @@
 //!   `Missing` 真实原因（code/detail/round），绝不伪造「已 put」。
 //!
 //! 全文只装配一次、只落一次、只读一次：本模块不重建正文、不截断、不裁剪。
-use super::sc_teaching_prompt::{ScPreparedTeachingPrompt, ScTeachingPromptBudgetVerdict};
 use super::SingleCandidateProviderRunError;
+use super::sc_teaching_prompt::{ScPreparedTeachingPrompt, ScTeachingPromptBudgetVerdict};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::sc_failure_evidence::{
-    ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceEvent,
-    ScFailureEvidenceRead,
+    ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceEvent, ScFailureEvidenceRead,
 };
 use crate::product::workspace_engine::WorkspaceEngine;
 use crate::web::workspace_ws_types::{

@@ -5,20 +5,24 @@
 //! call authorize/consume, observe that window, and record Denied without a start.
 
 use super::sc_failure_driver_fixture::{
-    candidate_attempts, durable_sc_package_versions, evidence_entries, events_of,
+    candidate_attempts, durable_sc_package_versions, events_of, evidence_entries,
     extract_source_body, failure_message, markdown_missing_five_sections,
     markdown_unknown_requirement_ref, only_chain_id, sha256_hex, start_run,
 };
-use super::single_candidate_provider_run::{
-    single_candidate_markdown, wait_for_single_candidate_phase, ProviderRunFixture,
-};
 use super::single_candidate_provider_run::*;
+use super::single_candidate_provider_run::{
+    ProviderRunFixture, single_candidate_markdown, wait_for_single_candidate_phase,
+};
 use crate::product::models::SingleCandidatePhase;
 use crate::product::work_item_plan_policy::{ScTeachingWindowRequest, WorkItemPlanFlowKind};
 use serde_json::Value;
 
 #[derive(Clone, Copy)]
-enum Class { Compile, Ir, Structure }
+enum Class {
+    Compile,
+    Ir,
+    Structure,
+}
 
 impl Class {
     fn token(self) -> &'static str {
@@ -50,10 +54,16 @@ impl Class {
 /// digest or source ref. Establish evaluates NoProvableAuthorization and max=1.
 /// Its attempt-1 placeholder is policy state, NOT an observed provider launch.
 fn seed_unapproved_policy_window(fixture: &ProviderRunFixture) {
-    let before = fixture.lifecycle.get_workspace_session(&fixture.record.id).unwrap();
+    let before = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .unwrap();
     assert!(before.provider_start_ledger.is_empty());
     assert!(before.sc_generation_teaching_windows.is_empty());
-    assert_ne!(before.single_candidate_phase, Some(SingleCandidatePhase::Generate));
+    assert_ne!(
+        before.single_candidate_phase,
+        Some(SingleCandidatePhase::Generate)
+    );
     let request = ScTeachingWindowRequest {
         provider_path_admissible: false,
         failure_source_ref: None,
@@ -67,8 +77,14 @@ fn seed_unapproved_policy_window(fixture: &ProviderRunFixture) {
         prompt_ref: String::new(),
         prompt_digest: String::new(),
     };
-    fixture.lifecycle.establish_sc_teaching_window(&before, &request).unwrap();
-    let after = fixture.lifecycle.get_workspace_session(&fixture.record.id).unwrap();
+    fixture
+        .lifecycle
+        .establish_sc_teaching_window(&before, &request)
+        .unwrap();
+    let after = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .unwrap();
     assert_eq!(after.provider_start_ledger, before.provider_start_ledger);
     let window = after.sc_generation_teaching_windows.last().unwrap();
     assert!(!window.repair_once_approved);
@@ -91,10 +107,15 @@ fn contains_string(value: &Value, expected: &str) -> bool {
 fn assert_published_node_reference(fixture: &ProviderRunFixture, version: &Value) {
     let number = version["version"].as_u64().unwrap();
     let node = version["source_node_id"].as_str().unwrap();
-    let detail = fixture.lifecycle.load_node_detail(&fixture.record.id, node).unwrap();
+    let detail = fixture
+        .lifecycle
+        .load_node_detail(&fixture.record.id, node)
+        .unwrap();
     let reference = serde_json::to_value(detail.artifact_ref.expect("published node ref")).unwrap();
-    assert!(contains_string(&reference, &format!("artifact_version_{number:03}")),
-        "node ref must name the same durable A4 version: {reference}");
+    assert!(
+        contains_string(&reference, &format!("artifact_version_{number:03}")),
+        "node ref must name the same durable A4 version: {reference}"
+    );
 }
 
 fn assert_rounds(package: &Value, entries: &[Value], expected: &[Class]) {
@@ -107,14 +128,22 @@ fn assert_rounds(package: &Value, entries: &[Value], expected: &[Class]) {
     for ((failure, round), class) in observed.iter().zip(rounds).zip(expected) {
         let fact = &failure["event"];
         assert_eq!(fact["failure_class"], class.token());
-        let identity = &bound.iter().find(|entry| {
-            entry["event"]["round"]["round_id"] == fact["round_id"]
-        }).unwrap()["event"]["round"];
+        let identity = &bound
+            .iter()
+            .find(|entry| entry["event"]["round"]["round_id"] == fact["round_id"])
+            .unwrap()["event"]["round"];
         assert_eq!(&round["identity"], identity);
         assert_eq!(round["launch_state"], "started");
         // Full ordered values, not lengths/summaries/first-four slices.
-        for field in ["failure_class", "blocking_reasons", "repair_instructions",
-            "raw", "source", "existing_failure_id", "attempt_key"] {
+        for field in [
+            "failure_class",
+            "blocking_reasons",
+            "repair_instructions",
+            "raw",
+            "source",
+            "existing_failure_id",
+            "attempt_key",
+        ] {
             assert_eq!(round[field], fact[field], "round field {field}");
         }
         assert_eq!(fact["raw"]["status"], "available");
@@ -136,7 +165,12 @@ fn assert_rounds(package: &Value, entries: &[Value], expected: &[Class]) {
             );
         }
         if matches!(class, Class::Structure) {
-            assert!(!fact["source"]["locator"].as_str().unwrap().starts_with("sc-split-output/"));
+            assert!(
+                !fact["source"]["locator"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("sc-split-output/")
+            );
             assert!(!fact["existing_failure_id"].as_str().unwrap().is_empty());
         }
     }
@@ -144,14 +178,27 @@ fn assert_rounds(package: &Value, entries: &[Value], expected: &[Class]) {
 
 async fn run_cell(class: Class, first_denied: bool) {
     let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
-    if first_denied { seed_unapproved_policy_window(&fixture); }
+    if first_denied {
+        seed_unapproved_policy_window(&fixture);
+    }
     let first = class.output(&fixture);
     let second = first.replace("Backend API", "Backend API round-2");
-    assert_ne!(first, second, "second attempt must have its own source identity");
-    let outputs = if first_denied { vec![first] } else { vec![first, second] };
+    assert_ne!(
+        first, second,
+        "second attempt must have its own source identity"
+    );
+    let outputs = if first_denied {
+        vec![first]
+    } else {
+        vec![first, second]
+    };
     let mut run = start_run(fixture, outputs).await;
     let _original = run.queue.next_input().await;
-    let teaching = if first_denied { None } else { Some(run.queue.next_input().await) };
+    let teaching = if first_denied {
+        None
+    } else {
+        Some(run.queue.next_input().await)
+    };
     assert!(!failure_message(&mut run.outbound).await.is_empty());
     wait_for_single_candidate_phase(&run.fixture, SingleCandidatePhase::Failed).await;
     run.queue.expect_no_further_input().await;
@@ -161,10 +208,18 @@ async fn run_cell(class: Class, first_denied: bool) {
     let chain_id = only_chain_id(&run.fixture);
     let entries = evidence_entries(&run.fixture, &chain_id);
     let decisions = events_of(&entries, "teaching_decision");
-    let actual_decisions: Vec<_> = decisions.iter()
-        .map(|entry| entry["event"]["decision"].as_str().unwrap()).collect();
-    assert_eq!(actual_decisions, if first_denied { vec!["denied"] }
-        else { vec!["granted", "denied"] });
+    let actual_decisions: Vec<_> = decisions
+        .iter()
+        .map(|entry| entry["event"]["decision"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        actual_decisions,
+        if first_denied {
+            vec!["denied"]
+        } else {
+            vec!["granted", "denied"]
+        }
+    );
     let terminal = events_of(&entries, "chain_terminal");
     assert_eq!(terminal.len(), 1);
     assert_eq!(terminal[0]["event"]["terminal_class"], class.token());
@@ -172,7 +227,10 @@ async fn run_cell(class: Class, first_denied: bool) {
     assert_eq!(packages.len(), 1);
     let package = &packages[0]["sc_failure_repair_package"];
     assert_eq!(package["chain_id"], chain_id);
-    assert_eq!(package["terminal_class"], terminal[0]["event"]["terminal_class"]);
+    assert_eq!(
+        package["terminal_class"],
+        terminal[0]["event"]["terminal_class"]
+    );
     assert_eq!(package["completeness"], "complete");
     assert_rounds(package, &entries, &vec![class; count]);
     assert_published_node_reference(&run.fixture, &packages[0]);
@@ -182,15 +240,23 @@ async fn run_cell(class: Class, first_denied: bool) {
     let observed = events_of(&entries, "failure_observed");
     if let Some(input) = teaching {
         let source = &observed[0]["event"]["source"];
-        let body = extract_source_body(&input.prompt,
-            source["sha256"].as_str().unwrap(), source["bytes"].as_u64().unwrap());
-        assert_eq!(sha256_hex(body.as_bytes()), source["sha256"].as_str().unwrap());
+        let body = extract_source_body(
+            &input.prompt,
+            source["sha256"].as_str().unwrap(),
+            source["bytes"].as_u64().unwrap(),
+        );
+        assert_eq!(
+            sha256_hex(body.as_bytes()),
+            source["sha256"].as_str().unwrap()
+        );
         assert!(input.prompt.contains(source["locator"].as_str().unwrap()));
         let second_source = &observed[1]["event"]["source"];
         assert_ne!(source["sha256"], second_source["sha256"]);
         assert_eq!(package["last_failure_source"]["source"], *second_source);
-        assert_eq!(package["last_failure_source"]["source_round_id"],
-            observed[1]["event"]["round_id"]);
+        assert_eq!(
+            package["last_failure_source"]["source_round_id"],
+            observed[1]["event"]["round_id"]
+        );
     }
     // Raw must belong to the bound physical run, not another candidate/source.
     let scope: crate::web::workspace_ws_types::ScFailureScope =
@@ -198,11 +264,20 @@ async fn run_cell(class: Class, first_denied: bool) {
     for binding in events_of(&entries, "round_bound") {
         let identity: crate::web::workspace_ws_types::ScRoundIdentity =
             serde_json::from_value(binding["event"]["round"].clone()).unwrap();
-        let raw = run.fixture.lifecycle.read_sc_split_output(&scope, &identity).unwrap();
+        let raw = run
+            .fixture
+            .lifecycle
+            .read_sc_split_output(&scope, &identity)
+            .unwrap();
         let failures = events_of(&entries, "failure_observed");
-        let failure = failures.iter().find(|entry|
-            entry["event"]["round_id"].as_str() == Some(identity.round_id.as_str())).unwrap();
-        assert_eq!(failure["event"]["raw"]["sha256"], sha256_hex(raw.as_bytes()));
+        let failure = failures
+            .iter()
+            .find(|entry| entry["event"]["round_id"].as_str() == Some(identity.round_id.as_str()))
+            .unwrap();
+        assert_eq!(
+            failure["event"]["raw"]["sha256"],
+            sha256_hex(raw.as_bytes())
+        );
         assert_eq!(failure["event"]["raw"]["bytes"], raw.len() as u64);
     }
     // Match sealed IDs against the OLD candidate-attempt producer, rather than
@@ -210,28 +285,52 @@ async fn run_cell(class: Class, first_denied: bool) {
     let attempts = candidate_attempts(&run.fixture);
     for fact in &observed {
         if let Some(id) = fact["event"]["existing_failure_id"].as_str() {
-            let old = attempts.iter().find(|row| row.failure.as_ref()
-                .is_some_and(|failure| failure.failure_id == id)).expect("old sealed failure ID");
+            let old = attempts
+                .iter()
+                .find(|row| {
+                    row.failure
+                        .as_ref()
+                        .is_some_and(|failure| failure.failure_id == id)
+                })
+                .expect("old sealed failure ID");
             if let Some(key) = fact["event"]["attempt_key"].as_str() {
                 assert_eq!(old.attempt_key, key);
             }
         }
     }
-    let record = run.fixture.lifecycle.get_workspace_session(&run.fixture.record.id).unwrap();
+    let record = run
+        .fixture
+        .lifecycle
+        .get_workspace_session(&run.fixture.record.id)
+        .unwrap();
     let window = record.sc_generation_teaching_windows.last().unwrap();
     assert_eq!(window.attempts.len(), count);
-    if first_denied { assert!(!window.repair_once_approved); }
+    if first_denied {
+        assert!(!window.repair_once_approved);
+    }
 }
 
 #[tokio::test]
-async fn sc_failure_matrix_compile_first_policy_denied() { run_cell(Class::Compile, true).await; }
+async fn sc_failure_matrix_compile_first_policy_denied() {
+    run_cell(Class::Compile, true).await;
+}
 #[tokio::test]
-async fn sc_failure_matrix_ir_first_policy_denied() { run_cell(Class::Ir, true).await; }
+async fn sc_failure_matrix_ir_first_policy_denied() {
+    run_cell(Class::Ir, true).await;
+}
 #[tokio::test]
-async fn sc_failure_matrix_structure_first_policy_denied() { run_cell(Class::Structure, true).await; }
+async fn sc_failure_matrix_structure_first_policy_denied() {
+    run_cell(Class::Structure, true).await;
+}
 #[tokio::test]
-async fn sc_failure_matrix_compile_second_failure() { run_cell(Class::Compile, false).await; }
+async fn sc_failure_matrix_compile_second_failure() {
+    run_cell(Class::Compile, false).await;
+}
 #[tokio::test]
-async fn sc_failure_matrix_ir_second_failure_full_source() { run_cell(Class::Ir, false).await; }
+async fn sc_failure_matrix_ir_second_failure_full_source() {
+    run_cell(Class::Ir, false).await;
+}
 #[tokio::test]
-async fn sc_failure_matrix_structure_second_failure_full_source() { run_cell(Class::Structure, false).await; }
+async fn sc_failure_matrix_structure_second_failure_full_source() {
+    run_cell(Class::Structure, false).await;
+}

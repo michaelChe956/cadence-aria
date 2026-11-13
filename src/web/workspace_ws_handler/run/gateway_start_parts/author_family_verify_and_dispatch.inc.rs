@@ -212,11 +212,9 @@ async fn lc_bind_fresh_node_after_spawn(
             }
             // P08：锁内重读后按 dispatch 快照核当前 operation——身份不符即冲突
             // 上浮且零写（不猜 ID、不改旧 operation）。
-            let binding_conflict = || {
-                crate::product::json_store::ProductStoreError::Conflict {
-                    kind: "lc_fresh_operation_binding",
-                    id: expected_operation_id.clone(),
-                }
+            let binding_conflict = || crate::product::json_store::ProductStoreError::Conflict {
+                kind: "lc_fresh_operation_binding",
+                id: expected_operation_id.clone(),
             };
             let recovery = record
                 .lc_resume_recovery
@@ -486,11 +484,7 @@ mod fresh_operation_binding_tests {
     pub(super) const FRESH_NODE_ID: &str = "timeline_node_fresh_0001";
 
     /// 真实 store 会话夹具（durable record 落盘，断言一律回读真实 record）。
-    pub(super) fn session_fixture() -> (
-        tempfile::TempDir,
-        LifecycleStore,
-        WorkspaceSessionRecord,
-    ) {
+    pub(super) fn session_fixture() -> (tempfile::TempDir, LifecycleStore, WorkspaceSessionRecord) {
         let tmp = tempfile::tempdir().unwrap();
         let store = LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
             tmp.path().join(".aria"),

@@ -360,13 +360,14 @@ impl ArtifactVersionsWrite<'_> {
             else {
                 continue;
             };
-            let digest = crate::product::lifecycle_store::sc_failure_publication::sc_failure_package_digest(
-                sc_failure_repair_package,
-            )
-            .map_err(|error| ProductStoreError::InvalidRecord {
-                kind: "artifact_versions",
-                reason: format!("a4_package_digest_failed: {}", error.detail),
-            })?;
+            let digest =
+                crate::product::lifecycle_store::sc_failure_publication::sc_failure_package_digest(
+                    sc_failure_repair_package,
+                )
+                .map_err(|error| ProductStoreError::InvalidRecord {
+                    kind: "artifact_versions",
+                    reason: format!("a4_package_digest_failed: {}", error.detail),
+                })?;
             match digest_by_package.get(sc_failure_repair_package.package_id.as_str()) {
                 Some(existing) if existing != &digest => {
                     return Err(ProductStoreError::InvalidRecord {
@@ -376,10 +377,7 @@ impl ArtifactVersionsWrite<'_> {
                 }
                 Some(_) => {}
                 None => {
-                    digest_by_package.insert(
-                        sc_failure_repair_package.package_id.clone(),
-                        digest,
-                    );
+                    digest_by_package.insert(sc_failure_repair_package.package_id.clone(), digest);
                 }
             }
         }

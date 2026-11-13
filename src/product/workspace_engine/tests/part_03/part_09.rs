@@ -406,7 +406,8 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
     ] {
         let (_baseline_tmp, baseline_lifecycle, baseline_plan_id, mut baseline_engine) =
             make_work_item_plan_engine_with_accepted_contract_drafts();
-        let baseline_journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
+        let baseline_journal =
+            crate::product::work_item_plan_store::observe_compile_transaction_writes();
         let baseline_outcome = baseline_engine
             .run_work_item_plan_compile()
             .await
@@ -436,7 +437,8 @@ async fn compile_recovery_continue_replays_each_partial_finalizer_checkpoint_aft
             .validator_findings
             .clone();
         let provider_ledger_before = provider_ledger_bytes(&lifecycle);
-        let recovery_journal = crate::product::work_item_plan_store::observe_compile_transaction_writes();
+        let recovery_journal =
+            crate::product::work_item_plan_store::observe_compile_transaction_writes();
         let plan_store = engine.work_item_plan_store().unwrap();
         plan_store.put_compile_transaction(&compile_tx).unwrap();
         let published = engine
@@ -636,7 +638,10 @@ async fn compile_recovery_continue_replays_pre_active_publication_with_same_tx_a
     let (_tmp, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let outline_payload = engine.session.artifact.clone().unwrap();
-    engine.update_artifact(outline_payload).await.expect("fixture artifact write");
+    engine
+        .update_artifact(outline_payload)
+        .await
+        .expect("fixture artifact write");
     let (compile_tx, accepted_drafts) = prepare_initial_compile_transaction(
         &engine,
         &lifecycle,

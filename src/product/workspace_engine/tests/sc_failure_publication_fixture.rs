@@ -18,18 +18,15 @@ use crate::product::app_paths::ProductAppPaths;
 use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceEvent, sc_failure_chain_id, sc_failure_split_locator,
 };
+use crate::product::lifecycle_store::sc_failure_publication::ScTerminalInput;
 use crate::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
 };
-use crate::product::lifecycle_store::sc_failure_publication::ScTerminalInput;
-use crate::product::models::{
-    ProviderName, WorkspaceRolePermissionModes, WorkspaceType,
-};
+use crate::product::models::{ProviderName, WorkspaceRolePermissionModes, WorkspaceType};
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 use crate::web::workspace_ws_types::{
     ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot, ScArtifactPublishedReceipt,
-    ScEvidenceRef,
-    ScFailureChainIdentity, ScFailureClass, ScFailureScope, ScFailureRepairPackage,
+    ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScFailureRepairPackage, ScFailureScope,
     ScPackageCompleteness, ScRoundIdentity, ScRoundLaunchState, ScTeachingDecision, TimelineNode,
     TimelineNodeStatus, TimelineNodeType, WorkspaceStage,
 };
@@ -61,7 +58,11 @@ pub(super) fn sha_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 pub(super) fn available(locator: &str, body: &str) -> ScEvidenceRef {
@@ -98,12 +99,7 @@ pub(super) fn publication_fixture() -> PublicationFixture {
 
     // 真实 provider run（只落盘，不调用任何 provider）：raw 正文逐字入库。
     let handle = store
-        .begin_work_item_split_provider_run(
-            PROJECT_ID,
-            ISSUE_ID,
-            &ProviderName::Codex,
-            &session_id,
-        )
+        .begin_work_item_split_provider_run(PROJECT_ID, ISSUE_ID, &ProviderName::Codex, &session_id)
         .expect("begin split provider run");
     store
         .complete_work_item_split_provider_run(
@@ -190,7 +186,8 @@ pub(super) fn publication_fixture() -> PublicationFixture {
     let evidence = store
         .read_sc_failure_evidence(&chain)
         .expect("strict evidence read");
-    let package = build_sc_failure_repair_package(&chain, &evidence, ScTerminalInput::Durable).expect("repair package");
+    let package = build_sc_failure_repair_package(&chain, &evidence, ScTerminalInput::Durable)
+        .expect("repair package");
 
     PublicationFixture {
         _tmp: tmp,
@@ -243,8 +240,10 @@ pub(super) fn seed_timeline_node(store: &LifecycleStore, session_id: &str) {
                     reviewer: Some(ProviderName::ClaudeCode),
                     review_rounds: 1,
                     permission_modes: WorkspaceRolePermissionModes {
-                        author: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
-                        reviewer: crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+                        author:
+                            crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
+                        reviewer:
+                            crate::cross_cutting::streaming_provider::ProviderPermissionMode::Auto,
                     },
                 },
                 retry: None,

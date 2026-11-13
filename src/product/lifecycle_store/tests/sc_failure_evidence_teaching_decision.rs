@@ -15,7 +15,7 @@
 //   日志在坏链追加。
 
 use super::fixture::{
-    begin, bound_round, chain_dir, live_sc_session, observed, setup, RAW1, SOURCE1,
+    RAW1, SOURCE1, begin, bound_round, chain_dir, live_sc_session, observed, setup,
 };
 use crate::product::lifecycle_store::sc_failure_evidence::ScFailureEvidenceEvent;
 use crate::web::workspace_ws_types::ScTeachingDecision;

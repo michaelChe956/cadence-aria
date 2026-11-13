@@ -100,7 +100,9 @@ fn classifier_waiting_when_audit_partition_is_corrupt() {
 
     match classify(&lifecycle, &scope, None, 0) {
         ScRoundEntry::Waiting {
-            reason_code, detail, ..
+            reason_code,
+            detail,
+            ..
         } => {
             assert_eq!(reason_code, SC_ROUND_LAUNCH_STATE_UNAVAILABLE);
             assert!(!detail.is_empty());
@@ -245,18 +247,13 @@ fn teaching_round_classifies_ready_completed_and_waiting() {
 fn bound_operation_reentry_keeps_original_chain_and_run_seq() {
     let (_tmp, lifecycle, scope) = super::tests::sc_round_fixture();
     let original = bind_original(&lifecycle, &scope);
-    let teaching = match begin_sc_teaching_round(
-        &lifecycle,
-        &original,
-        None,
-        NODE_ID,
-        &ProviderName::Fake,
-    )
-    .expect("teaching round binds")
-    {
-        ScRoundEntry::Ready(bound) => bound,
-        _ => panic!("un-started teaching round must classify Ready"),
-    };
+    let teaching =
+        match begin_sc_teaching_round(&lifecycle, &original, None, NODE_ID, &ProviderName::Fake)
+            .expect("teaching round binds")
+        {
+            ScRoundEntry::Ready(bound) => bound,
+            _ => panic!("un-started teaching round must classify Ready"),
+        };
     let rows_before = evidence_rows(&lifecycle, &original.chain);
     let seq_before = teaching.round.role_run_seq;
     let starts_before = actual_starts(&lifecycle, &scope.session_id);

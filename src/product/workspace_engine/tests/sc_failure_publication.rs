@@ -19,14 +19,14 @@
 // 载荷比较走 serde JSON（不钉 `ArtifactPayload` 的枚举变体名）：变体名由 P11
 // enum 提交与 P12/P17 消费者钉，本文件只钉「落盘载荷就是包本体」这一事实。
 
-use crate::product::checkpoint_store::CheckpointStore;
-use crate::product::models::ArtifactRef;
-use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
-use crate::web::workspace_ws_types::{ArtifactPayload, ScFailureRepairPackage};
 use super::publication_fixture::{
     NODE_ID, ordinary_version, publication_fixture, receipt_files, receipt_from_disk,
     seed_timeline_node,
 };
+use crate::product::checkpoint_store::CheckpointStore;
+use crate::product::models::ArtifactRef;
+use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
+use crate::web::workspace_ws_types::{ArtifactPayload, ScFailureRepairPackage};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -85,7 +85,10 @@ async fn publish_writes_version_ref_and_receipt_and_replay_reuses_same_version()
     seed_timeline_node(&fixture.store, &fixture.session_id);
     fixture
         .store
-        .save_artifact_versions(&fixture.session_id, std::slice::from_ref(&ordinary_version()))
+        .save_artifact_versions(
+            &fixture.session_id,
+            std::slice::from_ref(&ordinary_version()),
+        )
         .expect("seed ordinary current version");
 
     let (mut engine, mut event_rx) = engine_for_fixture(&fixture);
@@ -146,7 +149,11 @@ async fn publish_writes_version_ref_and_receipt_and_replay_reuses_same_version()
     assert_eq!(receipt.chain_id, fixture.package.chain_id);
     assert_eq!(receipt.node_id, NODE_ID);
     assert_eq!(receipt.version, published.version);
-    assert_eq!(receipt.package_digest.len(), 64, "回执摘要必须是 64 位十六进制");
+    assert_eq!(
+        receipt.package_digest.len(),
+        64,
+        "回执摘要必须是 64 位十六进制"
+    );
 
     // 发布屏障：回执缺失/不一致必须报错，而不是空回执兜底。
     fixture
@@ -159,7 +166,9 @@ async fn publish_writes_version_ref_and_receipt_and_replay_reuses_same_version()
     let updates = artifact_updates(&events);
     assert!(!updates.is_empty(), "回执落盘后必须广播 ArtifactUpdate");
     assert!(
-        updates.iter().all(|(version, _)| *version == published.version),
+        updates
+            .iter()
+            .all(|(version, _)| *version == published.version),
         "广播的必须是本次发布版本"
     );
 
@@ -189,7 +198,10 @@ async fn node_detail_filesystem_fault_keeps_package_pending_without_artifact_upd
     seed_timeline_node(&fixture.store, &fixture.session_id);
     fixture
         .store
-        .save_artifact_versions(&fixture.session_id, std::slice::from_ref(&ordinary_version()))
+        .save_artifact_versions(
+            &fixture.session_id,
+            std::slice::from_ref(&ordinary_version()),
+        )
         .expect("seed ordinary current version");
 
     // 真实文件系统故障：把节点详情文件路径占成目录 → 节点详情写入必失败。
@@ -229,7 +241,9 @@ async fn node_detail_filesystem_fault_keeps_package_pending_without_artifact_upd
         .expect("package version stays pending in the raw table");
     assert!(!package_row.is_current);
     assert!(
-        versions.iter().any(|version| version.version == 1 && version.is_current),
+        versions
+            .iter()
+            .any(|version| version.version == 1 && version.is_current),
         "普通 current 版本不得被失败发布改写"
     );
     assert!(
@@ -282,4 +296,3 @@ async fn package_inconsistent_with_real_evidence_is_rejected() {
         "拒发的包不得留下任何回执文件"
     );
 }
-

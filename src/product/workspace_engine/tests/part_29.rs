@@ -94,15 +94,19 @@ fn create_linked_amendment_child(
 ) {
     lifecycle
         .create_workspace_session_with_id(
-            CreateWorkspaceSessionInput { project_id: repair_child.project_id.clone(),
-            issue_id: repair_child.issue_id.clone(),
-            entity_id: entity_id.to_string(),
-            workspace_type,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: Some(ProviderName::Codex),
+            CreateWorkspaceSessionInput {
+                project_id: repair_child.project_id.clone(),
+                issue_id: repair_child.issue_id.clone(),
+                entity_id: entity_id.to_string(),
+                workspace_type,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
 
-            review_rounds: 2,
-            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+                work_item_plan_options: None,
+            },
             child_session_id.to_string(),
         )
         .unwrap();
@@ -128,8 +132,7 @@ fn linked_amendment_link_from_repair(
     link.relation = relation;
     link.parent_session_id = repair_child.id.clone();
     link.child_session_id = child_session_id.to_string();
-    link.return_context.original_route =
-        format!("/workbench/workspace/{}", repair_child.id);
+    link.return_context.original_route = format!("/workbench/workspace/{}", repair_child.id);
     link
 }
 
@@ -244,10 +247,8 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
                     && stored.payload == expected_payload
             })
             .expect("linked amendment artifact version must be persisted");
-        let timeline_nodes = linked_workspace_timeline(&format!(
-            "timeline_node_linked_{:04}",
-            index + 1
-        ));
+        let timeline_nodes =
+            linked_workspace_timeline(&format!("timeline_node_linked_{:04}", index + 1));
         lifecycle
             .save_timeline_nodes(&child_session_id, &timeline_nodes)
             .unwrap();
@@ -286,29 +287,37 @@ async fn linked_workspace_timeline_and_artifact_binding_restore_for_all_artifact
     let lifecycle = LifecycleStore::new(app_paths.clone());
     let parent = lifecycle
         .create_workspace_session_with_id(
-            CreateWorkspaceSessionInput { project_id: "project_0001".to_string(),
-            issue_id: "issue_0001".to_string(),
-            entity_id: "work_item_plan_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItemPlan,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: Some(ProviderName::Codex),
+            CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "work_item_plan_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
 
-            review_rounds: 2,
-            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+                work_item_plan_options: None,
+            },
             "workspace_session_parent_0001".to_string(),
         )
         .unwrap();
     let child = lifecycle
         .create_workspace_session_with_id(
-            CreateWorkspaceSessionInput { project_id: parent.project_id.clone(),
-            issue_id: parent.issue_id.clone(),
-            entity_id: "work_item_0001".to_string(),
-            workspace_type: WorkspaceType::WorkItem,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: Some(ProviderName::Codex),
+            CreateWorkspaceSessionInput {
+                project_id: parent.project_id.clone(),
+                issue_id: parent.issue_id.clone(),
+                entity_id: "work_item_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItem,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
 
-            review_rounds: 2,
-            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+                work_item_plan_options: None,
+            },
             "workspace_session_linked_work_item".to_string(),
         )
         .unwrap();
@@ -519,15 +528,19 @@ async fn linked_workspace_amendment_rejects_persisted_child_with_wrong_target_en
     let child_session_id = format!("workspace_session_story_amendment_{identity_hash}");
     lifecycle
         .create_workspace_session_with_id(
-            CreateWorkspaceSessionInput { project_id: repair_child.project_id.clone(),
-            issue_id: repair_child.issue_id.clone(),
-            entity_id: "story_spec_wrong".to_string(),
-            workspace_type: WorkspaceType::Story,
-            author_provider: ProviderName::ClaudeCode,
-            reviewer_provider: Some(ProviderName::Codex),
+            CreateWorkspaceSessionInput {
+                project_id: repair_child.project_id.clone(),
+                issue_id: repair_child.issue_id.clone(),
+                entity_id: "story_spec_wrong".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
 
-            review_rounds: 2,
-            superpowers_enabled: true, openspec_enabled: true, work_item_plan_options: None, },
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+                work_item_plan_options: None,
+            },
             child_session_id.clone(),
         )
         .unwrap();
@@ -568,8 +581,7 @@ async fn linked_workspace_restore_reloads_the_persisted_link_before_returning_sn
         ))
         .await
         .unwrap();
-    let repair_engine =
-        plan_repair_restarted_child_engine(&tmp, &lifecycle, repair_child.clone());
+    let repair_engine = plan_repair_restarted_child_engine(&tmp, &lifecycle, repair_child.clone());
     let snapshot = repair_engine
         .start_linked_workspace_amendment(linked_workspace_target(
             WorkspaceType::Story,
@@ -607,7 +619,7 @@ async fn linked_workspace_restore_rejects_missing_target_record_and_inactive_pla
                     issue_id: "issue_0001".to_string(),
                     repository_id: "repository_0001".to_string(),
                     title: "Story 0002".to_string(),
-                aggregate_codebase: None,
+                    aggregate_codebase: None,
                 })
                 .unwrap()
                 .id
@@ -710,8 +722,7 @@ async fn linked_workspace_amendment_rejects_semantic_links_with_alternate_identi
             )
             .unwrap()
             .unwrap();
-        let expected_relation =
-            crate::product::models::WorkspaceSessionRelation::StoryAmendment;
+        let expected_relation = crate::product::models::WorkspaceSessionRelation::StoryAmendment;
         let (canonical_link_id, canonical_child_id) = linked_amendment_ids(
             &repair_child.id,
             &expected_relation,

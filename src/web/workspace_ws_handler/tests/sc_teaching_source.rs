@@ -27,8 +27,8 @@
 
 use super::sc_failure_driver_fixture::{
     author_start_count, evidence_entries, extract_source_body, failure_message,
-    markdown_missing_five_sections, only_chain_id, sha256_hex, start_run,
-    teaching_attempt_numbers, window_snapshot,
+    markdown_missing_five_sections, only_chain_id, sha256_hex, start_run, teaching_attempt_numbers,
+    window_snapshot,
 };
 use super::single_candidate_provider_run::{ProviderRunFixture, wait_for_single_candidate_phase};
 use super::*;
@@ -98,10 +98,7 @@ async fn sc_teaching_integration_compile_source_block_bytes_equal_failed_source(
         raw["status"], "available",
         "provider 原文必须已归档（可读回）"
     );
-    assert_eq!(
-        source["status"], "available",
-        "失败源必须已归档（可读回）"
-    );
+    assert_eq!(source["status"], "available", "失败源必须已归档（可读回）");
     let source_sha256 = source["sha256"].as_str().expect("durable source sha256");
     let source_bytes = source["bytes"].as_u64().expect("durable source bytes");
     assert_ne!(

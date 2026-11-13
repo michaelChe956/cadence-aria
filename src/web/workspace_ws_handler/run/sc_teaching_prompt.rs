@@ -17,12 +17,12 @@
 use super::sc_teaching_source::ScResolvedTeachingSource;
 use super::single_candidate_compile_preflight::{PreflightVerdict, TeachingPayload};
 use crate::product::planning_failure::PlanningFailureSet;
+use crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES;
 use crate::product::workspace_engine::single_candidate_structure_failure::author_structure_repair_prompt;
 use crate::product::workspace_engine::{
     PlanningCompileFailure, ScTeachingPromptError, ScTeachingSourceMetadata,
     build_work_item_plan_compile_reredrive_prompt,
 };
-use crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES;
 
 /// 审计用构造器名（**不进 `prompt_ref`**）：取各臂今日的 builder 名，
 /// 便于与既有 prompt 证据对照。
@@ -77,11 +77,7 @@ pub(super) fn prepare_compile_teaching_prompt(
         &source.text,
         &metadata,
     )?;
-    Ok(finish_sc_teaching_prompt(
-        text,
-        COMPILE_BUILDER_ID,
-        source,
-    ))
+    Ok(finish_sc_teaching_prompt(text, COMPILE_BUILDER_ID, source))
 }
 
 /// IR 臂：模板事实 + source 块（base）→ IR 尾段（指令段 + IDs 段 + 末尾输出
@@ -113,12 +109,8 @@ pub(super) fn prepare_structure_teaching_prompt(
     source: &ScResolvedTeachingSource,
 ) -> Result<ScPreparedTeachingPrompt, ScTeachingPromptError> {
     let metadata = source_metadata(source);
-    let text = author_structure_repair_prompt(
-        failure,
-        structure_failures,
-        &source.text,
-        &metadata,
-    )?;
+    let text =
+        author_structure_repair_prompt(failure, structure_failures, &source.text, &metadata)?;
     Ok(finish_sc_teaching_prompt(
         text,
         STRUCTURE_BUILDER_ID,
@@ -209,12 +201,12 @@ fn sha256_hex(text: &str) -> String {
 // RED 现状：facade 模块尚不存在 ⇒ 编译失败（E0433/E0432），这是设计中的 RED。
 #[cfg(test)]
 mod tests {
+    use super::super::sc_teaching_source::ScResolvedTeachingSource;
+    use super::super::single_candidate_compile_preflight::{PreflightVerdict, TeachingPayload};
     use super::{
         ScPreparedTeachingPrompt, ScTeachingPromptBudgetVerdict, prepare_compile_teaching_prompt,
         prepare_ir_teaching_prompt,
     };
-    use super::super::sc_teaching_source::ScResolvedTeachingSource;
-    use super::super::single_candidate_compile_preflight::{PreflightVerdict, TeachingPayload};
     use crate::product::work_item_plan_compiler::{IrFault, IrFaultKind, IrFaultLocator};
     use crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_PROMPT_MAX_BYTES;
     use crate::web::workspace_ws_types::ScTeachingSourceOrigin;
@@ -279,10 +271,13 @@ mod tests {
             source_line: Some(30),
             // 期望形态取 kind 的单一事实源（IrFaultKind::expected_shape），
             // 不手写、不猜；字段本身是 IrFault 的第 7 个真实字段。
-            expected_shape: IrFaultKind::UnknownRequirementRef.expected_shape().to_string(),
+            expected_shape: IrFaultKind::UnknownRequirementRef
+                .expected_shape()
+                .to_string(),
         };
         let failure_reasons = vec![
-            "unknown_requirement_ref: 第 30 行 task TASK-001 的引用 REQ-002 不在合法集合内".to_string(),
+            "unknown_requirement_ref: 第 30 行 task TASK-001 的引用 REQ-002 不在合法集合内"
+                .to_string(),
         ];
         let preflight = PreflightVerdict {
             ir_faults: vec![fault.clone()],
@@ -320,7 +315,10 @@ mod tests {
             prepared.prompt_bytes as usize, MAX,
             "最终全文必须恰好等于预算上限"
         );
-        assert_eq!(prepared.budget_verdict, ScTeachingPromptBudgetVerdict::Allowed);
+        assert_eq!(
+            prepared.budget_verdict,
+            ScTeachingPromptBudgetVerdict::Allowed
+        );
         assert!(
             prepared.text.contains(source.text.as_str()),
             "source 必须逐字完整在场"

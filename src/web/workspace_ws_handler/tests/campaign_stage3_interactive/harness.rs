@@ -311,10 +311,13 @@ pub(super) async fn campaign_stage3_fixture(
         SingleCandidatePhase::Approval,
         gate_refs,
     );
-    engine.update_artifact(ArtifactPayload::Markdown {
-        markdown: REP4_CANDIDATE.to_string(),
-        diff: None,
-    }).await.expect("fixture artifact write");
+    engine
+        .update_artifact(ArtifactPayload::Markdown {
+            markdown: REP4_CANDIDATE.to_string(),
+            diff: None,
+        })
+        .await
+        .expect("fixture artifact write");
     let artifact = engine.session.artifact.clone();
     let mut record = lifecycle
         .get_workspace_session(&engine.session().session_id)
@@ -389,7 +392,14 @@ impl CampaignStage3Harness {
                 crate::web::runtime::WebRuntime::new_fake(self.root.path().to_path_buf()),
             ),
             engine: self.engine.clone(),
-            run_context: ProviderRunContext::test_fixture(Arc::new(registry), self.engine.clone(), workspace_runs.clone(), self.session_id.clone(), self.app_paths.clone(), record),
+            run_context: ProviderRunContext::test_fixture(
+                Arc::new(registry),
+                self.engine.clone(),
+                workspace_runs.clone(),
+                self.session_id.clone(),
+                self.app_paths.clone(),
+                record,
+            ),
             outbound_tx: self.outbound_tx.clone(),
             session_id: self.session_id.clone(),
         }

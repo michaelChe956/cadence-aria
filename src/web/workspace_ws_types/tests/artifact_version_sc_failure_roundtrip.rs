@@ -47,10 +47,19 @@ fn artifact_version_roundtrips_with_flattened_sc_failure_repair_package() {
         "A4 载荷必须扁平在版本对象上，不得有 payload 包装层"
     );
     let wire = &json["sc_failure_repair_package"];
-    assert_eq!(wire["package_id"].as_str(), Some(package.package_id.as_str()));
+    assert_eq!(
+        wire["package_id"].as_str(),
+        Some(package.package_id.as_str())
+    );
     assert_eq!(wire["chain_id"].as_str(), Some(package.chain_id.as_str()));
-    assert_eq!(wire["session_id"].as_str(), Some(package.session_id.as_str()));
-    assert_eq!(wire["project_id"].as_str(), Some(package.project_id.as_str()));
+    assert_eq!(
+        wire["session_id"].as_str(),
+        Some(package.session_id.as_str())
+    );
+    assert_eq!(
+        wire["project_id"].as_str(),
+        Some(package.project_id.as_str())
+    );
     assert_eq!(wire["issue_id"].as_str(), Some(package.issue_id.as_str()));
     assert_eq!(wire["plan_id"].as_str(), Some(package.plan_id.as_str()));
     assert_eq!(
@@ -117,7 +126,11 @@ fn artifact_version_roundtrips_with_flattened_sc_failure_repair_package() {
         package.rounds.len(),
         "轮次数必须逐条保留"
     );
-    for (round, expected) in sc_failure_repair_package.rounds.iter().zip(package.rounds.iter()) {
+    for (round, expected) in sc_failure_repair_package
+        .rounds
+        .iter()
+        .zip(package.rounds.iter())
+    {
         assert_eq!(round.identity.round_id, expected.identity.round_id);
         assert_eq!(round.identity.run_ref, expected.identity.run_ref);
         assert_eq!(round.identity.node_id, expected.identity.node_id);
@@ -127,7 +140,10 @@ fn artifact_version_roundtrips_with_flattened_sc_failure_repair_package() {
             round.identity.workspace_session_id,
             expected.identity.workspace_session_id
         );
-        assert_eq!(round.identity.round_ordinal, expected.identity.round_ordinal);
+        assert_eq!(
+            round.identity.round_ordinal,
+            expected.identity.round_ordinal
+        );
         assert_eq!(round.identity.provider, expected.identity.provider);
         assert_eq!(round.launch_state, expected.launch_state);
         assert_eq!(round.failure_class, expected.failure_class);

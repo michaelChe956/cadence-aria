@@ -121,11 +121,14 @@ async fn draft_recovery_load_failure_stops_with_error_frame_zero_start() {
     );
     {
         let mut engine = fixture.engine.lock().await;
-        engine.update_artifact(case_outline_artifact(
-            vec![outline.clone()],
-            &fixture.story_id,
-            &fixture.design_id,
-        )).await.expect("fixture artifact write");
+        engine
+            .update_artifact(case_outline_artifact(
+                vec![outline.clone()],
+                &fixture.story_id,
+                &fixture.design_id,
+            ))
+            .await
+            .expect("fixture artifact write");
         engine.pending_revision_context =
             Some("P5内存残留反馈（不得进入draft fresh输入）".to_string());
     }
@@ -276,11 +279,14 @@ async fn draft_provider_start_failure_stops_without_error_frame() {
     );
     {
         let mut engine = fixture.engine.lock().await;
-        engine.update_artifact(case_outline_artifact(
-            vec![outline.clone()],
-            &fixture.story_id,
-            &fixture.design_id,
-        )).await.expect("fixture artifact write");
+        engine
+            .update_artifact(case_outline_artifact(
+                vec![outline.clone()],
+                &fixture.story_id,
+                &fixture.design_id,
+            ))
+            .await
+            .expect("fixture artifact write");
     }
     case_seed_serial_business(&fixture, &outline);
     case_seed_fresh_recovery(
@@ -360,11 +366,14 @@ async fn draft_structured_output_parse_failure_stops_with_error_frame() {
     );
     {
         let mut engine = fixture.engine.lock().await;
-        engine.update_artifact(case_outline_artifact(
-            vec![outline.clone()],
-            &fixture.story_id,
-            &fixture.design_id,
-        )).await.expect("fixture artifact write");
+        engine
+            .update_artifact(case_outline_artifact(
+                vec![outline.clone()],
+                &fixture.story_id,
+                &fixture.design_id,
+            ))
+            .await
+            .expect("fixture artifact write");
     }
     case_seed_serial_business(&fixture, &outline);
     case_seed_fresh_recovery(
@@ -420,11 +429,14 @@ async fn draft_candidate_parse_failure_stops_with_error_frame() {
     );
     {
         let mut engine = fixture.engine.lock().await;
-        engine.update_artifact(case_outline_artifact(
-            vec![outline.clone()],
-            &fixture.story_id,
-            &fixture.design_id,
-        )).await.expect("fixture artifact write");
+        engine
+            .update_artifact(case_outline_artifact(
+                vec![outline.clone()],
+                &fixture.story_id,
+                &fixture.design_id,
+            ))
+            .await
+            .expect("fixture artifact write");
     }
     case_seed_serial_business(&fixture, &outline);
     case_seed_fresh_recovery(

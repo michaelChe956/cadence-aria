@@ -39,9 +39,7 @@ fn session_fixture() -> (tempfile::TempDir, LifecycleStore, WorkspaceSessionReco
 }
 
 /// 旧 operation（Unknown）+ root 当前镜像（node/seq/native）的等待态。
-fn waiting_recovery_with_old_operation(
-    record: &WorkspaceSessionRecord,
-) -> LcResumeRecoveryRecord {
+fn waiting_recovery_with_old_operation(record: &WorkspaceSessionRecord) -> LcResumeRecoveryRecord {
     let mut old_operation = LcFreshOperationResult {
         operation_id: "op_old_0001".to_string(),
         state: LcFreshOperationState::Unknown,
@@ -195,7 +193,10 @@ fn fresh_operation_binding_same_operation_replay_keeps_record_bytes() {
         "Replay 不是新受理，当前镜像不得被清"
     );
     assert_eq!(current.fresh_role_run_seq, Some(7));
-    assert_eq!(current.fresh_native_session_id.as_deref(), Some(OLD_NATIVE_ID));
+    assert_eq!(
+        current.fresh_native_session_id.as_deref(),
+        Some(OLD_NATIVE_ID)
+    );
     assert_eq!(
         current.fresh_operations.len(),
         1,

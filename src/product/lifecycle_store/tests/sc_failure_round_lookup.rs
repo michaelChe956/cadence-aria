@@ -104,8 +104,13 @@ fn sc_failure_round_lookup_finds_bound_round_after_store_rebuild() {
         first_handle.role_run_seq < second_handle.role_run_seq,
         "真实 begin 必须分配递增 seq"
     );
-    let (first_chain, first_round) =
-        chain_and_round(&session_id, BUSINESS_KEY, NODE_ID, &first_handle, ProviderName::Codex);
+    let (first_chain, first_round) = chain_and_round(
+        &session_id,
+        BUSINESS_KEY,
+        NODE_ID,
+        &first_handle,
+        ProviderName::Codex,
+    );
     let (second_chain, second_round) = chain_and_round(
         &session_id,
         BUSINESS_KEY_SECOND,
@@ -140,7 +145,12 @@ fn sc_failure_round_lookup_finds_bound_round_after_store_rebuild() {
     let misses: [(&str, &str, &String, u32); 3] = [
         (BUSINESS_KEY, NODE_ID, &second_round.node_id, 1),
         (BUSINESS_KEY, NODE_ID, &first_round.node_id, 2),
-        ("business_key_missing_0003", NODE_ID, &first_round.node_id, 1),
+        (
+            "business_key_missing_0003",
+            NODE_ID,
+            &first_round.node_id,
+            1,
+        ),
     ];
     for (business_key, original_node_id, node_id, ordinal) in misses {
         assert!(
@@ -174,8 +184,13 @@ fn sc_failure_round_lookup_reports_corrupt_candidate_log() {
     let scope = scope_of(&session_id);
 
     let handle = begin_with(&store, &session_id, ProviderName::Codex);
-    let (chain, round) =
-        chain_and_round(&session_id, BUSINESS_KEY, NODE_ID, &handle, ProviderName::Codex);
+    let (chain, round) = chain_and_round(
+        &session_id,
+        BUSINESS_KEY,
+        NODE_ID,
+        &handle,
+        ProviderName::Codex,
+    );
     let bound = store
         .append_sc_failure_evidence(
             &chain,
@@ -220,10 +235,20 @@ fn sc_failure_round_lookup_rejects_ambiguous_matches() {
 
     let first_handle = begin_with(&store, &session_id, ProviderName::Codex);
     let retry_handle = begin_with(&store, &session_id, ProviderName::ClaudeCode);
-    let (first_chain, first_round) =
-        chain_and_round(&session_id, BUSINESS_KEY, NODE_ID, &first_handle, ProviderName::Codex);
-    let (retry_chain, retry_round) =
-        chain_and_round(&session_id, BUSINESS_KEY, NODE_ID, &retry_handle, ProviderName::ClaudeCode);
+    let (first_chain, first_round) = chain_and_round(
+        &session_id,
+        BUSINESS_KEY,
+        NODE_ID,
+        &first_handle,
+        ProviderName::Codex,
+    );
+    let (retry_chain, retry_round) = chain_and_round(
+        &session_id,
+        BUSINESS_KEY,
+        NODE_ID,
+        &retry_handle,
+        ProviderName::ClaudeCode,
+    );
     bind(&store, &first_chain, &first_round);
     bind(&store, &retry_chain, &retry_round);
 

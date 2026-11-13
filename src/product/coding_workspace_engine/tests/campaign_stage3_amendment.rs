@@ -113,10 +113,13 @@ async fn campaign_confirmed_plan_session(budget: u32) -> (TempDir, LifecycleStor
         SingleCandidatePhase::Approval,
         RunPolicy::Interactive,
     );
-    engine.update_artifact(ArtifactPayload::Markdown {
-        markdown: campaign_gate_candidate(),
-        diff: None,
-    }).await.expect("fixture artifact write");
+    engine
+        .update_artifact(ArtifactPayload::Markdown {
+            markdown: campaign_gate_candidate(),
+            diff: None,
+        })
+        .await
+        .expect("fixture artifact write");
     let artifact = engine.session.artifact.clone();
     let mut record = lifecycle
         .get_workspace_session(&engine.session().session_id)

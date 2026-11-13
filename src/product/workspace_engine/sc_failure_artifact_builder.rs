@@ -174,7 +174,8 @@ pub(crate) fn build_sc_failure_repair_package(
                 ),
             ));
         }
-        let (failure_class, blocking_reasons, repair_instructions, raw, mut source) = match &failure {
+        let (failure_class, blocking_reasons, repair_instructions, raw, mut source) = match &failure
+        {
             Some(facts) => (
                 facts.failure_class.clone(),
                 facts.blocking_reasons.clone(),
@@ -188,7 +189,13 @@ pub(crate) fn build_sc_failure_repair_package(
                     terminal.terminal_reason.as_str(),
                     round.round_id.as_str(),
                 );
-                (None, Vec::new(), Vec::new(), undelivered.clone(), undelivered)
+                (
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    undelivered.clone(),
+                    undelivered,
+                )
             }
         };
         if let ScEvidenceRef::Available { .. } = source {
@@ -258,11 +265,8 @@ pub(crate) fn build_sc_failure_repair_package(
     // 交付）说明终局选错了物理轮，直接 reject，不靠 Missing 掩盖矛盾。
     let last_provider_output = match &terminal.last_physical_round_id {
         Some(round_id) => {
-            let state = resolved_launch_state(
-                evidence,
-                &terminal.launch_observations,
-                round_id.as_str(),
-            )?;
+            let state =
+                resolved_launch_state(evidence, &terminal.launch_observations, round_id.as_str())?;
             if state != ScRoundLaunchState::Started {
                 return Err(error(
                     CODE_ROUND_EVIDENCE_INCONSISTENT,
@@ -274,7 +278,9 @@ pub(crate) fn build_sc_failure_repair_package(
             }
             match failure_for(evidence, round_id.as_str()) {
                 Some(facts) => facts.raw.clone(),
-                None => undelivered_ref(&state, terminal.terminal_reason.as_str(), round_id.as_str()),
+                None => {
+                    undelivered_ref(&state, terminal.terminal_reason.as_str(), round_id.as_str())
+                }
             }
         }
         None => ScEvidenceRef::Missing {
@@ -407,7 +413,9 @@ fn check_chain_scope(
     Ok(())
 }
 
-fn terminal_facts(evidence: &ScFailureEvidenceRead) -> Result<TerminalFacts, ScFailureEvidenceError> {
+fn terminal_facts(
+    evidence: &ScFailureEvidenceRead,
+) -> Result<TerminalFacts, ScFailureEvidenceError> {
     evidence
         .entries
         .iter()
@@ -528,7 +536,9 @@ fn resolved_launch_state(
         None => Err(error(
             CODE_LAUNCH_STATE_UNKNOWN,
             Some(round_id.to_string()),
-            format!("终局没有轮 {round_id} 的启动观察，且该轮没有任何交付事实，启动状态未知，不能入包"),
+            format!(
+                "终局没有轮 {round_id} 的启动观察，且该轮没有任何交付事实，启动状态未知，不能入包"
+            ),
         )),
     }
 }
@@ -634,7 +644,11 @@ pub(super) fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-fn error(code: &str, round_id: Option<String>, detail: impl Into<String>) -> ScFailureEvidenceError {
+fn error(
+    code: &str,
+    round_id: Option<String>,
+    detail: impl Into<String>,
+) -> ScFailureEvidenceError {
     ScFailureEvidenceError {
         code: code.into(),
         step: STEP.into(),
