@@ -587,3 +587,44 @@ async fn install_registers_install_bin_dir_into_path_overlay() {
     );
     crate::cross_cutting::path_overlay::clear();
 }
+
+/// npm 计划必须带 `--allow-scripts=<pkg>`（npm ≥12 不带它**不执行**包的
+/// install 脚本 —— `@anthropic-ai/claude-code` 有 `postinstall: node
+/// install.cjs`；npm 10/11 把它当未知配置忽略 ⇒ 兼容），且安装子进程的
+/// PATH **前插**目标前缀的 bin（magpie `updateEnv` 思路）。
+#[test]
+fn npm_plan_carries_allow_scripts_and_prefix_bin_on_path() {
+    struct NoopRunner;
+    #[async_trait::async_trait]
+    impl BoundedCommandRunner for NoopRunner {
+        async fn run(
+            &self,
+            _request: BoundedCommandRequest,
+        ) -> Result<BoundedCommandResult, BoundedCommandError> {
+            unreachable!("仅构造请求，不执行");
+        }
+    }
+
+    let row = row_for_wire("claude_code").expect("claude row");
+    let prefix = Path::new("/home/dev/.npm-global");
+    let plan = npm_install_plan(row, None, REGISTRY, prefix);
+    assert!(
+        plan.argv
+            .contains(&"--allow-scripts=@anthropic-ai/claude-code".to_string()),
+        "npm ≥12 需要 --allow-scripts=<pkg> 才会执行包的 install 脚本: {plan:?}"
+    );
+
+    let runner = ProviderInstallRunner::new(
+        Arc::new(NoopRunner),
+        PathBuf::from("/tmp"),
+        Duration::from_secs(1),
+    );
+    let request = runner.request_for(&plan);
+    let path = request.environment.get("PATH").expect("PATH");
+    let entries: Vec<PathBuf> = std::env::split_paths(path).collect();
+    assert_eq!(
+        entries.first(),
+        Some(&prefix.join("bin")),
+        "安装子进程的 PATH 必须前插目标前缀的 bin: {path}"
+    );
+}
