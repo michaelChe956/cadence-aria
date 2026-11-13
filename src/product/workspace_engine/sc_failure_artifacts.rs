@@ -571,3 +571,10 @@ mod publication_fixture;
 #[cfg(test)]
 #[path = "tests/sc_failure_publication.rs"]
 mod publication_tests;
+
+/// P16 消费者侧公开视图用例（发布后从 durable 状态重建 → 公开 session_state；
+/// pending / 坏回执不外泄）。独立文件承载容量片，与 publisher 用例共用同一份
+/// 真实 fixture（super::publication_fixture）与 engine 助手。
+#[cfg(test)]
+#[path = "tests/sc_failure_publication_rebuild.rs"]
+mod publication_rebuild_tests;
