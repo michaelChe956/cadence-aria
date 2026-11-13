@@ -1027,7 +1027,9 @@ mod tests {
                 }
                 [init, dot] if init == "init" && dot == "." => "Indexed 1 file\n".to_string(),
                 [sync, dot] if sync == "sync" && dot == "." => "Synced 1 file\n".to_string(),
-                [files, json] if files == "files" && json == "--json" => {
+                [files, json, no_metadata]
+                    if files == "files" && json == "--json" && no_metadata == "--no-metadata" =>
+                {
                     // Return a file under every direct child of the aggregate
                     // root so member coverage and cross-member queries succeed.
                     let mut entries = Vec::new();
