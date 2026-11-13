@@ -73,7 +73,9 @@ pub(crate) fn latest_review_verdict_from_node_details(
 /// 返回值语义——返回值仍带 key 供呈现/排除引用）。
 fn verdict_without_finding_keys(value: &serde_json::Value) -> serde_json::Value {
     let mut value = value.clone();
-    if let Some(findings) = value.get_mut("findings").and_then(|findings| findings.as_array_mut())
+    if let Some(findings) = value
+        .get_mut("findings")
+        .and_then(|findings| findings.as_array_mut())
     {
         for finding in findings {
             if let Some(object) = finding.as_object_mut() {
@@ -86,7 +88,8 @@ fn verdict_without_finding_keys(value: &serde_json::Value) -> serde_json::Value 
 
 /// 恢复/刷新路径的唯一派生入口：durable 节点详情 → 最新 review verdict，
 /// 再按该会话 durable 已处置清单做**平台裁决**（REQ-WSC-14：owner 排除过的
-/// 事实不得因重建而复活成 actionable）。
+/// 事实不得因重建而复活成 actionable），最后套 B1 的 SC 会话有效投影
+/// （窄例外在历史兼容写回之后生效，同样不落 durable）。
 pub(crate) fn latest_review_verdict_for_session(
     lifecycle_store: &LifecycleStore,
     session: &WorkspaceSession,
@@ -101,11 +104,13 @@ pub(crate) fn latest_review_verdict_for_session(
     )
     .or_else(|| latest_review_verdict_from_messages(&session.messages, &session.workspace_type));
     verdict.map(|verdict| {
-        crate::product::workspace_engine::review::normalize_review_verdict_with_store(
-            lifecycle_store,
-            &session.session_id,
-            verdict,
-        )
+        let normalized =
+            crate::product::workspace_engine::review::normalize_review_verdict_with_store(
+                lifecycle_store,
+                &session.session_id,
+                verdict,
+            );
+        WorkspaceEngine::apply_sc_effective_review_verdict_for_session(session, normalized)
     })
 }
 
@@ -145,4 +150,3 @@ pub(crate) fn review_complete_event_from_verdict(
         structured_output_diagnostic: verdict.structured_output_diagnostic.clone(),
     }
 }
-

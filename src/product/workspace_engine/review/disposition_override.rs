@@ -15,11 +15,22 @@
 //!
 //! **不落 durable**：durable 只保 provider 原始 verdict + 已处置清单两事实；
 //! 归一结果是读路径投影（刷新后由同一清单重新算出同一结果）。
+//!
+//! 3. **B1 · SC 会话有效投影（REQ-WSC-12 窄例外）**：可信会话为
+//!    WorkItemPlan 单候选时，`severity=Suggestion` 且 category 显式非契约、
+//!    `class_hint=Repairable` 的 finding 在内存有效视图投影为 advisory——
+//!    与既有「disposition 压过 severity」互为镜像（severity 压过
+//!    class_hint），契约类/强严重度/缺或未知 category 一律不适用；
+//!    同样不落 durable（live 与历史刷新同源，见
+//!    `WorkspaceEngine::apply_sc_effective_review_verdict_for_session`）。
 
 use std::collections::BTreeSet;
 
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::HumanDispositionRecord;
+use crate::product::models::{HumanDispositionRecord, WorkspaceType};
+use crate::product::work_item_plan_policy::{
+    FindingClassHint, ReviewFindingCategory, WorkItemPlanFlowKind,
+};
 use crate::web::workspace_ws_types::review::{
     ReviewFinding, ReviewFindingDisposition, ReviewFindingSeverity, ReviewVerdict,
     ReviewVerdictType, WorkItemPlanReviewVerdict,
@@ -156,6 +167,44 @@ pub(crate) fn normalize_review_verdict_with_store(
     verdict
 }
 
+/// B1（REQ-WSC-12 窄例外 · design §3）私有谓词：这条 finding 是否命中
+/// 「SC 会话内建议级非契约项」形状。全部条件须同时成立：
+///
+/// - `severity = Suggestion`（must_fix / blocking 不命中）；
+/// - `class_hint = Repairable`（显式，缺或其它值不命中）；
+/// - category **显式**属 `Completeness` / `VerificationUnattributable` / `Other`
+///   （缺失或未知不纳入；契约类 `contract_gap` / `self_contradiction` 与
+///   `scope_conflict` 保持 fail-closed）；
+/// - verdict 为 `Pass` / `Revise` 且**无** `structured_output_diagnostic`
+///   （原生 NeedsHuman 与机械诊断不走本例外）；
+/// - finding 无 `machine_repair` / `owner_question` / `owner_options`。
+///
+/// 命中只改 disposition 的有效视图；`severity` / `message` / `evidence` /
+/// `required_action` / `finding_key` 与 raw durable 均不动。
+///
+/// **不叫 `requires_closure`**：该词属已归档 `close-contract-findings-before-pass`
+/// 的跨作用域全口径谓词；本谓词只服务 SC 会话有效投影的窄口径。
+fn is_sc_non_contract_suggestion(verdict: &ReviewVerdict, finding: &ReviewFinding) -> bool {
+    matches!(finding.severity, ReviewFindingSeverity::Suggestion)
+        && matches!(finding.class_hint, Some(FindingClassHint::Repairable))
+        && matches!(
+            finding.category,
+            Some(
+                ReviewFindingCategory::Completeness
+                    | ReviewFindingCategory::VerificationUnattributable
+                    | ReviewFindingCategory::Other
+            )
+        )
+        && matches!(
+            verdict.verdict,
+            ReviewVerdictType::Pass | ReviewVerdictType::Revise
+        )
+        && verdict.structured_output_diagnostic.is_none()
+        && finding.machine_repair.is_none()
+        && finding.owner_question.is_none()
+        && finding.owner_options.is_none()
+}
+
 impl super::super::WorkspaceEngine {
     /// 该会话当前生效的已处置事实身份集合（读失败＝空集：不误降级，模型
     /// 报什么就按什么处理——fail-safe 方向与 disposition 缺失一致）。
@@ -182,6 +231,8 @@ impl super::super::WorkspaceEngine {
         let persisted = serde_json::to_value(&verdict).unwrap_or(serde_json::Value::Null);
         let _ = self.persist_review_verdict(node_id, persisted).await;
         let verdict = self.apply_session_owner_dispositions(verdict);
+        // B1：owner 裁决之后再套 SC 会话有效视图（窄例外；见下）。
+        let verdict = self.apply_sc_effective_review_verdict(verdict);
         self.latest_review_verdict = Some(verdict.clone());
         verdict
     }
@@ -193,6 +244,47 @@ impl super::super::WorkspaceEngine {
     ) -> ReviewVerdict {
         let excluded = self.session_human_disposition_keys();
         normalize_review_verdict_for_dispositions(&mut verdict, &excluded);
+        verdict
+    }
+
+    /// B1：SC 会话有效视图（REQ-WSC-12 窄例外）——服务端可信会话确认为
+    /// WorkItemPlan 单候选时，命中 `is_sc_non_contract_suggestion` 的 finding
+    /// 在**内存有效视图**投影为 advisory（不进必关闭清单、不单独驱返修）。
+    /// severity / message / evidence / required_action / finding_key 与 durable
+    /// 原始记录一律不动、不回写。
+    pub(crate) fn apply_sc_effective_review_verdict(
+        &self,
+        verdict: ReviewVerdict,
+    ) -> ReviewVerdict {
+        Self::apply_sc_effective_review_verdict_for_session(&self.session, verdict)
+    }
+
+    /// live（`finalize_review_verdict`）与历史刷新（`latest_review_verdict_for_session`）
+    /// 共用的投影体：同一谓词、同一降级、同一归一——两个入口不得各自表述。
+    /// 历史路径在反序列化/历史兼容写回**之后**调用；投影结果只进内存有效
+    /// 视图，绝不写回 durable。
+    pub(crate) fn apply_sc_effective_review_verdict_for_session(
+        session: &super::super::WorkspaceSession,
+        mut verdict: ReviewVerdict,
+    ) -> ReviewVerdict {
+        if session.workspace_type != WorkspaceType::WorkItemPlan
+            || session.flow_kind != WorkItemPlanFlowKind::SingleCandidate
+        {
+            return verdict;
+        }
+        let hits: Vec<bool> = verdict
+            .findings
+            .iter()
+            .map(|finding| is_sc_non_contract_suggestion(&verdict, finding))
+            .collect();
+        for (finding, hit) in verdict.findings.iter_mut().zip(hits) {
+            if hit {
+                finding.disposition = Some(ReviewFindingDisposition::Advisory);
+            }
+        }
+        // 与 owner 裁决同一归一面（不另立第二口径）：全非 actionable 的
+        // revise 归一回 pass——建议级条目不得单独驱作者返修。
+        renormalize_verdict_after_disposition_change(&mut verdict);
         verdict
     }
 }
