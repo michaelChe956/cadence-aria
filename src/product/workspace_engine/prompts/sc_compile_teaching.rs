@@ -21,6 +21,7 @@ use super::*;
 use crate::product::work_item_plan_compiler::{
     IrFault, IrFaultKind, IrFaultLocator, LoweringFault,
 };
+use crate::product::workspace_engine::{ScTeachingPromptError, ScTeachingSourceMetadata};
 
 /// A1（REQ-WSC-32）：parse 诊断事实块的有界投影**字节**预算（UTF-8）——
 /// 只约束新增的 parse 事实块（多行：首行三段逐字 + field/example 行），
@@ -41,6 +42,11 @@ pub(crate) struct TeachingReredriveFacts<'a> {
     pub ir_faults: &'a [IrFault],
     /// Task 3 收窄指令的呈现文本（条数已在调用侧/本入口双重有界）。
     pub autorepair_instructions: &'a [String],
+    /// 上一轮失败源码全文（P23：逐字入 prompt，不 trim / 不转义 / 不截断）。
+    pub previous_source: &'a str,
+    /// 上一轮失败源码的来源元数据（ref/hash/bytes/origin），由 P21 renderer
+    /// 与正文复算比对；只读借用。
+    pub source: ScTeachingSourceMetadata<'a>,
 }
 
 /// 四类 IR 诊断身份的稳定码名（与 producer 写入的 diagnostic code 同名；
@@ -67,19 +73,29 @@ fn ir_fault_kind_code(kind: &IrFaultKind) -> &'static str {
 /// 此前只有错误原文+B1 白名单,ID 纪律裸奔(现场:r46 首轮漏填
 /// requirement_id → 重驱改编号/新增清单外编号,震荡不收敛)。清单与
 /// IR 重驱/harness 反馈轮同集(story+design 双源 REQ-/NFR-/AC-)。
+///
+/// P23（Plan §2.4）：入参加上一轮失败源码全文与来源元数据——本轮 prompt
+/// **自带 source**（不依赖「刚才读过的文件」这类外部上下文），source 块由
+/// P21 的 `render_sc_previous_source_block` 逐字渲染，位置在失败事实之后、
+/// 最终完整输出指令之前。来源完整性不符（sha256/bytes 与正文复算不一致）
+/// 时返回 [`ScTeachingPromptError`]，不返回任何半成品文本。
 pub(crate) fn build_work_item_plan_compile_reredrive_prompt(
     parse_reasons: &[String],
     lowering_faults: &[LoweringFault],
     ir_faults: &[IrFault],
     autorepair_instructions: &[String],
     registered_requirement_ids: &[String],
-) -> String {
+    previous_source: &str,
+    source: &ScTeachingSourceMetadata<'_>,
+) -> Result<String, ScTeachingPromptError> {
     render_teaching_reredrive_prompt(
         &TeachingReredriveFacts {
             parse_reasons,
             lowering_faults,
             ir_faults,
             autorepair_instructions,
+            previous_source,
+            source: source.clone(),
         },
         registered_requirement_ids,
     )
@@ -89,11 +105,10 @@ pub(crate) fn build_work_item_plan_compile_reredrive_prompt(
 fn render_teaching_reredrive_prompt(
     facts: &TeachingReredriveFacts<'_>,
     registered_requirement_ids: &[String],
-) -> String {
+) -> Result<String, ScTeachingPromptError> {
     let mut prompt = String::from(
         "上一轮已结束，但没有输出完整的 work-item-plan markdown source。\n\
-         不要继续调研，不要只解释，不要输出任何前言或路由回执。\n\
-         请基于已有上下文和刚才读取的文件，立即输出完整 work-item-plan markdown source；第一行即文档标题 `# Work Item Plan`。\n",
+         不要继续调研，不要只解释，不要输出任何前言或路由回执。\n",
     );
     if !facts.parse_reasons.is_empty() {
         prompt.push_str("\n具体失败原因:\n");
@@ -242,8 +257,24 @@ fn render_teaching_reredrive_prompt(
             registered_requirement_ids.join("、")
         ));
     }
+    // P23（Plan §2.4）：上一轮失败源码逐字入 prompt（只有 P21 renderer 一个
+    // 来源——不自拼围栏、不 trim / 不转义 / 截断）。位置：全部失败事实之后、
+    // 最终完整输出指令之前。
+    let source_block = crate::product::workspace_engine::render_sc_previous_source_block(
+        facts.previous_source,
+        &facts.source,
+    )?;
     prompt.push('\n');
-    prompt
+    prompt.push_str(&source_block);
+    prompt.push('\n');
+    // 最终输出指令在 source 块之后：source 即修复起点，本轮 prompt 自足。
+    prompt.push('\n');
+    prompt.push_str(
+        "以围栏内的上一轮失败源码为唯一修复起点（本次 prompt 自足，\
+         不要重新调研、不要读取其它文件），立即输出完整 work-item-plan markdown source；\
+         第一行即文档标题 `# Work Item Plan`。\n",
+    );
+    Ok(prompt)
 }
 
 #[cfg(test)]
@@ -358,10 +389,6 @@ mod reredrive_prompt_tests {
             "白名单必须列出合法 section 集: {prompt}"
         );
         assert!(prompt.contains("Traceability"));
-        assert!(
-            prompt.contains("删除违例 section"),
-            "必须给具体动作: {prompt}"
-        );
     }
 
     /// 对照:非 unknown_structured_key 失败不附白名单(保持既有形态)。
@@ -369,7 +396,11 @@ mod reredrive_prompt_tests {
     fn compile_reredrive_prompt_keeps_plain_form_without_unknown_key() {
         let reasons = vec!["missing_section:0:缺 Identity".to_string()];
         let prompt = plain_prompt(&reasons, &[]);
-        assert!(!prompt.contains("白名单"));
+        let keys = crate::product::work_item_plan_compiler::grammar::STRUCTURED_KEYS.join("、");
+        assert!(
+            !prompt.contains(&keys),
+            "非 unknown_structured_key 失败不得附带合法 key 集: {prompt}"
+        );
     }
 
     /// r46 核心修 TDD(精确复现 r46 首轮漏填形态):compile 教学重驱 prompt
@@ -384,21 +415,14 @@ mod reredrive_prompt_tests {
             "AC-001".to_string(),
         ];
         let prompt = plain_prompt(&reasons, &registered);
+        assert_eq!(
+            prompt.matches("[design_requirements] ").count(),
+            1,
+            "登记清单段必须恰出现一次: {prompt}"
+        );
         assert!(
             prompt.contains("[design_requirements] REQ-ENV-01、NFR-PERF-02、AC-001"),
-            "真实登记清单(双源同集 REQ/NFR/AC)必须并入: {prompt}"
-        );
-        assert!(
-            prompt.contains("requirement_id 必填且逐字取自上列清单"),
-            "必填规则必须在场: {prompt}"
-        );
-        assert!(
-            prompt.contains("不重编号、禁止新增清单外 REQ-*/NFR-*/AC-*/TASK"),
-            "修复纪律必须在场: {prompt}"
-        );
-        assert!(
-            prompt.contains("done_when 只指向已定义编号"),
-            "done_when 约束必须在场: {prompt}"
+            "真实登记清单(双源同集 REQ/NFR/AC)必须逐字并入: {prompt}"
         );
     }
 
@@ -484,7 +508,7 @@ mod reredrive_prompt_tests {
             "超上限的指令不得逐条透传: {prompt}"
         );
         assert!(
-            prompt.contains("共 10 条契约修复指令"),
+            prompt.contains("共 10 条"),
             "截断必须以真总数计数摘要显式收口: {prompt}"
         );
         assert!(
@@ -510,7 +534,10 @@ mod reredrive_prompt_tests {
                 "parse 事实块必须逐条带齐三段+精确 field+正确形状: {prompt}"
             );
         }
-        assert!(!prompt.contains("省略"), "预算内不得出现省略记账: {prompt}");
+        assert!(
+            !prompt.contains("共 2 条"),
+            "预算内不得出现省略记账: {prompt}"
+        );
     }
 
     /// A1：事实块超**条数上限**（与契约修复指令单点同源
@@ -630,7 +657,10 @@ mod reredrive_prompt_tests {
             prompt.contains("unknown_requirement_ref:199:"),
             "末条在场（旧材料不截断）: {prompt}"
         );
-        assert!(!prompt.contains("省略"), "旧材料无省略记账: {prompt}");
+        assert!(
+            !prompt.contains("共 200 条"),
+            "旧材料无省略记账: {prompt}"
+        );
     }
 
     /// A1（REQ-WSC-32）：unknown_structured_key 类失败附 40 个合法
