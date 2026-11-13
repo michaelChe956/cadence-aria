@@ -424,7 +424,9 @@ pub(super) fn close_sc_teaching_delivered(lifecycle: &LifecycleStore, session_id
 
 /// 教学重驱共用的轮绑定：沿用原轮链身份（同一 scope/business_key/原节点），
 /// 教学轮是新物理 provider run（新 handle + role_run_seq）。
-/// 失败 ⇒ 持久化终态 Failed 后以 Message 上浮（与既有各臂的收口同形）。
+/// 返回 **typed 启动分类**（Ready/Completed/Waiting）：只有链身份/存储级失败才
+/// 持久化终态 Failed 并以 Message 上浮（fail-closed、零启动）——Waiting 不得被
+/// 当成启动失败，Completed 不得重新 claim。
 #[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同本文件先例）。
 pub(super) fn begin_sc_teaching_reredrive_run(
     lifecycle: &LifecycleStore,
@@ -433,7 +435,7 @@ pub(super) fn begin_sc_teaching_reredrive_run(
     previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
     node_id: &str,
     author_provider: &ProviderName,
-) -> Result<ScBoundProviderRound, SingleCandidateProviderRunError> {
+) -> Result<super::sc_failure_transport::ScRoundEntry, SingleCandidateProviderRunError> {
     match super::sc_failure_transport::begin_sc_teaching_round(
         lifecycle,
         original,
@@ -441,7 +443,10 @@ pub(super) fn begin_sc_teaching_reredrive_run(
         node_id,
         author_provider,
     ) {
-        Ok(bound) => Ok(bound),
+        // Ready/Completed/Waiting 都是**已成立**的分类，交调用方按类收口：Waiting
+        // 走真实 CAS 等待（不落 Failed/A4），Completed 复用 durable raw（不再
+        // claim、不再发提示词）。只有链身份/存储级失败才落 Failed。
+        Ok(entry) => Ok(entry),
         Err(failure) => {
             engine.persist_single_candidate_terminal_phase(SingleCandidatePhase::Failed);
             Err(SingleCandidateProviderRunError::Message(format!("{failure}")))
@@ -505,24 +510,10 @@ pub(super) async fn drive_compile_teaching_reredrive(
     // 启动前复验（硬前置）：失败源引用/摘要与 prompt 正文摘要都必须与冻结
     // 请求一致；任一不符 ⇒ 零启动（不发 prompt 事件、不起 provider）。
     verify_sc_teaching_start(lifecycle, &original.chain, verify)?;
-    engine
-        .emit_execution_event(
-            ProviderExecutionEvent {
-                event_id: format!("{node_id}_prompt_{event_key}"),
-                kind: ProviderExecutionEventKind::Output,
-                status: ProviderExecutionEventStatus::Started,
-                title: event_title.to_string(),
-                detail: Some(event_detail.to_string()),
-                command: None,
-                cwd: None,
-                output: Some(reredrive_prompt.to_string()),
-                exit_code: None,
-            },
-            Some(node_id.to_string()),
-            Some(author_provider.clone()),
-        )
-        .await;
-    let bound = begin_sc_teaching_reredrive_run(
+    // P08 replay 安全：先分类再发事件/启动——Ready 才真实启动；Completed 复用
+    // durable raw（不重发「已发送提示词」、不记 `Sent`）；Waiting 走真实 CAS 等待
+    // （不当启动失败、不落 Failed/A4）。分类是 Ok 值，只有链/存储失败才 Err。
+    let entry = begin_sc_teaching_reredrive_run(
         lifecycle,
         engine,
         original,
@@ -530,8 +521,28 @@ pub(super) async fn drive_compile_teaching_reredrive(
         node_id,
         author_provider,
     )?;
-    let delivery = super::sc_failure_transport::drive_single_candidate_reredrive(
+    if entry.is_ready() {
+        engine
+            .emit_execution_event(
+                ProviderExecutionEvent {
+                    event_id: format!("{node_id}_prompt_{event_key}"),
+                    kind: ProviderExecutionEventKind::Output,
+                    status: ProviderExecutionEventStatus::Started,
+                    title: event_title.to_string(),
+                    detail: Some(event_detail.to_string()),
+                    command: None,
+                    cwd: None,
+                    output: Some(reredrive_prompt.to_string()),
+                    exit_code: None,
+                },
+                Some(node_id.to_string()),
+                Some(author_provider.clone()),
+            )
+            .await;
+    }
+    let (delivery, launched) = super::sc_failure_round_entry::drive_sc_teaching_entry(
         engine,
+        lifecycle,
         launch,
         Arc::clone(provider_for_run),
         run_cancel,
@@ -540,13 +551,14 @@ pub(super) async fn drive_compile_teaching_reredrive(
         author_provider,
         reredrive_prompt,
         repository_path,
-        &bound,
-        lifecycle,
+        entry,
         Some(attempt),
     )
     .await?;
-    // 真的发出之后才记 `Sent`（预算拒绝/仅装配永不冒充已发送）。
-    record_sc_teaching_prompt_sent(lifecycle, &original.chain, verify, reredrive_prompt);
+    // 真的发出之后才记 `Sent`（预算拒绝/仅装配/已完成重放永不冒充已发送）。
+    if launched {
+        record_sc_teaching_prompt_sent(lifecycle, &original.chain, verify, reredrive_prompt);
+    }
     Ok(delivery)
 }
 
@@ -579,29 +591,8 @@ pub(super) async fn drive_structure_gate_reredrive(
     // 启动前复验（硬前置）：失败源引用/摘要与 prompt 正文摘要都必须与冻结
     // 请求一致；任一不符 ⇒ 零启动（不发 prompt 事件、不起 provider）。
     verify_sc_teaching_start(lifecycle, &original.chain, verify)?;
-    engine
-        .emit_execution_event(
-            ProviderExecutionEvent {
-                event_id: format!("{node_id}_prompt_structure_reredrive"),
-                kind: ProviderExecutionEventKind::Output,
-                status: ProviderExecutionEventStatus::Started,
-                title: "SC 结构门拒收教学重驱提示词".to_string(),
-                detail: Some(
-                    "候选结构门拒收（final_compile_structure_rejected）的教学重驱\
-                     （环在哪 + 两个合法修法各带后果 + 保护项 + 完整修订版输出指令），\
-                     同一教学窗口的恰一次机会（与 compile/IR 类共用窗口）"
-                        .to_string(),
-                ),
-                command: None,
-                cwd: None,
-                output: Some(repair_prompt.to_string()),
-                exit_code: None,
-            },
-            Some(node_id.to_string()),
-            Some(author_provider.clone()),
-        )
-        .await;
-    let bound = begin_sc_teaching_reredrive_run(
+    // P08 replay 安全：同 compile/IR 臂——先分类再发事件/启动。
+    let entry = begin_sc_teaching_reredrive_run(
         lifecycle,
         engine,
         original,
@@ -609,8 +600,33 @@ pub(super) async fn drive_structure_gate_reredrive(
         node_id,
         author_provider,
     )?;
-    let delivery = super::sc_failure_transport::drive_single_candidate_reredrive(
+    if entry.is_ready() {
+        engine
+            .emit_execution_event(
+                ProviderExecutionEvent {
+                    event_id: format!("{node_id}_prompt_structure_reredrive"),
+                    kind: ProviderExecutionEventKind::Output,
+                    status: ProviderExecutionEventStatus::Started,
+                    title: "SC 结构门拒收教学重驱提示词".to_string(),
+                    detail: Some(
+                        "候选结构门拒收（final_compile_structure_rejected）的教学重驱\
+                         （环在哪 + 两个合法修法各带后果 + 保护项 + 完整修订版输出指令），\
+                         同一教学窗口的恰一次机会（与 compile/IR 类共用窗口）"
+                            .to_string(),
+                    ),
+                    command: None,
+                    cwd: None,
+                    output: Some(repair_prompt.to_string()),
+                    exit_code: None,
+                },
+                Some(node_id.to_string()),
+                Some(author_provider.clone()),
+            )
+            .await;
+    }
+    let (delivery, launched) = super::sc_failure_round_entry::drive_sc_teaching_entry(
         engine,
+        lifecycle,
         launch,
         provider_for_run,
         run_cancel,
@@ -619,13 +635,14 @@ pub(super) async fn drive_structure_gate_reredrive(
         author_provider,
         repair_prompt,
         repository_path,
-        &bound,
-        lifecycle,
+        entry,
         sc_teaching_attempt,
     )
     .await?;
-    // 真的发出之后才记 `Sent`（预算拒绝/仅装配永不冒充已发送）。
-    record_sc_teaching_prompt_sent(lifecycle, &original.chain, verify, repair_prompt);
+    // 真的发出之后才记 `Sent`（预算拒绝/仅装配/已完成重放永不冒充已发送）。
+    if launched {
+        record_sc_teaching_prompt_sent(lifecycle, &original.chain, verify, repair_prompt);
+    }
     Ok(delivery)
 }
 

@@ -5,6 +5,12 @@
 //! （Durable/Prefix 落真实终局，Unknown 先返回既有 CAS 等待）。归一化 helper 与
 //! 两个归一化事件发射器仍由 `single_candidate_compile_preflight` 原样提供，
 //! 本模块只调用不复制其实现。
+//!
+//! P08 replay 安全：`begin_sc_failure_round`/`begin_sc_teaching_round` 返回
+//! `ScRoundEntry`（Ready/Completed/Waiting）——只有 `Ready` 允许真实 provider
+//! 启动；分类只读既有 durable 事实（run.json 收口状态 + 工具策略审计分区），
+//! 不新增 wire 字段、不新增恢复状态机、不把已完成的 raw 当失败重跑。入场编排
+//! （start/等待收口/教学 entry）在 `sc_failure_round_entry`。
 
 use super::single_candidate_compile_preflight::{
     emit_author_ears_normalized_event, emit_author_heading_normalized_event,
@@ -43,6 +49,48 @@ pub(in crate::web::workspace_ws_handler::run) struct ScAuthorRoundDelivery {
     pub(in crate::web::workspace_ws_handler::run) raw: ScEvidenceRef,
     pub(in crate::web::workspace_ws_handler::run) round: ScRoundIdentity,
 }
+
+/// 一轮 SC 物理 run 的启动分类（P08 replay 安全）：**只有 `Ready` 允许真实
+/// provider 启动**。
+///
+/// 分类只读既有 durable 事实（split run 记录的收口状态 + 同
+/// `(workspace_session_id, role_run_seq)` 工具策略审计分区的可读性与内容），
+/// 不新增 wire 字段、不新增恢复状态机：读不出或证不明一律 `Waiting`（非终局的
+/// 真实等待），已完成一律 `Completed`（零 start、零 claim、不改完成时间）。
+pub(in crate::web::workspace_ws_handler::run) enum ScRoundEntry {
+    /// 可证明本轮尚未发生物理 provider 启动（且下一次 `provider_start` 追加仍会
+    /// 被审计准入接受）：唯一允许 `start_work_item_plan_author` 的分支。
+    Ready(ScBoundProviderRound),
+    /// 该物理轮已严格收口（structured output 已落盘）：复用 durable raw 回到编译
+    /// 循环，不启动、不 claim、不重新 complete。
+    Completed {
+        bound: ScBoundProviderRound,
+        raw_text: String,
+        raw: ScEvidenceRef,
+    },
+    /// 启动事实不能证明「尚未启动」（已有 provider_start，或 run/审计读不出）：
+    /// 走真实 CAS 等待，不得第二 start、不得落 Failed/A4 终局。
+    Waiting {
+        bound: ScBoundProviderRound,
+        reason_code: &'static str,
+        detail: String,
+    },
+}
+
+impl ScRoundEntry {
+    /// 教学臂用：只有 `Ready` 需要发「已发送提示词」事件并启动 provider。
+    pub(in crate::web::workspace_ws_handler::run) fn is_ready(&self) -> bool {
+        matches!(self, ScRoundEntry::Ready(_))
+    }
+}
+
+/// 等待判别码（诊断用，不是恢复状态）：已有真实 provider 启动但无严格 completed
+/// 交付。
+pub(in crate::web::workspace_ws_handler::run) const SC_ROUND_LAUNCH_UNKNOWN: &str =
+    "sc_failure_round_launch_unknown";
+/// 等待判别码（诊断用）：run 记录或审计分区不可严格读取，启动事实不可证明。
+pub(in crate::web::workspace_ws_handler::run) const SC_ROUND_LAUNCH_STATE_UNAVAILABLE: &str =
+    "sc_failure_round_launch_state_unavailable";
 
 /// 本文件的错误构造（store 的构造器私有；字段全 pub，可直接构造）。
 fn sc_transport_error(
@@ -122,6 +170,145 @@ fn sc_round_identity(
     }
 }
 
+/// replay 启动分类（只读）：`Ready` 只在「run 状态 `running` + 同 seq 审计分区
+/// 可严格读取且为空」时成立——这恰是下一次 `provider_start` 追加会被准入接受的
+/// 条件（`provider_start` 必须首行且唯一），因此既有非空分区绝不判 `Ready`；
+/// 已完成轮严格读回 raw 后返回 `Completed`；其余一律 `Waiting`（非终局）。
+fn classify_sc_round_launch(
+    lifecycle: &LifecycleStore,
+    bound: ScBoundProviderRound,
+) -> Result<ScRoundEntry, ScFailureEvidenceError> {
+    const STEP: &str = "classify_sc_round_launch";
+    let handle = WorkItemSplitProviderRunHandle {
+        run_ref: bound.round.run_ref.clone(),
+        workspace_session_id: bound.round.workspace_session_id.clone(),
+        role_run_seq: bound.round.role_run_seq,
+    };
+    // ① run 记录严格读取（身份逐字相等）：读不出 ⇒ 启动事实不可证明。
+    let status = match lifecycle.read_work_item_split_provider_run_status(&handle) {
+        Ok(snapshot) if snapshot.provider_run_ref == bound.round.run_ref => snapshot.status,
+        Ok(_) => {
+            return Ok(sc_waiting_round(
+                bound,
+                SC_ROUND_LAUNCH_STATE_UNAVAILABLE,
+                "run 记录的 provider_run_id 与本轮 run_ref 不一致",
+            ));
+        }
+        Err(error) => {
+            return Ok(sc_waiting_round(
+                bound,
+                SC_ROUND_LAUNCH_STATE_UNAVAILABLE,
+                format!("读取 split run 收口状态失败: {error}"),
+            ));
+        }
+    };
+    // ② 已完成轮：严格读回 durable raw。读不出/不一致 ⇒ 显式来源错误、零 start
+    // （绝不退回 Ready，也不用上一轮 raw 顶替，更不偷偷重跑）。
+    if status == "completed" {
+        let raw_text = lifecycle
+            .read_sc_split_output(&bound.chain.scope, &bound.round)
+            .map_err(|mut failure| {
+                failure.step = STEP.to_string();
+                failure
+            })?;
+        let raw = ScEvidenceRef::Available {
+            locator: sc_failure_split_locator(
+                &bound.round.workspace_session_id,
+                bound.round.role_run_seq,
+            ),
+            sha256:
+                crate::web::workspace_ws_handler::run::single_candidate_structure_reredrive::sc_sha256(
+                    &raw_text,
+                ),
+            bytes: raw_text.len() as u64,
+        };
+        return Ok(ScRoundEntry::Completed {
+            bound,
+            raw_text,
+            raw,
+        });
+    }
+    // ③ 启动事实：同 (session, seq) 审计分区严格读取。坏行/读错/非空分区都不能
+    // 证明「尚未启动」，更不能证明下一次 provider_start 追加会成功。
+    let read = match lifecycle.read_tool_policy_lines_with_warnings(
+        &bound.round.workspace_session_id,
+        bound.round.role_run_seq,
+    ) {
+        Ok(read) => read,
+        Err(error) => {
+            return Ok(sc_waiting_round(
+                bound,
+                SC_ROUND_LAUNCH_STATE_UNAVAILABLE,
+                format!("读取本轮启动审计分区失败: {error}"),
+            ));
+        }
+    };
+    if !read.warnings.is_empty() {
+        return Ok(sc_waiting_round(
+            bound,
+            SC_ROUND_LAUNCH_STATE_UNAVAILABLE,
+            format!(
+                "启动审计分区不可严格读取（{} 条坏行/结构告警）",
+                read.warnings.len()
+            ),
+        ));
+    }
+    if read
+        .events
+        .iter()
+        .any(|line| line.event_type() == "provider_start")
+    {
+        return Ok(sc_waiting_round(
+            bound,
+            SC_ROUND_LAUNCH_UNKNOWN,
+            format!(
+                "同一 role_run_seq 已有真实 provider 启动且无严格 completed 交付（轮 {}）",
+                bound.round.round_id
+            ),
+        ));
+    }
+    // ④ 只有「running 且分区为空」可证明本轮未启动且 start 仍可安全发生。
+    if status == "running" && read.events.is_empty() {
+        return Ok(ScRoundEntry::Ready(bound));
+    }
+    Ok(sc_waiting_round(
+        bound,
+        SC_ROUND_LAUNCH_UNKNOWN,
+        format!(
+            "split run 状态为 `{status}` 且审计分区有 {} 行，无法证明本轮未启动",
+            read.events.len()
+        ),
+    ))
+}
+
+/// 已完成轮的交付复用：durable raw 走**同一个**归一化入口（与首次交付同源），
+/// 不重新 complete、不推进 launch 纪元、不改完成时间、不重发提示词事件。
+pub(in crate::web::workspace_ws_handler::run) fn replayed_sc_round_delivery(
+    raw_text: String,
+    raw: ScEvidenceRef,
+    round: ScRoundIdentity,
+) -> ScAuthorRoundDelivery {
+    let delivery = prepare_author_delivery_for_compile(&raw_text);
+    ScAuthorRoundDelivery {
+        source: delivery.source,
+        raw,
+        round,
+    }
+}
+
+/// Waiting 构造（内部）：只带诊断，不是新的恢复状态。
+fn sc_waiting_round(
+    bound: ScBoundProviderRound,
+    reason_code: &'static str,
+    detail: impl Into<String>,
+) -> ScRoundEntry {
+    ScRoundEntry::Waiting {
+        bound,
+        reason_code,
+        detail: detail.into(),
+    }
+}
+
 /// 绑定一轮 SC 物理 run：真实 handle → chain 身份 → durable RoundBound。
 ///
 /// 时序：RoundBound 在任何 provider 启动之前落盘（先 append 后读回）。
@@ -136,7 +323,7 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_failure_round(
     node_id: &str,
     provider: &ProviderName,
     ordinal: u32,
-) -> Result<ScBoundProviderRound, ScFailureEvidenceError> {
+) -> Result<ScRoundEntry, ScFailureEvidenceError> {
     const STEP: &str = "begin_sc_failure_round";
     // 教学轮沿用原轮的链身份（原 role_run_seq 即原轮的物理 run）；原轮的原
     // 节点即本轮节点。
@@ -194,7 +381,8 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_failure_round(
                     false,
                 )
             })?;
-        return Ok(ScBoundProviderRound { chain, round, split });
+        // replay：同一契约身份只复用既有 handle，启动分类必须成立才允许 start。
+        return classify_sc_round_launch(lifecycle, ScBoundProviderRound { chain, round, split });
     }
     // 首绑：真实 handle（LC 与非 LC 一致）→ chain 身份 → RoundBound 先落盘。
     let split = crate::web::workspace_ws_handler::run::gateway_start::begin_plan_split_run(
@@ -246,7 +434,8 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_failure_round(
             true,
         ));
     }
-    Ok(ScBoundProviderRound { chain, round, split })
+    // 首绑也要过同一分类：新 seq 必须真的没有既有启动事实（审计/run 严格可读）。
+    classify_sc_round_launch(lifecycle, ScBoundProviderRound { chain, round, split })
 }
 
 /// 教学轮开局：沿用原轮链身份（同一 scope/business_key/原节点），教学轮是新
@@ -260,7 +449,7 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_teaching_round(
     previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
     node_id: &str,
     provider: &ProviderName,
-) -> Result<ScBoundProviderRound, ScFailureEvidenceError> {
+) -> Result<ScRoundEntry, ScFailureEvidenceError> {
     let current = previous.map_or(&original.round, |(_, round)| round);
     if current.chain_id != original.chain.chain_id
         || current.workspace_session_id != original.chain.scope.session_id
@@ -575,7 +764,7 @@ mod tests {
         original: Option<&ScFailureChainIdentity>,
         ordinal: u32,
     ) -> ScBoundProviderRound {
-        begin_sc_failure_round(
+        match begin_sc_failure_round(
             lifecycle,
             scope,
             BUSINESS_KEY,
@@ -585,6 +774,10 @@ mod tests {
             ordinal,
         )
         .expect("round binds a real handle")
+        {
+            ScRoundEntry::Ready(bound) => bound,
+            _ => panic!("a freshly bound / un-started round must classify Ready"),
+        }
     }
 
     #[test]
