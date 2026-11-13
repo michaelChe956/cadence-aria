@@ -525,3 +525,180 @@ async fn kimi_update_production_probe_completes_when_version_differs() {
     );
     crate::cross_cutting::path_overlay::clear();
 }
+
+// ---- 可诊断性（P0）：决策链 / 更新 / 失败分类的结构化事实 ----
+// 日志只是这些事实的消费者：用例断言事实，而不是日志文本。
+
+/// 四个候选（visible / 已安装位置反推 / npm 全局 / 兜底）都必须给出
+/// `chosen` 与 `reason`，且全局只有一个被选中。
+#[test]
+fn prefix_decision_reports_every_candidate_with_reason() {
+    let decision = decide_effective_prefix(&PrefixDecisionInput {
+        visible: Some(PathBuf::from("/Users/dev/.npm-global")),
+        visible_writable: true,
+        installed: Some(PathBuf::from("/Users/dev/.npm-global")),
+        npm_global: Some(PathBuf::from("/opt/homebrew")),
+        npm_global_writable: true,
+        npm_global_bin_on_path: false,
+        fallback: PathBuf::from("/Users/dev/fallback-prefix"),
+    });
+
+    assert_eq!(
+        decision.chosen_prefix,
+        PathBuf::from("/Users/dev/.npm-global"),
+        "PATH 上生效且可写的前缀必须优先（更新装回用户手上那份）"
+    );
+    assert_eq!(decision.candidates.len(), 4, "四个候选都要出现");
+    let candidate = |source: PrefixCandidateSource| {
+        decision
+            .candidates
+            .iter()
+            .find(|candidate| candidate.source == source)
+            .expect("candidate present")
+    };
+    assert_eq!(
+        candidate(PrefixCandidateSource::Visible).reason,
+        PrefixCandidateReason::Hit
+    );
+    assert!(candidate(PrefixCandidateSource::Visible).chosen);
+    assert_eq!(
+        candidate(PrefixCandidateSource::InstalledLocation).reason,
+        PrefixCandidateReason::Superseded,
+        "前序候选已命中 ⇒ 已安装反推候选不得再被选中"
+    );
+    assert_eq!(
+        candidate(PrefixCandidateSource::NpmGlobal).reason,
+        PrefixCandidateReason::BinNotOnPath,
+        "npm 全局前缀的 bin 不在 PATH 上 ⇒ 排除原因必须点名"
+    );
+    assert_eq!(
+        candidate(PrefixCandidateSource::Fallback).reason,
+        PrefixCandidateReason::Superseded
+    );
+    assert_eq!(
+        decision
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.chosen)
+            .count(),
+        1,
+        "只能有一个候选被选中"
+    );
+}
+
+/// visible 不可写 ⇒ 落到「已安装位置反推」；候选原因如实标注不可写。
+#[test]
+fn prefix_decision_reports_not_writable_visible_prefix() {
+    let decision = decide_effective_prefix(&PrefixDecisionInput {
+        visible: Some(PathBuf::from("/usr/local")),
+        visible_writable: false,
+        installed: Some(PathBuf::from("/Users/dev/.npm-global")),
+        npm_global: None,
+        npm_global_writable: false,
+        npm_global_bin_on_path: false,
+        fallback: PathBuf::from("/Users/dev/fallback-prefix"),
+    });
+
+    assert_eq!(
+        decision.chosen_prefix,
+        PathBuf::from("/Users/dev/.npm-global"),
+        "visible 不可写 ⇒ 用已安装位置反推的前缀"
+    );
+    let visible = decision
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source == PrefixCandidateSource::Visible)
+        .expect("visible candidate");
+    assert_eq!(visible.reason, PrefixCandidateReason::NotWritable);
+    assert!(!visible.chosen);
+    let npm_global = decision
+        .candidates
+        .iter()
+        .find(|candidate| candidate.source == PrefixCandidateSource::NpmGlobal)
+        .expect("npm global candidate");
+    assert_eq!(npm_global.reason, PrefixCandidateReason::NotFound);
+    assert_eq!(npm_global.prefix, None);
+}
+
+/// 全新机器（无 visible / 无已安装 / npm 全局不可写）⇒ 兜底前缀，且
+/// 每个候选都给出「不存在 / 不可写」原因。
+#[test]
+fn prefix_decision_falls_back_and_explains_every_exclusion() {
+    let decision = decide_effective_prefix(&PrefixDecisionInput {
+        visible: None,
+        visible_writable: false,
+        installed: None,
+        npm_global: Some(PathBuf::from("/usr/local")),
+        npm_global_writable: false,
+        npm_global_bin_on_path: true,
+        fallback: PathBuf::from("/Users/dev/.npm-global"),
+    });
+
+    assert_eq!(
+        decision.chosen_prefix,
+        PathBuf::from("/Users/dev/.npm-global"),
+        "没有可用前缀 ⇒ 兜底"
+    );
+    assert!(decision.candidates.iter().all(|candidate| {
+        candidate.chosen == (candidate.source == PrefixCandidateSource::Fallback)
+    }));
+    let reasons: Vec<&str> = decision
+        .candidates
+        .iter()
+        .map(|candidate| candidate.reason.as_str())
+        .collect();
+    assert_eq!(
+        reasons,
+        vec!["not_found", "not_found", "not_writable", "hit"],
+        "每个候选的排除原因都要能 grep: {reasons:?}"
+    );
+    let summary = decision.summary();
+    for expected in [
+        "visible=-",
+        "installed_location=-",
+        "npm_global=/usr/local",
+        "reason=not_writable",
+        "fallback=/Users/dev/.npm-global(chosen=true,reason=hit)",
+    ] {
+        assert!(
+            summary.contains(expected),
+            "决策链摘要必须可 grep（缺少 {expected}）：{summary}"
+        );
+    }
+}
+
+/// 更新前后版本比较（「仍是旧版」判定）的纯事实。
+#[test]
+fn update_version_facts_flags_still_old_version() {
+    let same = update_version_facts(Some("1.2.3"), Some("1.2.3"));
+    assert!(same.still_old, "前后版本相同 ⇒ 仍是旧版");
+    assert_eq!(same.before.as_deref(), Some("1.2.3"));
+    assert_eq!(same.after.as_deref(), Some("1.2.3"));
+
+    let changed = update_version_facts(Some("1.2.3"), Some("1.2.4"));
+    assert!(!changed.still_old, "版本真的变了 ⇒ 不是旧版");
+
+    let unknown = update_version_facts(Some("1.2.3"), None);
+    assert!(
+        !unknown.still_old,
+        "读不到装后版本不得判「仍是旧版」（不得静默成功，也不得假红灯）"
+    );
+    assert!(!update_version_facts(None, Some("1.2.3")).still_old);
+}
+
+/// 装后失败三语义的稳定分类 code（日志字段 `failure_class`）。
+#[test]
+fn post_install_failure_class_names_the_three_semantics() {
+    assert_eq!(
+        post_install_failure_class(false, false).as_str(),
+        "not_installed"
+    );
+    assert_eq!(
+        post_install_failure_class(true, false).as_str(),
+        "missing_platform_package"
+    );
+    assert_eq!(
+        post_install_failure_class(true, true).as_str(),
+        "not_on_path"
+    );
+}

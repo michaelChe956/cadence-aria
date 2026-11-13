@@ -60,6 +60,10 @@ pub struct CoverageOutcome {
     pub index: Option<Value>,
 }
 
+// 可诊断性事实（覆盖汇总 / 健康字段 / node 候选来源）拆在同目录 inc 文件里，
+// 以控制本文件行数（large_file_guard 1200 行硬线）。
+include!("codegraph_coverage_diagnostics.inc.rs");
+
 /// 聚合成员覆盖探针——生产实现走 codegraph SDK（[`CodeGraphCoverage`]），
 /// DI/测试可注入桩。
 pub trait AggregateCoverageProbe: Send + Sync {
@@ -180,7 +184,7 @@ impl CodeGraphCoverage {
         sdk_path: &Path,
         root: &Path,
         member_names: &[String],
-    ) -> Result<CoverageOutcome, AggregateIndexError> {
+    ) -> Result<(CoverageOutcome, usize), AggregateIndexError> {
         let members_json = serde_json::to_string(member_names).map_err(|error| {
             coverage_failed(format!("serialize members JSON for helper: {error}"))
         })?;
@@ -209,7 +213,11 @@ impl CodeGraphCoverage {
                 "coverage helper timed out after {HELPER_TIMEOUT_SECS}s"
             )));
         }
-        parse_helper_output(&output, member_names)
+        // 载荷字节数（诊断对比值：SDK 路径应是几百字节量级，而不是 CLI files
+        // 的 ~230 MB）——只报长度，不打印正文。
+        let payload_bytes = output.stdout.len();
+        let outcome = parse_helper_output(&output, member_names)?;
+        Ok((outcome, payload_bytes))
     }
 }
 
@@ -237,24 +245,63 @@ impl AggregateCoverageProbe for CodeGraphCoverage {
         // 归入 operation 既有的「SDK 覆盖验收不可用 ⇒ 回退 CLI files」分支
         // （保留 64 MiB 上限与专用截断码），而不是直接失败。
         let node =
-            resolve_node_executable(&paths, &sdk_path, &self.runner).map_err(
+            resolve_node_with_source(&paths, &sdk_path, &self.runner).map_err(
                 |error| match error {
                     AggregateIndexError::Failed {
                         code: "codegraph_node_unavailable",
                         message,
-                    } => AggregateIndexError::Failed {
-                        code: "codegraph_sdk_incompatible",
-                        message: format!(
-                            "{message}（SDK 覆盖验收不可用，已回退 CLI files 验收路径）"
-                        ),
-                    },
+                    } => {
+                        // 回退触发原因必须能区分「没有 node」与「SDK 不兼容」
+                        // （客户机 darwin-arm64 上二者修复动作完全不同）。
+                        tracing::warn!(
+                            trigger = "node_unavailable",
+                            fallback = "cli_files",
+                            path_node = %paths
+                                .path_node
+                                .as_deref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                            injected_bundled_candidates = paths.bundled_nodes.len(),
+                            message = %message,
+                            "aggregate coverage: node unavailable, falling back to CLI files"
+                        );
+                        AggregateIndexError::Failed {
+                            code: "codegraph_sdk_incompatible",
+                            message: format!(
+                                "{message}（SDK 覆盖验收不可用，已回退 CLI files 验收路径）"
+                            ),
+                        }
+                    }
                     other => other,
                 },
             )?;
         let helper_path = write_helper_file(&self.helper_source, self.scratch_dir.as_deref())?;
-        let result = self.run_helper(&node, &helper_path, &sdk_path, root, member_names);
+        let result = self.run_helper(&node.path, &helper_path, &sdk_path, root, member_names);
         let _ = std::fs::remove_file(&helper_path);
-        result
+        let (outcome, payload_bytes) = result?;
+        let summary = summarize_coverage(&outcome.member_covered);
+        let health = coverage_health(outcome.index.as_ref());
+        // 一条 info：覆盖判定事实（SDK 路径 / SDK 与 node 来源 / 平台 /
+        // 成员汇总 / 载荷字节 / 健康字段）—— 客户机误报「协议异常 / 截断」
+        // 时据此判断走的是哪条路径、载荷到底多大。
+        tracing::info!(
+            path = "sdk",
+            sdk_path = %sdk_path.display(),
+            node_path = %node.path.display(),
+            node_source = node.source.as_str(),
+            os = std::env::consts::OS,
+            arch = std::env::consts::ARCH,
+            platform_target = %codegraph_platform_target(),
+            member_count = summary.member_count,
+            covered_count = summary.covered_count,
+            uncovered_members = %summary.uncovered.join(","),
+            payload_bytes,
+            index_state = %health.state.as_deref().unwrap_or("-"),
+            index_pending = ?health.pending,
+            index_stale = ?health.stale,
+            "codegraph aggregate coverage decision"
+        );
+        Ok(outcome)
     }
 }
 
@@ -367,39 +414,6 @@ pub fn resolve_sdk_path(paths: &CoveragePaths) -> Option<PathBuf> {
     candidate.is_file().then_some(candidate)
 }
 
-/// node 解析：自带 node（存在且可执行）优先；PATH node 需 `--version`
-/// 实测 ≥ 22.5；都不可用 ⇒ `codegraph_node_unavailable`。
-pub fn resolve_node_executable(
-    paths: &CoveragePaths,
-    sdk_path: &Path,
-    runner: &Arc<dyn BoundedCommandRunner>,
-) -> Result<PathBuf, AggregateIndexError> {
-    let mut bundled = paths.bundled_nodes.clone();
-    if bundled.is_empty() {
-        bundled = bundled_node_candidates(sdk_path, paths.home_dir.as_deref());
-    }
-    for candidate in &bundled {
-        if is_executable_file(candidate) {
-            return Ok(candidate.clone());
-        }
-    }
-    if let Some(path_node) = paths
-        .path_node
-        .as_deref()
-        .filter(|candidate| is_executable_file(candidate))
-        && path_node_meets_minimum(path_node, runner)
-    {
-        return Ok(path_node.to_path_buf());
-    }
-    Err(AggregateIndexError::Failed {
-        code: "codegraph_node_unavailable",
-        message: "需要 Node.js ≥ 22.5 运行 codegraph SDK 覆盖验收：未找到 codegraph 平台\
-                 包自带的 node，PATH 上的 node 缺失或版本低于 22.5；可安装 Node.js \
-                 ≥ 22.5，或重装 codegraph（npm install -g @colbymchenry/codegraph）"
-            .to_string(),
-    })
-}
-
 /// `@colbymchenry` 作用域目录名。
 const CODEGRAPH_NPM_SCOPE: &str = "@colbymchenry";
 
@@ -418,72 +432,6 @@ fn codegraph_platform_target() -> String {
         other => other,
     };
     format!("{platform}-{arch}")
-}
-
-/// codegraph 自带 node 的全部候选（按采纳优先级）：
-/// ① **nested** —— `<主包>/node_modules/@colbymchenry/codegraph-<target>/node`；
-/// ② **hoisted** —— 与主包**同级**的 `<node_modules>/@colbymchenry/codegraph-<target>/node`
-///    （实测 1.6.2 真实布局：`libtest/node_modules/@colbymchenry/` 下
-///    `codegraph` 与 `codegraph-linux-x64` 并列，且 node 在平台包里）；
-/// ③ **自愈缓存** —— `<缓存根>/bundles/<target>-<version>/node`
-///    （`npm-shim.js` 下载缓存，同平台多版本时版本高者优先；缓存根见
-///    [`codegraph_cache_root`]）。
-///
-/// 目录名按**当前平台** `<platform>-<arch>` 匹配（不得硬编码单一平台）。
-fn bundled_node_candidates(sdk_path: &Path, home_dir: Option<&Path>) -> Vec<PathBuf> {
-    let cache_root = codegraph_cache_root(
-        home_dir,
-        std::env::var_os("CODEGRAPH_INSTALL_DIR").map(PathBuf::from),
-    );
-    bundled_node_candidates_with_cache_root(sdk_path, cache_root)
-}
-
-/// 自愈缓存根（`bundles` 的父目录）：`CODEGRAPH_INSTALL_DIR` 优先，否则
-/// `<home>/.codegraph`。
-///
-/// 与上游同口径（`scripts/npm-shim.js:113`
-/// `path.join(process.env.CODEGRAPH_INSTALL_DIR || path.join(os.homedir(), '.codegraph'), 'bundles')`；
-/// `scripts/npm-sdk.js:68` 同）：只硬编码 `~/.codegraph` 会漏掉自定义安装目录
-/// 里的自愈 bundle。空值视为未设置（宿主把变量设成空串时不改变默认根）。
-fn codegraph_cache_root(home_dir: Option<&Path>, install_dir: Option<PathBuf>) -> Option<PathBuf> {
-    install_dir
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .or_else(|| home_dir.map(|home| home.join(".codegraph")))
-}
-
-/// 同 [`bundled_node_candidates`]，但自愈缓存根**显式**给出（测试 seam，
-/// 避免依赖进程环境）。
-fn bundled_node_candidates_with_cache_root(
-    sdk_path: &Path,
-    cache_root: Option<PathBuf>,
-) -> Vec<PathBuf> {
-    let Some(package_root) = sdk_path.parent() else {
-        return Vec::new();
-    };
-    let target = codegraph_platform_target();
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    // ① 主包内 node_modules（nested 布局）。
-    candidates.extend(platform_package_nodes(
-        &package_root.join("node_modules").join(CODEGRAPH_NPM_SCOPE),
-        &target,
-    ));
-    // ② 每一层上层 `node_modules/@colbymchenry`（hoisted 布局 —— 真实资产）。
-    for ancestor in package_root.ancestors().skip(1) {
-        if ancestor
-            .file_name()
-            .is_some_and(|name| name == "node_modules")
-        {
-            candidates.extend(platform_package_nodes(
-                &ancestor.join(CODEGRAPH_NPM_SCOPE),
-                &target,
-            ));
-        }
-    }
-    // ③ 自愈缓存。
-    if let Some(root) = cache_root {
-        candidates.extend(cached_bundle_nodes(&root, &target));
-    }
-    candidates
 }
 
 /// 作用域目录里与主包同级的平台包自带 node：**当前平台优先**，其余

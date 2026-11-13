@@ -16,6 +16,7 @@ use crate::product::logical_codebase::{
 
 use super::codegraph_coverage::{
     AggregateCoverageProbe, CliFallbackCoverageProbe, CodeGraphCoverage, CoverageOutcome,
+    summarize_coverage,
 };
 use super::{
     AggregateIndexError, AggregateIndexRecord, AggregateIndexSnapshotCollector,
@@ -54,6 +55,7 @@ impl AggregateIndexAcceptance {
         let sdk_warning: Option<String>;
         // 成员覆盖优先走 codegraph SDK（hasFilesUnder 判定，载荷几百字节；
         // CLI files 的全量清单在 3.1 GB 级索引上 ~230 MB，必然截断）。
+        let mut fallback_trigger: Option<&'static str> = None;
         let member_covered_from_sdk = match coverage.coverage(root, member_names) {
             Ok(outcome) => {
                 // 健康闸：stale/pending/state/fileCount 异常只记 warning，
@@ -63,16 +65,29 @@ impl AggregateIndexAcceptance {
             }
             // 回退保底：SDK 路径解析不到 / SDK 不兼容 ⇒ 走既有 CLI files
             // 验收（小仓与旧行为不回归），并留下可审计的回退痕迹。
-            Err(AggregateIndexError::Failed {
-                code: "codegraph_sdk_not_found" | "codegraph_sdk_incompatible",
-                message,
-            }) => {
+            Err(error) => {
+                let Some(trigger) = coverage_fallback_trigger(&error) else {
+                    return Err(error);
+                };
+                let (fallback_code, fallback_message) = match &error {
+                    AggregateIndexError::Failed { code, message } => (*code, message.clone()),
+                    other => (error_code(other), other.to_string()),
+                };
+                // 一条 warn：回退原因 + 回退到哪条路径（客户机据此判断
+                // 「为什么走了慢路径」）。
+                tracing::warn!(
+                    trigger,
+                    fallback = "cli_files",
+                    error_code = fallback_code,
+                    sdk_message = %fallback_message,
+                    "aggregate coverage: SDK unavailable, falling back to CLI files"
+                );
+                fallback_trigger = Some(trigger);
                 sdk_warning = Some(format!(
-                    "codegraph SDK 覆盖验收不可用（{message}），已回退 CLI files 验收路径"
+                    "codegraph SDK 覆盖验收不可用（{fallback_message}），已回退 CLI files 验收路径"
                 ));
                 None
             }
-            Err(error) => return Err(error),
         };
         let (member_covered, warning) = match member_covered_from_sdk {
             Some(covered) => (covered, sdk_warning),
@@ -86,9 +101,35 @@ impl AggregateIndexAcceptance {
                         code: "codegraph_files_empty_index",
                         ..
                     }) => return Err(member_coverage_failed(member_names)),
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        // 一条 warn：截断（载荷不完整）——实际字节不可得
+                        // （错误只带上限），影响范围在 fail_building 里按
+                        // 模式补 `lkg_degraded`。
+                        if error_code(&error) == "codegraph_files_output_truncated" {
+                            tracing::warn!(
+                                error_code = "codegraph_files_output_truncated",
+                                path = "cli_files",
+                                actual_bytes = "unknown",
+                                message = %error,
+                                "codegraph files output truncated: file list incomplete"
+                            );
+                        }
+                        return Err(error);
+                    }
                 };
-                (verify_member_coverage(&files, member_names)?, sdk_warning)
+                let covered = verify_member_coverage(&files, member_names)?;
+                let summary = summarize_coverage(&covered);
+                // 一条 info：CLI 回退路径的覆盖判定（与 SDK 路径同一组字段）。
+                tracing::info!(
+                    path = "cli_files",
+                    fallback_trigger = %fallback_trigger.unwrap_or("unknown"),
+                    member_count = summary.member_count,
+                    covered_count = summary.covered_count,
+                    uncovered_members = %summary.uncovered.join(","),
+                    file_count = files.len(),
+                    "codegraph aggregate coverage decision"
+                );
+                (covered, sdk_warning)
             }
         };
         require_member_coverage(&member_covered, member_names)?;
@@ -500,7 +541,21 @@ impl AggregateIndexOperation {
             &manifest.provider_context_root,
             &member_names,
         ) {
-            Ok(acceptance) => acceptance,
+            Ok(acceptance) => {
+                let summary = summarize_coverage(&acceptance.member_covered);
+                // 一条 info：验收结论（成功 + 成员汇总 + 是否有健康闸 warning）。
+                tracing::info!(
+                    project_id,
+                    index_id = %index_id,
+                    mode = mode.as_str(),
+                    status = "ok",
+                    member_count = summary.member_count,
+                    covered_count = summary.covered_count,
+                    warning = acceptance.warning.is_some(),
+                    "aggregate index acceptance"
+                );
+                acceptance
+            }
             Err(error) => return self.fail_building(project_id, &index_id, mode, error, after),
         };
 
@@ -537,18 +592,17 @@ impl AggregateIndexOperation {
         error: AggregateIndexError,
         after: Vec<super::AggregateIndexMemberSnapshot>,
     ) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        let failure_code = error_code(&error);
         let status = match mode {
             IndexApplicationMode::Initialize => AggregateIndexStatus::Failed,
             IndexApplicationMode::Sync | IndexApplicationMode::Rebuild => {
                 AggregateIndexStatus::Stale
             }
         };
-        self.store
-            .mark_status(project_id, index_id, status, Some(error.to_string()))?;
         // Rebuild/Sync 的工具面失败（CLI/acceptance）：把 last-known-good 标记
         // degraded（可读 + 审计 warning）。member drift 不 degrade——LKG 数据
         // 相对现实已过时，交给 freshness 评估为 stale。
-        if matches!(
+        let lkg_degraded = matches!(
             mode,
             IndexApplicationMode::Rebuild | IndexApplicationMode::Sync
         ) && !matches!(
@@ -557,7 +611,34 @@ impl AggregateIndexOperation {
                 code: "aggregate_index_member_drifted",
                 ..
             }
-        ) {
+        );
+        // 一条 info：验收结论（失败 + 失败码 + 影响范围）。
+        tracing::info!(
+            project_id,
+            index_id,
+            mode = mode.as_str(),
+            status = "failed",
+            failure_code,
+            lkg_degraded,
+            "aggregate index acceptance"
+        );
+        // 一条 warn：载荷截断（文件清单不完整）——上限已由错误文案带上，
+        // 实际字节不可得；影响范围 = 既有 LKG 是否被标 degraded。
+        if failure_code == "codegraph_files_output_truncated" {
+            tracing::warn!(
+                project_id,
+                index_id,
+                mode = mode.as_str(),
+                error_code = failure_code,
+                actual_bytes = "unknown",
+                lkg_degraded,
+                message = %error,
+                "codegraph files output truncated: file list incomplete"
+            );
+        }
+        self.store
+            .mark_status(project_id, index_id, status, Some(error.to_string()))?;
+        if lkg_degraded {
             self.store
                 .degrade_last_known_good(project_id, error.to_string())?;
         }
@@ -595,6 +676,44 @@ enum IndexApplicationMode {
     Initialize,
     Sync,
     Rebuild,
+}
+
+impl IndexApplicationMode {
+    /// 日志字段 `mode`（稳定可 grep）。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Initialize => "initialize",
+            Self::Sync => "sync",
+            Self::Rebuild => "rebuild",
+        }
+    }
+}
+
+/// 错误的稳定 code（日志字段 `error_code` / `failure_code`）。
+pub(crate) fn error_code(error: &AggregateIndexError) -> &'static str {
+    match error {
+        AggregateIndexError::Degraded { code, .. } | AggregateIndexError::Failed { code, .. } => {
+            code
+        }
+    }
+}
+
+/// SDK 不可用 ⇒ CLI files 回退的触发原因（日志 `trigger`；`None` = 不回退）。
+///
+/// 只有 `Failed` 的两种码可回退：`Degraded` 语义与其它失败码必须原样上抛
+/// （保持既有行为，不把截断之类的失败悄悄降级）。
+pub(crate) fn coverage_fallback_trigger(error: &AggregateIndexError) -> Option<&'static str> {
+    match error {
+        AggregateIndexError::Failed {
+            code: "codegraph_sdk_not_found",
+            ..
+        } => Some("sdk_not_found"),
+        AggregateIndexError::Failed {
+            code: "codegraph_sdk_incompatible",
+            ..
+        } => Some("sdk_incompatible"),
+        _ => None,
+    }
 }
 
 fn included_main_checkouts<'a>(

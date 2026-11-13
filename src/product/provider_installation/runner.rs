@@ -34,8 +34,8 @@ use crate::cross_cutting::provider_health::{ProviderHealthService, version_token
 
 use super::InstallTarget;
 use super::effective_prefix::{
-    choose_effective_prefix, first_path_dir_with_command, is_writable_dir, npm_package_dir,
-    npm_prefix_from_real_path, prefix_bin_is_on_path, same_dir, visible_cli_prefix,
+    first_path_dir_with_command, is_writable_dir, npm_package_dir, npm_prefix_from_real_path,
+    prefix_bin_is_on_path, same_dir, visible_cli_prefix,
 };
 use super::failure_classify::{
     InstallFailureKind, InstallFailureSignals, InstallJobFailure, classify_install_failure,
@@ -83,6 +83,10 @@ pub struct InstallCommandPlan {
     pub path_prefix: Option<PathBuf>,
     pub manual_command: String,
 }
+
+// 可诊断性事实（前缀决策链 / 探测来源 / 失败分类 / 更新比对）拆在同目录
+// inc 文件里，以控制本文件行数（large_file_guard 1200 行硬线）。
+include!("runner_diagnostics.inc.rs");
 
 /// npm 安装计划（REQ-PCI-03）：一个包一次安装，形态固定。
 ///
@@ -332,9 +336,16 @@ impl HealthRefreshProber {
 
     /// 真实命令验证（2.8②）：跑一个**非 `--version`** 的子命令，证明 CLI
     /// 真能用（`--version` 在平台 bundle 缺失时也 exit 0 ⇒ 不可作唯一依据）。
-    async fn probe_real_command(&self, target: InstallTarget, bin_dir: Option<&Path>) -> bool {
+    ///
+    /// 返回 `(ok, path_ok, argv)`：`path_ok` = **PATH 口径**（裸命令）那次
+    /// 尝试是否成功 ⇒ false 说明装到了 PATH 之外（诊断日志的事实来源）。
+    async fn probe_real_command(
+        &self,
+        target: InstallTarget,
+        bin_dir: Option<&Path>,
+    ) -> (bool, bool, Vec<String>) {
         let Some(row) = row_for_wire(target.wire_label()) else {
-            return false;
+            return (false, false, Vec::new());
         };
         let argv = post_install_verification_argv(target.wire_label());
         let timeout = match &target {
@@ -344,12 +355,13 @@ impl HealthRefreshProber {
             InstallTarget::CodeGraph => self.timeout.max(CODEGRAPH_VERIFY_TIMEOUT),
             InstallTarget::Provider(_) => self.timeout,
         };
-        let mut executables = Vec::new();
+        let mut attempts: Vec<(String, bool)> = Vec::new();
         if let Some(dir) = bin_dir {
-            executables.push(dir.join(row.command).to_string_lossy().into_owned());
+            attempts.push((dir.join(row.command).to_string_lossy().into_owned(), false));
         }
-        executables.push(row.command.to_string());
-        for executable in executables {
+        // 裸命令 = PATH 口径。
+        attempts.push((row.command.to_string(), true));
+        for (executable, path_attempt) in attempts {
             let request = BoundedCommandRequest {
                 executable,
                 argv: argv.clone(),
@@ -364,10 +376,10 @@ impl HealthRefreshProber {
                 && result.exit_code == Some(0)
                 && !result.timed_out
             {
-                return true;
+                return (true, path_attempt, argv);
             }
         }
-        false
+        (false, false, argv)
     }
 }
 
@@ -393,47 +405,26 @@ impl PostInstallProber for HealthRefreshProber {
         target: InstallTarget,
         install_bin_dir: Option<&Path>,
     ) -> Result<PostInstallProbeOutcome, String> {
-        let health = self.health.refresh(CancellationToken::new()).await;
-        let row = row_for_wire(target.wire_label());
-        // ① 版本**优先读 npm 包的 `package.json`**（不执行进程、更快更稳；
-        //    magpie `proc.Version` 同款）——读不到才回落 `--version`。
-        let mut version = row.and_then(|row| {
-            let package = row.npm_package?;
-            let prefix = install_bin_dir?.parent()?;
-            npm_package_json_version(prefix, package)
-        });
-        // ② provider 版本走 health 快照（PATH ∪ overlay 口径）。
-        if version.is_none()
-            && let InstallTarget::Provider(provider) = &target
-        {
-            version = self
-                .health
-                .latest_diagnostic()
-                .entry(provider)
-                .and_then(|entry| entry.version.clone());
-        }
-        // 读不到版本 ⇒ 跑 `--version`：先 PATH 口径，再**绝对路径**兜底
-        // （装到 PATH 之外时 PATH 口径必然 127）。
-        if version.is_none() {
-            let command = row.map(|row| row.command).unwrap_or("codegraph");
-            version = self
-                .probe_version(command, install_bin_dir, false)
-                .await
-                .or(self.probe_version(command, install_bin_dir, true).await);
-        }
-        // 真实命令验证（独立于版本读取：版本可来自 package.json）。
-        let real_command_ok = self.probe_real_command(target, install_bin_dir).await;
-        match (version, health) {
-            (Some(version), _) => Ok(PostInstallProbeOutcome {
-                installed_version: Some(version),
-                real_command_ok,
-            }),
-            (None, Err(error)) => Err(error.to_string()),
-            (None, Ok(_)) => Ok(PostInstallProbeOutcome {
-                installed_version: None,
-                real_command_ok,
-            }),
-        }
+        let (result, facts) = self.probe_with_facts(target.clone(), install_bin_dir).await;
+        // 一条 info：装后探测的**来源与结论**（客户机 darwin-arm64 上据此
+        // 判断「版本从哪来、真实命令跑没跑通、是否装到了 PATH 之外」）。
+        tracing::info!(
+            target = %target.wire_label(),
+            os = std::env::consts::OS,
+            arch = std::env::consts::ARCH,
+            version_source = facts.version_source.as_str(),
+            installed_version = %result
+                .as_ref()
+                .ok()
+                .and_then(|outcome| outcome.installed_version.as_deref())
+                .unwrap_or("-"),
+            real_command = %facts.real_command_argv.join(" "),
+            real_command_ok = facts.real_command_ok,
+            path_version_ok = facts.path_version_ok,
+            path_probe_ok = facts.path_probe_ok,
+            "provider install: post-install probe"
+        );
+        result
     }
 
     /// 更新前版本（Kimi 等脚本类）：走**与装后同一个** `--version` 探测口径
@@ -755,6 +746,17 @@ impl InstallJobExecution {
         row: &InstallSourceRow,
         path_value: Option<&str>,
     ) -> PathBuf {
+        self.resolve_prefix_decision(row, path_value)
+            .await
+            .chosen_prefix
+    }
+
+    /// 决策链 + **结构化事实**（日志消费者；用例断言 `PrefixDecision`）。
+    pub async fn resolve_prefix_decision(
+        &self,
+        row: &InstallSourceRow,
+        path_value: Option<&str>,
+    ) -> PrefixDecision {
         let visible = visible_cli_prefix(row.command, path_value);
         // `npm prefix -g` 的**原始**结果：已安装扫描必须用它（过滤只适用于
         // 新装候选）。
@@ -762,18 +764,18 @@ impl InstallJobExecution {
             Some(probe) => probe.npm_global_prefix().await,
             None => None,
         };
-        // ① visible（真实可写）优先：更新必须装回用户手上那份。
-        if let Some(prefix) = visible.as_deref().filter(|prefix| is_writable_dir(prefix)) {
-            return prefix.to_path_buf();
-        }
-        // ② 只有 visible 不存在（或不可写）时，才用已安装位置反推。
-        if let Some(prefix) = self.installed_prefix(row, raw_npm_global.as_deref()) {
-            return prefix;
-        }
-        // ③ npm 全局前缀仅作新装候选（可写且 `<prefix>/bin ∈ PATH`）→ ④ 兜底。
-        let npm_global = raw_npm_global
-            .filter(|prefix| is_writable_dir(prefix) && prefix_bin_is_on_path(prefix, path_value));
-        choose_effective_prefix(None, npm_global.as_deref(), &self.npm_prefix)
+        let installed = self.installed_prefix(row, raw_npm_global.as_deref());
+        decide_effective_prefix(&PrefixDecisionInput {
+            visible_writable: visible.as_deref().is_some_and(is_writable_dir),
+            visible,
+            installed,
+            npm_global_writable: raw_npm_global.as_deref().is_some_and(is_writable_dir),
+            npm_global_bin_on_path: raw_npm_global
+                .as_deref()
+                .is_some_and(|prefix| prefix_bin_is_on_path(prefix, path_value)),
+            npm_global: raw_npm_global,
+            fallback: self.npm_prefix.clone(),
+        })
     }
 
     /// 装完提示（2.5 / 2.8③）：npm 类看 PATH 上生效的命令是不是本次安装的
@@ -824,57 +826,97 @@ impl InstallJobExecution {
             path_value,
         } = context;
         let mut real_command_ok = real_command_ok_before_retry;
-        if let Some(retry) = npm_retry_plan(row, None, &self.registry, prefix)
-            && let Ok(result) = self.runner.execute(&retry).await
-            && result.exit_code == Some(0)
-            && !result.timed_out
-            && !result.cancelled
-        {
-            register_install_bin_dir(bin_dir, row.command);
-            if let Ok(outcome) = self
-                .prober
-                .refresh_after_install(target.clone(), bin_dir)
-                .await
-            {
-                real_command_ok = outcome.real_command_ok;
-                // 成功判定 = 版本可读 **且** 真实命令可跑（2.8②）。
-                if let Some(version) = outcome
-                    .installed_version
-                    .clone()
-                    .filter(|_| outcome.real_command_ok)
+        let mut retry_attempted = false;
+        let mut retry_succeeded = false;
+        let mut retry_result = "not_attempted";
+        if let Some(retry) = npm_retry_plan(row, None, &self.registry, prefix) {
+            retry_attempted = true;
+            match self.runner.execute(&retry).await {
+                Ok(result)
+                    if result.exit_code == Some(0) && !result.timed_out && !result.cancelled =>
                 {
-                    let path_hint =
-                        self.path_hint_for(row, prefix, bin_dir, path_value, Some(&outcome));
-                    let completed = InstallJobOutcome {
-                        installed_version: Some(version),
-                        path_hint,
-                    };
-                    let _ = self.store.complete(job_id, completed, self.clock.now());
-                    return;
+                    register_install_bin_dir(bin_dir, row.command);
+                    match self
+                        .prober
+                        .refresh_after_install(target.clone(), bin_dir)
+                        .await
+                    {
+                        Ok(outcome) => {
+                            real_command_ok = outcome.real_command_ok;
+                            // 成功判定 = 版本可读 **且** 真实命令可跑（2.8②）。
+                            if let Some(version) = outcome
+                                .installed_version
+                                .clone()
+                                .filter(|_| outcome.real_command_ok)
+                            {
+                                let path_hint = self.path_hint_for(
+                                    row,
+                                    prefix,
+                                    bin_dir,
+                                    path_value,
+                                    Some(&outcome),
+                                );
+                                let completed = InstallJobOutcome {
+                                    installed_version: Some(version),
+                                    path_hint,
+                                };
+                                let _ = self.store.complete(job_id, completed, self.clock.now());
+                                retry_succeeded = true;
+                                retry_result = "ok";
+                            } else {
+                                retry_result = "post_install_probe_failed";
+                            }
+                        }
+                        Err(_) => retry_result = "probe_error",
+                    }
                 }
+                Ok(_) => retry_result = "retry_exit_nonzero",
+                Err(_) => retry_result = "retry_spawn_error",
             }
+        }
+        // 一条 warn：首次失败原因 / 是否真的重试 / 重试结果。
+        tracing::warn!(
+            target = %target.wire_label(),
+            first_failure = "post_install_probe_failed",
+            retry_attempted,
+            retry_succeeded,
+            retry_result,
+            "provider install: optional-dependency retry"
+        );
+        if retry_succeeded {
+            return;
         }
         let repair = install_repair_command(row, &self.registry, prefix);
         // 2.8③ 三种失败语义：**没装上**（产物里没有该命令）vs **装上但缺
         // 平台包**（命令在但跑不起来）vs **装上但不在 PATH**（能跑但 PATH
         // 上找不到它）—— 提示要能区分。
         let installed = bin_dir.is_some_and(|dir| dir.join(row.command).exists());
-        let message = if !installed {
-            format!(
+        let failure_class = post_install_failure_class(installed, real_command_ok);
+        let message = match failure_class {
+            PostInstallFailureClass::NotInstalled => format!(
                 "没装上（安装产物里没有 `{}` 命令）。请手动运行：{repair}",
                 row.command
-            )
-        } else if !real_command_ok {
-            format!("装上了但跑不起来（装完探测未通过，可能缺平台包）。请手动运行：{repair}")
-        } else {
-            format!(
+            ),
+            PostInstallFailureClass::MissingPlatformPackage => {
+                format!("装上了但跑不起来（装完探测未通过，可能缺平台包）。请手动运行：{repair}")
+            }
+            PostInstallFailureClass::NotOnPath => format!(
                 "装上了但不在 PATH 上（`{}` 能执行，但 PATH 上找不到它）。请把 {} 加入 PATH 后重试",
                 row.command,
                 bin_dir
                     .map(|dir| dir.display().to_string())
                     .unwrap_or_default()
-            )
+            ),
         };
+        tracing::warn!(
+            target = %target.wire_label(),
+            failure_class = failure_class.as_str(),
+            repair_command = %repair,
+            path_hint = %self
+                .path_hint_for(row, prefix, bin_dir, path_value, None)
+                .unwrap_or_default(),
+            "provider install: failed"
+        );
         let failure = InstallJobFailure {
             kind: InstallFailureKind::Other,
             message,
@@ -888,6 +930,11 @@ impl InstallJobExecution {
     /// provider health，不写 capability、不触发核验探针。
     pub async fn run(&self, job_id: &str, target: InstallTarget) {
         let Some(row) = row_for_wire(target.wire_label()) else {
+            tracing::warn!(
+                target = %target.wire_label(),
+                failure_class = "unknown_target",
+                "provider install: failed"
+            );
             let failure = InstallJobFailure {
                 kind: InstallFailureKind::Other,
                 message: format!("未知安装对象：{}", target.wire_label()),
@@ -899,14 +946,28 @@ impl InstallJobExecution {
         let path_value = self.host_path();
         // 安装 / 更新必须落到「PATH 上当前生效的 CLI 所在前缀」——
         // 装到别处（哪怕可写）⇒ 用户执行的仍是旧版本（2026-11-09 bug）。
-        let prefix = match row.npm_package {
+        let (prefix, install_kind, candidate_summary) = match row.npm_package {
             Some(_) => {
-                self.resolve_effective_prefix(row, path_value.as_deref())
-                    .await
+                let decision = self
+                    .resolve_prefix_decision(row, path_value.as_deref())
+                    .await;
+                let summary = decision.summary();
+                (decision.chosen_prefix, "npm", summary)
             }
-            // 官方脚本安装源（Kimi）：前缀无关。
-            None => self.npm_prefix.clone(),
+            // 官方脚本安装源（Kimi）：前缀无关（官方脚本落到安装目录）。
+            None => (self.npm_prefix.clone(), "script", "-".to_string()),
         };
+        // 一条 info：决策链（平台 / 每个候选的 chosen+reason / 选中前缀）——
+        // 客户机「点安装没效果 / 更新装错副本」现场的第一手证据。
+        tracing::info!(
+            target = %target.wire_label(),
+            install_kind,
+            os = std::env::consts::OS,
+            arch = std::env::consts::ARCH,
+            candidates = %candidate_summary,
+            chosen_prefix = %prefix.display(),
+            "provider install: effective prefix decision"
+        );
         let Some(plan) = install_plan_for(&target, None, &self.registry, &prefix) else {
             // row_for_wire 已放行 ⇒ 这里必然可达，防御性兜底。
             return;
@@ -919,7 +980,23 @@ impl InstallJobExecution {
             Some(package) => npm_package_json_version(&prefix, package),
             None => self.prober.version_before_update(target.clone()).await,
         };
-        match self.runner.execute(&plan).await {
+        let execution = self.runner.execute(&plan).await;
+        // 一条 info：执行事实（argv 逐参数 / registry / 超时 / 输出长度 /
+        // exit code / 耗时）。**不打印输出正文**（可能含大载荷）。
+        let executed = execution.as_ref().ok();
+        tracing::info!(
+            target = %target.wire_label(),
+            argv = ?plan.argv,
+            registry = %self.registry,
+            timeout_secs = self.runner.timeout.as_secs(),
+            exit_code = ?executed.map(|result| result.exit_code),
+            stdout_bytes = executed.map(|result| result.stdout.len()),
+            stderr_bytes = executed.map(|result| result.stderr.len()),
+            duration_ms = executed.map(|result| result.duration_ms),
+            timed_out = executed.is_some_and(|result| result.timed_out),
+            "provider install: execute"
+        );
+        match execution {
             Ok(result) if result.exit_code == Some(0) && !result.timed_out && !result.cancelled => {
                 // 装后登记 overlay（**仅当**目录里确实有刚装好的可执行文件）
                 // ⇒ 平台自身的命令可见 PATH 立刻包含新装的 CLI（D1/D2）。
@@ -942,15 +1019,43 @@ impl InstallJobExecution {
                     .as_ref()
                     .is_some_and(|outcome| outcome.real_command_ok);
                 // ③ 更新后版本未变 ⇒ 明确报「命令仍是旧版」（不得静默成功）。
-                if let (Some(before), Some(after)) =
-                    (before_version.as_deref(), detected.as_deref())
-                    && before == after
-                {
+                let version_facts =
+                    update_version_facts(before_version.as_deref(), detected.as_deref());
+                // 一条 info：更新事实（前 / 后版本 / 是否仍是旧版）—— 只在
+                // 「确有更新前版本」时才记（新装没有前版本可谈）。
+                if version_facts.before.is_some() {
+                    tracing::info!(
+                        target = %target.wire_label(),
+                        before_version = %version_facts.before.as_deref().unwrap_or("-"),
+                        after_version = %version_facts.after.as_deref().unwrap_or("-"),
+                        still_old = version_facts.still_old,
+                        "provider install: update"
+                    );
+                }
+                if version_facts.still_old {
+                    let version = version_facts.after.as_deref().unwrap_or_default();
                     let repair = install_repair_command(row, &self.registry, &prefix);
+                    tracing::warn!(
+                        target = %target.wire_label(),
+                        failure_class = "still_old_version",
+                        before_version = %version,
+                        after_version = %version,
+                        repair_command = %repair,
+                        path_hint = %self
+                            .path_hint_for(
+                                row,
+                                &prefix,
+                                bin_dir.as_deref(),
+                                path_value.as_deref(),
+                                None,
+                            )
+                            .unwrap_or_default(),
+                        "provider install: failed"
+                    );
                     let failure = InstallJobFailure {
                         kind: InstallFailureKind::Other,
                         message: format!(
-                            "命令仍是旧版（{after}）：更新没有生效。若该版本已是最新可忽略；否则请手动运行：{repair}"
+                            "命令仍是旧版（{version}）：更新没有生效。若该版本已是最新可忽略；否则请手动运行：{repair}"
                         ),
                         manual_command: repair,
                     };
@@ -998,6 +1103,15 @@ impl InstallJobExecution {
                     command_missing: None,
                 };
                 let failure = classify_install_failure(row, &signals, &self.registry);
+                tracing::warn!(
+                    target = %target.wire_label(),
+                    failure_class = install_failure_kind_code(failure.kind),
+                    repair_command = %failure.manual_command,
+                    path_hint = %self
+                        .path_hint_for(row, &prefix, None, path_value.as_deref(), None)
+                        .unwrap_or_default(),
+                    "provider install: failed"
+                );
                 let _ = self.store.fail(job_id, failure, self.clock.now());
             }
             Err(BoundedCommandError::CommandMissing {
@@ -1010,6 +1124,15 @@ impl InstallJobExecution {
                     ..InstallFailureSignals::default()
                 };
                 let failure = classify_install_failure(row, &signals, &self.registry);
+                tracing::warn!(
+                    target = %target.wire_label(),
+                    failure_class = install_failure_kind_code(failure.kind),
+                    repair_command = %failure.manual_command,
+                    path_hint = %self
+                        .path_hint_for(row, &prefix, None, path_value.as_deref(), None)
+                        .unwrap_or_default(),
+                    "provider install: failed"
+                );
                 let _ = self.store.fail(job_id, failure, self.clock.now());
             }
             Err(BoundedCommandError::Io { details }) => {
@@ -1018,6 +1141,15 @@ impl InstallJobExecution {
                     ..InstallFailureSignals::default()
                 };
                 let failure = classify_install_failure(row, &signals, &self.registry);
+                tracing::warn!(
+                    target = %target.wire_label(),
+                    failure_class = install_failure_kind_code(failure.kind),
+                    repair_command = %failure.manual_command,
+                    path_hint = %self
+                        .path_hint_for(row, &prefix, None, path_value.as_deref(), None)
+                        .unwrap_or_default(),
+                    "provider install: failed"
+                );
                 let _ = self.store.fail(job_id, failure, self.clock.now());
             }
         }

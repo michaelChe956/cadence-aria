@@ -1053,3 +1053,133 @@ async fn update_reports_still_old_version_when_version_unchanged() {
         failure.message
     );
 }
+
+// ---- 可诊断性（P0）：装后探测来源的结构化事实 ----
+
+/// 桩 runner：只有 PATH 口径（裸命令）的 `--version` 成功，其余全失败。
+#[derive(Default)]
+struct VersionOnlyOnPathRunner {
+    requests: Mutex<Vec<BoundedCommandRequest>>,
+}
+
+#[async_trait::async_trait]
+impl BoundedCommandRunner for VersionOnlyOnPathRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        let bare = !request.executable.contains('/');
+        let is_version = request.argv == vec!["--version".to_string()];
+        self.requests
+            .lock()
+            .expect("recorded requests")
+            .push(request);
+        if bare && is_version {
+            success("1.2.3")
+        } else {
+            failure("not found")
+        }
+    }
+}
+
+/// 版本来源必须是结构化事实：`package.json` 命中 ⇒ 不得再跑 `--version`。
+#[tokio::test]
+async fn post_install_probe_reports_package_json_version_source() {
+    let root = tempdir().expect("root");
+    let prefix = root.path().join("installation");
+    let package_dir = prefix
+        .join("lib")
+        .join("node_modules")
+        .join("@openai")
+        .join("codex");
+    std::fs::create_dir_all(&package_dir).expect("package dir");
+    std::fs::write(
+        package_dir.join("package.json"),
+        br#"{"name":"@openai/codex","version":"9.9.9"}"#,
+    )
+    .expect("package.json");
+
+    let runner = Arc::new(AlwaysFailingRunner::default());
+    let prober = health_prober(root.path(), runner.clone());
+    let bin_dir = prefix.join("bin");
+
+    let (result, facts) = prober
+        .probe_with_facts(
+            InstallTarget::Provider(ProviderName::Codex),
+            Some(bin_dir.as_path()),
+        )
+        .await;
+
+    let outcome = result.expect("probe");
+    assert_eq!(outcome.installed_version.as_deref(), Some("9.9.9"));
+    assert_eq!(
+        facts.version_source,
+        VersionProbeSource::PackageJson,
+        "package.json 可读 ⇒ 版本来源必须是 from_package_json"
+    );
+    assert_eq!(
+        facts.real_command_argv,
+        vec!["--help".to_string()],
+        "真实命令的 argv 必须如实上报（provider 是 --help）"
+    );
+    assert!(!facts.real_command_ok, "桩 runner 全失败 ⇒ 真实命令不通过");
+    assert!(
+        !facts.path_probe_ok,
+        "PATH 口径真实命令失败（装到了 PATH 之外）必须如实上报"
+    );
+    assert!(
+        !runner.requests().iter().any(|request| {
+            request.argv == vec!["--version".to_string()]
+        }),
+        "package.json 命中后不得再执行 --version 探测"
+    );
+}
+
+/// 无 `package.json`、PATH 口径 `--version` 成功 ⇒ 来源 `from_version_flag`。
+#[tokio::test]
+async fn post_install_probe_reports_version_flag_source() {
+    let root = tempdir().expect("root");
+    let runner = Arc::new(VersionOnlyOnPathRunner::default());
+    let prober = health_prober(root.path(), runner.clone());
+
+    let (result, facts) = prober
+        .probe_with_facts(InstallTarget::Provider(ProviderName::Codex), None)
+        .await;
+
+    let outcome = result.expect("probe");
+    assert_eq!(outcome.installed_version.as_deref(), Some("1.2.3"));
+    assert_eq!(facts.version_source, VersionProbeSource::VersionFlag);
+    assert!(
+        facts.path_version_ok,
+        "PATH 口径 --version 成功必须如实上报"
+    );
+}
+
+/// PATH 口径 `--version` 失败、绝对路径兜底成功 ⇒ 来源 `absolute_path_probe`。
+#[tokio::test]
+async fn post_install_probe_reports_absolute_path_probe_source() {
+    let root = tempdir().expect("root");
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    let runner = Arc::new(PathAwareRunner::default());
+    let prober = health_prober(root.path(), runner.clone());
+
+    let (result, facts) = prober
+        .probe_with_facts(InstallTarget::CodeGraph, Some(bin.as_path()))
+        .await;
+
+    assert_eq!(
+        result.expect("probe").installed_version.as_deref(),
+        Some("1.2.3")
+    );
+    assert_eq!(facts.version_source, VersionProbeSource::AbsolutePathProbe);
+    assert_eq!(
+        facts.real_command_argv,
+        vec!["status".to_string(), "--json".to_string()],
+        "codegraph 的真实命令必须是 status --json"
+    );
+    assert!(
+        !facts.path_version_ok,
+        "PATH 口径 --version 失败（裸命令失败）必须如实上报"
+    );
+}
