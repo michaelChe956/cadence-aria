@@ -1,11 +1,11 @@
 // P05 lookup 真实查找：store 私有分区枚举 + 严格读回。
 // 落位：src/product/lifecycle_store/tests/sc_failure_round_lookup.rs
-// 由 sc_failure_evidence.rs 以 #[path] 挂载（见该文件末尾的 mod 登记）。
+// 由 sc_failure_evidence.rs 以 #[path] 挂载。
 //
-// 约束（Plan P05 lookup / §2.4）：
-// - 身份只来自真实 store / 真实 handle；不猜最新目录、不解析不透明 run_ref；
-// - 查找只读：不写、不建目录、不分配 seq、不读 provider 产物；
-// - 坏日志不得静默跳过：带已验证前缀报错；多命中必须报错（不得挑"最新"）。
+// 约束（Plan P05 lookup / §2.4）：身份只来自真实 store / 真实 handle（不猜最新
+// 目录、不解析不透明 run_ref）；查找只读（不写、不建目录、不分配 seq、不读
+// provider 产物）；坏日志不得静默跳过（带已验证前缀报错）；多命中必须报错
+// （不得挑"最新"）。
 
 use super::fixture::*;
 
@@ -40,7 +40,6 @@ fn chain_and_round(
     original_node_id: &str,
     handle: &WorkItemSplitProviderRunHandle,
     provider: ProviderName,
-    ordinal: u32,
 ) -> (ScFailureChainIdentity, ScRoundIdentity) {
     let chain = ScFailureChainIdentity {
         scope: scope_of(session_id),
@@ -59,13 +58,23 @@ fn chain_and_round(
         chain_id: chain.chain_id.clone(),
         round_id: handle.run_ref.clone(),
         node_id: original_node_id.to_string(),
-        round_ordinal: ordinal,
+        round_ordinal: 1,
         provider,
         workspace_session_id: handle.workspace_session_id.clone(),
         role_run_seq: handle.role_run_seq,
         run_ref: handle.run_ref.clone(),
     };
     (chain, round)
+}
+
+/// 绑定一轮（真实追加 RoundBound）。
+fn bind(store: &LifecycleStore, chain: &ScFailureChainIdentity, round: &ScRoundIdentity) {
+    let event = ScFailureEvidenceEvent::RoundBound {
+        round: round.clone(),
+    };
+    store
+        .append_sc_failure_evidence(chain, &event)
+        .expect("append round bound");
 }
 
 /// 证据分区目录名（只读列举，不创建）。
@@ -95,32 +104,17 @@ fn sc_failure_round_lookup_finds_bound_round_after_store_rebuild() {
         first_handle.role_run_seq < second_handle.role_run_seq,
         "真实 begin 必须分配递增 seq"
     );
-    let (first_chain, first_round) = chain_and_round(
-        &session_id,
-        BUSINESS_KEY,
-        NODE_ID,
-        &first_handle,
-        ProviderName::Codex,
-        1,
-    );
+    let (first_chain, first_round) =
+        chain_and_round(&session_id, BUSINESS_KEY, NODE_ID, &first_handle, ProviderName::Codex);
     let (second_chain, second_round) = chain_and_round(
         &session_id,
         BUSINESS_KEY_SECOND,
         NODE_ID_SECOND,
         &second_handle,
         ProviderName::ClaudeCode,
-        1,
     );
-    for (chain, round) in [(&first_chain, &first_round), (&second_chain, &second_round)] {
-        store
-            .append_sc_failure_evidence(
-                chain,
-                &ScFailureEvidenceEvent::RoundBound {
-                    round: (*round).clone(),
-                },
-            )
-            .expect("append round bound");
-    }
+    bind(&store, &first_chain, &first_round);
+    bind(&store, &second_chain, &second_round);
 
     let first_log = log_bytes(&store, &first_chain);
     let second_log = log_bytes(&store, &second_chain);
@@ -142,36 +136,21 @@ fn sc_failure_round_lookup_finds_bound_round_after_store_rebuild() {
     assert_eq!(found_round.round_ordinal, 1);
     assert_eq!(found_round.provider, ProviderName::Codex);
 
-    // 另一条链的节点不得被本业务键命中（不得跨链兜底）。
-    assert!(
-        reopened
-            .find_sc_failure_round(&scope, BUSINESS_KEY, NODE_ID, &second_round.node_id, 1)
-            .expect("lookup")
-            .is_none(),
-        "另一条链的轮不得命中"
-    );
-
-    // ordinal 不符 / 业务键未知 → None。
-    assert!(
-        reopened
-            .find_sc_failure_round(&scope, BUSINESS_KEY, NODE_ID, &first_round.node_id, 2)
-            .expect("lookup")
-            .is_none(),
-        "ordinal 不符不得命中"
-    );
-    assert!(
-        reopened
-            .find_sc_failure_round(
-                &scope,
-                "business_key_missing_0003",
-                NODE_ID,
-                &first_round.node_id,
-                1,
-            )
-            .expect("lookup")
-            .is_none(),
-        "未知业务键不得命中"
-    );
+    // 未命中：另一条链的轮、错 ordinal、未知业务键。
+    let misses: [(&str, &String, u32); 3] = [
+        (BUSINESS_KEY, &second_round.node_id, 1),
+        (BUSINESS_KEY, &first_round.node_id, 2),
+        ("business_key_missing_0003", &first_round.node_id, 1),
+    ];
+    for (business_key, node_id, ordinal) in misses {
+        assert!(
+            reopened
+                .find_sc_failure_round(&scope, business_key, node_id, ordinal)
+                .expect("lookup")
+                .is_none(),
+            "未命中必须返回 None"
+        );
+    }
 
     // 只读：日志字节与分区目录零变化。
     assert_eq!(log_bytes(&store, &first_chain), first_log);
@@ -195,14 +174,8 @@ fn sc_failure_round_lookup_reports_corrupt_candidate_log() {
     let scope = scope_of(&session_id);
 
     let handle = begin_with(&store, &session_id, ProviderName::Codex);
-    let (chain, round) = chain_and_round(
-        &session_id,
-        BUSINESS_KEY,
-        NODE_ID,
-        &handle,
-        ProviderName::Codex,
-        1,
-    );
+    let (chain, round) =
+        chain_and_round(&session_id, BUSINESS_KEY, NODE_ID, &handle, ProviderName::Codex);
     let bound = store
         .append_sc_failure_evidence(
             &chain,
@@ -247,32 +220,12 @@ fn sc_failure_round_lookup_rejects_ambiguous_matches() {
 
     let first_handle = begin_with(&store, &session_id, ProviderName::Codex);
     let retry_handle = begin_with(&store, &session_id, ProviderName::ClaudeCode);
-    let (first_chain, first_round) = chain_and_round(
-        &session_id,
-        BUSINESS_KEY,
-        NODE_ID,
-        &first_handle,
-        ProviderName::Codex,
-        1,
-    );
-    let (retry_chain, retry_round) = chain_and_round(
-        &session_id,
-        BUSINESS_KEY,
-        NODE_ID,
-        &retry_handle,
-        ProviderName::ClaudeCode,
-        1,
-    );
-    for (chain, round) in [(&first_chain, &first_round), (&retry_chain, &retry_round)] {
-        store
-            .append_sc_failure_evidence(
-                chain,
-                &ScFailureEvidenceEvent::RoundBound {
-                    round: (*round).clone(),
-                },
-            )
-            .expect("append round bound");
-    }
+    let (first_chain, first_round) =
+        chain_and_round(&session_id, BUSINESS_KEY, NODE_ID, &first_handle, ProviderName::Codex);
+    let (retry_chain, retry_round) =
+        chain_and_round(&session_id, BUSINESS_KEY, NODE_ID, &retry_handle, ProviderName::ClaudeCode);
+    bind(&store, &first_chain, &first_round);
+    bind(&store, &retry_chain, &retry_round);
 
     let reopened = LifecycleStore::new(store.app_paths());
     let err = reopened
