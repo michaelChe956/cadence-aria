@@ -85,13 +85,35 @@ fn failure(stderr: &str) -> Result<BoundedCommandResult, BoundedCommandError> {
 struct SpyProber {
     calls: AtomicUsize,
     version: Option<String>,
+    real_command_ok: bool,
+    before_version: Option<String>,
 }
 
 impl SpyProber {
     fn new(version: Option<&str>) -> Arc<Self> {
+        Self::with_real_command(version, true)
+    }
+
+    /// 真实命令**跑不起来**的装后探测（2.8③「装上但缺平台包」）。
+    fn with_real_command(version: Option<&str>, real_command_ok: bool) -> Arc<Self> {
+        Self::configured(version, real_command_ok, None)
+    }
+
+    /// 带更新前版本快照（Kimi 等脚本类：REQ-PCI-10 同源比较）。
+    fn with_before_version(version: Option<&str>, before_version: Option<&str>) -> Arc<Self> {
+        Self::configured(version, true, before_version)
+    }
+
+    fn configured(
+        version: Option<&str>,
+        real_command_ok: bool,
+        before_version: Option<&str>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             calls: AtomicUsize::new(0),
             version: version.map(str::to_string),
+            real_command_ok,
+            before_version: before_version.map(str::to_string),
         })
     }
 
@@ -110,8 +132,12 @@ impl PostInstallProber for SpyProber {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(PostInstallProbeOutcome {
             installed_version: self.version.clone(),
-            real_command_ok: true,
+            real_command_ok: self.real_command_ok,
         })
+    }
+
+    async fn version_before_update(&self, _target: InstallTarget) -> Option<String> {
+        self.before_version.clone()
     }
 }
 

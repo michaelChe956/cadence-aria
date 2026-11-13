@@ -247,6 +247,15 @@ pub trait PostInstallProber: Send + Sync {
         target: InstallTarget,
         install_bin_dir: Option<&Path>,
     ) -> Result<PostInstallProbeOutcome, String>;
+
+    /// 更新**前**的版本快照（REQ-PCI-10：更新前后必须**同源**比较）。
+    ///
+    /// npm 类由 `package.json` 提供（`npm_package_json_version`）⇒ 默认
+    /// `None`；脚本类（Kimi）必须给出与装后同一来源的版本，否则「脚本
+    /// exit 0 但版本没变」会静默判成功。
+    async fn version_before_update(&self, _target: InstallTarget) -> Option<String> {
+        None
+    }
 }
 
 /// 生产实现：provider → `provider_health.refresh` 后回填版本；
@@ -345,13 +354,13 @@ impl HealthRefreshProber {
 /// 装后验证用的**真实命令**（不能只 `--version`）。
 fn post_install_verification_argv(target_wire: &str) -> Vec<String> {
     match target_wire {
-        // codegraph：`files` 会真正加载平台 native 包（bundle 缺失即失败）；
-        // 未建索引时它输出提示并 exit 0 ⇒ 可作为「装上且真能用」的证据。
-        "codegraph" => vec![
-            "files".to_string(),
-            "--json".to_string(),
-            "--no-metadata".to_string(),
-        ],
+        // codegraph：`status --json` **不要求已建索引**（实测 1.6.2 在未初始化
+        // 目录 exit 0，输出 `{"initialized":false,...}`），而任何命令都经由
+        // 平台包自带的 node + dist 启动 ⇒ 平台包缺失时 exit 1（实测），故它
+        // 既能证明「bundle 真能用」，又不会把「未建索引」误判成失败。
+        // **不得**用 `files`：实测 1.6.2 在未初始化目录 `files --json` exit 1
+        // （`✗ CodeGraph not initialized`），会把新装的健康 codegraph 判失败。
+        "codegraph" => vec!["status".to_string(), "--json".to_string()],
         // provider CLI：`--help` 会真正加载入口与依赖（缺依赖即非零退出）。
         _ => vec!["--help".to_string()],
     }
@@ -405,6 +414,13 @@ impl PostInstallProber for HealthRefreshProber {
                 real_command_ok,
             }),
         }
+    }
+
+    /// 更新前版本（Kimi 等脚本类）：走**与装后同一个** `--version` 探测口径
+    /// （PATH 口径 —— 装前还没有本次安装的 bin 目录），保证前后同源可比。
+    async fn version_before_update(&self, target: InstallTarget) -> Option<String> {
+        let row = row_for_wire(target.wire_label())?;
+        self.probe_version(row.command, None, false).await
     }
 }
 
@@ -654,6 +670,11 @@ impl InstallJobExecution {
     /// 已安装（但**不在 PATH 上**）的对象所在前缀：从
     /// `<prefix>/lib/node_modules/<pkg>` 的真实路径反推（magpie
     /// `fromNodeModules`）。更新必须装回这里，不得改装到别的前缀（2.10②）。
+    ///
+    /// `npm_global` 必须是**未经过滤**的 `npm prefix -g` 原始结果 ——
+    /// 「`<prefix>/bin ∈ PATH`」过滤只适用于**新装候选**的选择：否则「唯一
+    /// 已有的安装正好在 npm 全局前缀、而其 bin 不在 PATH 上」（本轮核心
+    /// 现场）会被丢弃 ⇒ 更新改装到 fallback（更新了用户根本没在跑的那份）。
     fn installed_prefix(
         &self,
         row: &InstallSourceRow,
@@ -692,29 +713,38 @@ impl InstallJobExecution {
     ///
     /// 判定链（写死）：
     /// ① **visible** —— PATH 上当前生效的 CLI 所在前缀，且**真实可写**；
-    /// ② **`npm prefix -g`** —— **真实可写** 且 **`<prefix>/bin ∈ PATH`**
-    ///    （装到 PATH 之外 ⇒ 装完探测仍失败 ⇒ 等于没装）；
-    /// ③ **fallback** —— `NPM_PREFIX` / `$HOME/.npm-global`。
+    /// ② **已安装位置反推**（2.10②）—— 用**未经过滤**的 `npm prefix -g` 与
+    ///    平台自身前缀扫描已安装包（`<prefix>/lib/node_modules/<pkg>` ⇒ 反推
+    ///    前缀）；**只有 visible 不存在（或不可写）时才用** —— 否则机器上
+    ///    同时存在两份安装时，更新会写进另一份（2.10①「更新装到 A、用户跑的
+    ///    还是 B」）；
+    /// ③ **`npm prefix -g`** —— 仅作**新装候选**：真实可写 且
+    ///    `<prefix>/bin ∈ PATH`（装到 PATH 之外 ⇒ 装完探测仍失败）；
+    /// ④ **fallback** —— `NPM_PREFIX` / `$HOME/.npm-global`。
     pub async fn resolve_effective_prefix(
         &self,
         row: &InstallSourceRow,
         path_value: Option<&str>,
     ) -> PathBuf {
         let visible = visible_cli_prefix(row.command, path_value);
-        // ② `npm prefix -g`：真实可写 **且** `<prefix>/bin ∈ PATH`。
-        let npm_global = match self.npm_prefix_probe.as_ref() {
+        // `npm prefix -g` 的**原始**结果：已安装扫描必须用它（过滤只适用于
+        // 新装候选）。
+        let raw_npm_global = match self.npm_prefix_probe.as_ref() {
             Some(probe) => probe.npm_global_prefix().await,
             None => None,
         };
-        let npm_global = npm_global
-            .filter(|prefix| is_writable_dir(prefix) && prefix_bin_is_on_path(prefix, path_value));
-        // ② 已安装但**不在 PATH 上** ⇒ 从已安装包的真实路径反推前缀
-        // （2.10：更新必须装回被更新对象所在的前缀，不得改装到别处）。
-        if let Some(prefix) = self.installed_prefix(row, npm_global.as_deref()) {
+        // ① visible（真实可写）优先：更新必须装回用户手上那份。
+        if let Some(prefix) = visible.as_deref().filter(|prefix| is_writable_dir(prefix)) {
+            return prefix.to_path_buf();
+        }
+        // ② 只有 visible 不存在（或不可写）时，才用已安装位置反推。
+        if let Some(prefix) = self.installed_prefix(row, raw_npm_global.as_deref()) {
             return prefix;
         }
-        // ① visible（真实可写）→ ② 已安装位置 → ③ npm 全局前缀 → ④ 兜底。
-        choose_effective_prefix(visible.as_deref(), npm_global.as_deref(), &self.npm_prefix)
+        // ③ npm 全局前缀仅作新装候选（可写且 `<prefix>/bin ∈ PATH`）→ ④ 兜底。
+        let npm_global = raw_npm_global
+            .filter(|prefix| is_writable_dir(prefix) && prefix_bin_is_on_path(prefix, path_value));
+        choose_effective_prefix(None, npm_global.as_deref(), &self.npm_prefix)
     }
 
     /// 装完提示（2.5 / 2.8③）：npm 类看 PATH 上生效的命令是不是本次安装的
@@ -746,9 +776,11 @@ impl InstallJobExecution {
         })
     }
 
-    /// 装上但探针未过 ⇒ npm 类以 `--include=optional` **重试一次**（npm 会
-    /// 「留下缺 native 包的安装」却仍 exit 0 —— 首次装时 `--omit=optional`
-    /// 漏掉了平台包）；重试仍失败 ⇒ 给出**可复制**的修复命令（2.7③）。
+    /// 装上但探针未过（**含「真实命令跑不起来」**）⇒ npm 类以
+    /// `--include=optional` **重试一次**；重试后仍失败 ⇒ 按**三种语义**落
+    /// 失败载荷（2.8③，不得用同一条含糊文案覆盖）：
+    /// ① 没装上（产物里没有该命令）；② 装上但缺平台包（命令在但真实命令
+    /// 跑不起来）；③ 装上但不在 PATH（命令能跑但 PATH 上取不到它）。
     async fn retry_with_optional_dependencies(
         &self,
         job_id: &str,
@@ -756,8 +788,10 @@ impl InstallJobExecution {
         row: &InstallSourceRow,
         prefix: &Path,
         bin_dir: Option<&Path>,
-        path_hint: Option<String>,
+        path_value: Option<&str>,
+        real_command_ok_before_retry: bool,
     ) {
+        let mut real_command_ok = real_command_ok_before_retry;
         if let Some(retry) = npm_retry_plan(row, None, &self.registry, prefix)
             && let Ok(result) = self.runner.execute(&retry).await
             && result.exit_code == Some(0)
@@ -765,31 +799,49 @@ impl InstallJobExecution {
             && !result.cancelled
         {
             register_install_bin_dir(bin_dir, row.command);
-            if let Some(version) = self
+            if let Some(outcome) = self
                 .prober
-                .refresh_after_install(target, bin_dir)
+                .refresh_after_install(target.clone(), bin_dir)
                 .await
                 .ok()
-                .and_then(|outcome| outcome.installed_version)
             {
-                let outcome = InstallJobOutcome {
-                    installed_version: Some(version),
-                    path_hint,
-                };
-                let _ = self.store.complete(job_id, outcome, self.clock.now());
-                return;
+                real_command_ok = outcome.real_command_ok;
+                // 成功判定 = 版本可读 **且** 真实命令可跑（2.8②）。
+                if let Some(version) = outcome
+                    .installed_version
+                    .clone()
+                    .filter(|_| outcome.real_command_ok)
+                {
+                    let path_hint =
+                        self.path_hint_for(row, prefix, bin_dir, path_value, Some(&outcome));
+                    let completed = InstallJobOutcome {
+                        installed_version: Some(version),
+                        path_hint,
+                    };
+                    let _ = self.store.complete(job_id, completed, self.clock.now());
+                    return;
+                }
             }
         }
         let repair = install_repair_command(row, &self.registry, prefix);
         // 2.8③ 三种失败语义：**没装上**（产物里没有该命令）vs **装上但缺
-        // 平台包**（命令在但跑不起来）——提示要能区分。
+        // 平台包**（命令在但跑不起来）vs **装上但不在 PATH**（能跑但 PATH
+        // 上找不到它）—— 提示要能区分。
         let installed = bin_dir.is_some_and(|dir| dir.join(row.command).exists());
-        let message = if installed {
-            format!("装上了但跑不起来（装完探测未通过，可能缺平台包）。请手动运行：{repair}")
-        } else {
+        let message = if !installed {
             format!(
                 "没装上（安装产物里没有 `{}` 命令）。请手动运行：{repair}",
                 row.command
+            )
+        } else if !real_command_ok {
+            format!("装上了但跑不起来（装完探测未通过，可能缺平台包）。请手动运行：{repair}")
+        } else {
+            format!(
+                "装上了但不在 PATH 上（`{}` 能执行，但 PATH 上找不到它）。请把 {} 加入 PATH 后重试",
+                row.command,
+                bin_dir
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_default()
             )
         };
         let failure = InstallJobFailure {
@@ -828,12 +880,13 @@ impl InstallJobExecution {
             // row_for_wire 已放行 ⇒ 这里必然可达，防御性兜底。
             return;
         };
-        // 更新语义（2.10③）：对象**已存在**（package.json 在 ⇒ 已装）⇒ 本次
-        // 是「更新」⇒ 先取当前版本（读 package.json，不执行进程）；更新后
-        // 版本未变要**明确报**「命令仍是旧版」，不得静默成功。
+        // 更新语义（2.10③ / REQ-PCI-10）：对象**已存在** ⇒ 本次是「更新」⇒
+        // 先取当前版本**同源**快照（npm 读 package.json，不执行进程；Kimi 等
+        // 脚本类走同一 prober 的 `--version` 口径），更新后版本未变要**明确
+        // 报**「命令仍是旧版」，不得静默成功。
         let before_version = match row.npm_package {
             Some(package) => npm_package_json_version(&prefix, package),
-            None => None,
+            None => self.prober.version_before_update(target.clone()).await,
         };
         match self.runner.execute(&plan).await {
             Ok(result) if result.exit_code == Some(0) && !result.timed_out && !result.cancelled => {
@@ -851,6 +904,12 @@ impl InstallJobExecution {
                 let detected = probe
                     .as_ref()
                     .and_then(|outcome| outcome.installed_version.clone());
+                // 完成判定 = 「版本可读」**且**「真实命令可跑」：只有其一
+                // 不得判成功 —— 「包在、版本读得到，但真实命令跑不起来」是
+                // 假绿（2.8②/2.8③）。
+                let real_command_ok = probe
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.real_command_ok);
                 // ③ 更新后版本未变 ⇒ 明确报「命令仍是旧版」（不得静默成功）。
                 if let (Some(before), Some(after)) =
                     (before_version.as_deref(), detected.as_deref())
@@ -874,7 +933,7 @@ impl InstallJobExecution {
                     path_value.as_deref(),
                     probe.as_ref(),
                 );
-                match detected {
+                match detected.filter(|_| real_command_ok) {
                     Some(version) => {
                         let outcome = InstallJobOutcome {
                             installed_version: Some(version),
@@ -882,7 +941,8 @@ impl InstallJobExecution {
                         };
                         let _ = self.store.complete(job_id, outcome, self.clock.now());
                     }
-                    // 装上但探针未过 ⇒ 重试一次（2.7③）。
+                    // 装上但探针未过（**含**真实命令跑不起来）⇒ 重试一次
+                    // （2.7③ / 2.8③）。
                     None => {
                         self.retry_with_optional_dependencies(
                             job_id,
@@ -890,7 +950,8 @@ impl InstallJobExecution {
                             row,
                             &prefix,
                             bin_dir.as_deref(),
-                            path_hint,
+                            path_value.as_deref(),
+                            real_command_ok,
                         )
                         .await;
                     }
@@ -933,4 +994,5 @@ impl InstallJobExecution {
 #[cfg(test)]
 mod tests {
     include!("runner_overlay_tests.inc.rs");
+    include!("runner_update_tests.inc.rs");
 }
