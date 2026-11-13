@@ -12,6 +12,7 @@
 //! 消费同一窗口的 claim 结果后经 `sc_teaching_attempt` 传入。
 
 use super::gateway_start::PlanAuthorLaunch;
+use super::sc_failure_transport::{ScAuthorRoundDelivery, ScBoundProviderRound};
 use super::single_candidate::SingleCandidateProviderRunError;
 use super::*;
 use crate::product::lifecycle_store::{ScTeachingClaimOutcome, ScTeachingEstablishOutcome};
@@ -22,6 +23,7 @@ use crate::product::work_item_plan_policy::{
     ScTeachingWindowRequest, ScTeachingWindowStatus,
 };
 use crate::web::types::GenerateWorkItemsRequest;
+use crate::web::workspace_ws_types::{ScEvidenceRef, ScRoundIdentity};
 
 /// 结构门拒收的首轮失败描述（终态错误文案用；只述事实，不虚构原因）。
 pub(super) fn structure_gate_first_round_failure() -> String {
@@ -269,35 +271,29 @@ pub(super) fn close_sc_teaching_delivered(lifecycle: &LifecycleStore, session_id
     }
 }
 
-/// 教学重驱共用的 plan split run 开局：失败 ⇒ 持久化终态 Failed 后以
-/// Message 上浮（与既有各臂的收口同形）。
+/// 教学重驱共用的轮绑定：沿用原轮链身份（同一 scope/business_key/原节点），
+/// 教学轮是新物理 provider run（新 handle + role_run_seq）。
+/// 失败 ⇒ 持久化终态 Failed 后以 Message 上浮（与既有各臂的收口同形）。
 #[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同本文件先例）。
 pub(super) fn begin_sc_teaching_reredrive_run(
     lifecycle: &LifecycleStore,
     engine: &mut WorkspaceEngine,
-    launch: &PlanAuthorLaunch,
+    original: &ScBoundProviderRound,
+    previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
+    node_id: &str,
     author_provider: &ProviderName,
-) -> Result<Option<PlanSplitRunContext>, SingleCandidateProviderRunError> {
-    let (project_id, issue_id, session_id) = {
-        let session = engine.session();
-        (
-            session.project_id.clone(),
-            session.issue_id.clone(),
-            session.session_id.clone(),
-        )
-    };
-    match begin_plan_split_run_if_logical(
-        launch,
+) -> Result<ScBoundProviderRound, SingleCandidateProviderRunError> {
+    match super::sc_failure_transport::begin_sc_teaching_round(
         lifecycle,
-        &project_id,
-        &issue_id,
+        original,
+        previous,
+        node_id,
         author_provider,
-        &session_id,
     ) {
-        Ok(run) => Ok(run),
-        Err(message) => {
+        Ok(bound) => Ok(bound),
+        Err(failure) => {
             engine.persist_single_candidate_terminal_phase(SingleCandidatePhase::Failed);
-            Err(SingleCandidateProviderRunError::Message(message))
+            Err(SingleCandidateProviderRunError::Message(format!("{failure}")))
         }
     }
 }
@@ -323,9 +319,9 @@ pub(super) fn authorize_sc_teaching_reredrive(
 }
 
 /// compile/IR 两类教学重驱的共用驱动臂（自 run/single_candidate.rs 抽出
-/// 以守其行数登记）：发可观测 prompt 事件 → 开局 plan split run → 复用
+/// 以守其行数登记）：发可观测 prompt 事件 → 严格绑定教学物理轮 → 复用
 /// `drive_single_candidate_reredrive` 同一 provider 通道执行恰一次重驱，
-/// 返回归一化后的 markdown source（调用方回编译循环 continue）。
+/// 返回归一化 source、严格读回的 raw 引用与轮身份（调用方回编译循环）。
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::result_large_err)] // 同上：该枚举是运行收尾的唯一 typed 出口。
 pub(super) async fn drive_compile_teaching_reredrive(
@@ -343,7 +339,10 @@ pub(super) async fn drive_compile_teaching_reredrive(
     reredrive_prompt: &str,
     repository_path: &std::path::Path,
     attempt: &ScTeachingAttemptRef,
-) -> Result<String, SingleCandidateProviderRunError> {
+    // P08：教学轮沿用原轮链身份；当前轮（raw + 轮身份）推进教学轮 ordinal。
+    original: &ScBoundProviderRound,
+    previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
+) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
     engine
         .emit_execution_event(
             ProviderExecutionEvent {
@@ -361,9 +360,15 @@ pub(super) async fn drive_compile_teaching_reredrive(
             Some(author_provider.clone()),
         )
         .await;
-    let reredrive_run =
-        begin_sc_teaching_reredrive_run(lifecycle, engine, launch, author_provider)?;
-    super::single_candidate::drive_single_candidate_reredrive(
+    let bound = begin_sc_teaching_reredrive_run(
+        lifecycle,
+        engine,
+        original,
+        previous,
+        node_id,
+        author_provider,
+    )?;
+    super::sc_failure_transport::drive_single_candidate_reredrive(
         engine,
         launch,
         Arc::clone(provider_for_run),
@@ -373,7 +378,8 @@ pub(super) async fn drive_compile_teaching_reredrive(
         author_provider,
         reredrive_prompt,
         repository_path,
-        reredrive_run.as_ref(),
+        &bound,
+        lifecycle,
         Some(attempt),
     )
     .await
@@ -381,8 +387,8 @@ pub(super) async fn drive_compile_teaching_reredrive(
 
 /// 结构门拒收教学重驱：发一条可观测的 prompt 事件（与 compile/IR 重驱的
 /// 事件同形），随后复用 `drive_single_candidate_reredrive` 同一 provider
-/// 通道再驱一次作者，返回归一化后的 markdown source——调用方回编译循环
-/// 重走 compile → IR 预校验 → 候选结构门；`sc_teaching_attempt` 为调用方
+/// 通道再驱一次作者，返回归一化 source、raw 引用与轮身份——调用方回编译
+/// 循环重走 compile → IR 预校验 → 候选结构门；`sc_teaching_attempt` 为调用方
 /// 消费同一教学窗口的 claim 结果（结构门类不再有独立槽位或布尔授权）。
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::result_large_err)] // 同上：该枚举是运行收尾的唯一 typed 出口。
@@ -398,7 +404,10 @@ pub(super) async fn drive_structure_gate_reredrive(
     repair_prompt: &str,
     repository_path: &std::path::Path,
     sc_teaching_attempt: Option<&ScTeachingAttemptRef>,
-) -> Result<String, SingleCandidateProviderRunError> {
+    // P08：教学轮沿用原轮链身份；当前轮（raw + 轮身份）推进教学轮 ordinal。
+    original: &ScBoundProviderRound,
+    previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
+) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
     engine
         .emit_execution_event(
             ProviderExecutionEvent {
@@ -421,9 +430,15 @@ pub(super) async fn drive_structure_gate_reredrive(
             Some(author_provider.clone()),
         )
         .await;
-    let reredrive_run =
-        begin_sc_teaching_reredrive_run(lifecycle, engine, launch, author_provider)?;
-    super::single_candidate::drive_single_candidate_reredrive(
+    let bound = begin_sc_teaching_reredrive_run(
+        lifecycle,
+        engine,
+        original,
+        previous,
+        node_id,
+        author_provider,
+    )?;
+    super::sc_failure_transport::drive_single_candidate_reredrive(
         engine,
         launch,
         provider_for_run,
@@ -433,7 +448,8 @@ pub(super) async fn drive_structure_gate_reredrive(
         author_provider,
         repair_prompt,
         repository_path,
-        reredrive_run.as_ref(),
+        &bound,
+        lifecycle,
         sc_teaching_attempt,
     )
     .await

@@ -2,6 +2,8 @@ use super::*;
 use crate::product::workspace_engine::PlanAuthorOutputContract;
 use crate::product::workspace_engine::SingleCandidateAuthorCompletion;
 use crate::product::workspace_engine::draft_batch::member_checkout_prefixes;
+use crate::web::workspace_ws_types::{ScEvidenceRef, ScRoundIdentity};
+use sc_failure_transport::ScAuthorRoundDelivery;
 
 pub(crate) enum SingleCandidateProviderRunOutcome {
     Completed,
@@ -73,10 +75,9 @@ pub(crate) enum SingleCandidateAuthorRecoveryEntry {
 const SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE: &str =
     "；SingleCandidate session 已终态失败，请显式重新开始生成";
 
-/// P01：教学重驱 transport 已整体迁至 `run/sc_failure_transport.rs`（同一实现，零行为改动）；此处保留模块搬迁导入。
+/// SC 物理轮绑定与教学驱动；保留子模块位置以共享编译规范化辅助。
 #[path = "sc_failure_transport.rs"]
 pub(super) mod sc_failure_transport;
-pub(super) use super::sc_failure_transport::drive_single_candidate_reredrive;
 
 /// 公共 admission 预检「成员语言规则缺失」等待项的判别码（路 C，Task 4）：
 /// SC 消费链对成员文件的必需性判定收敛到实际消费点——该等待项在 SC 侧不
@@ -669,28 +670,30 @@ pub(crate) async fn run_single_candidate_author(
     // 业务键（或 lifecycle 不可读）时，在真实 split begin／provider 启动之前
     // 给出可见失败（不再空键启动、不由 ledger 形态猜身份）；返回值由 P08 首
     // consumer 接管构造失败链作用域，此处不预分配日志/handle，也不留假绑定。
-    engine
+    // P08a：真实业务键（失败链身份的原业务键）——不再丢弃返回值，由 P08 构造
+    // 失败链作用域时消费。
+    let business_key = engine
         .sc_author_business_key_for_failure_chain()
         .map_err(SingleCandidateProviderRunError::Message)?;
-    // Task 1b 段②生产臂:SC markdown author 单次 provider run 绑定
-    // split run 身份;Markdown plan 产物按原文存档收口。
-    let plan_split_run =
-        match crate::web::workspace_ws_handler::run::begin_plan_split_run_if_logical(
-            &launch,
-            &lifecycle,
-            &engine.session().project_id,
-            &engine.session().issue_id,
-            &author_provider,
-            &engine.session().session_id,
-        ) {
-            Ok(run) => run,
-            Err(message) => {
-                engine.persist_single_candidate_terminal_phase(
-                    crate::product::models::SingleCandidatePhase::Failed,
-                );
-                return Err(SingleCandidateProviderRunError::Message(message));
-            }
-        };
+    // P08：SC 物理轮绑定（真实 handle → chain 身份 → durable RoundBound，
+    // provider 启动之前落盘）。LC 与非 LC 同形：都分配真实 handle。
+    let bound = match sc_failure_transport::begin_sc_failure_round(
+        &lifecycle,
+        &sc_failure_transport::sc_failure_scope_for(engine),
+        &business_key,
+        None,
+        &node_id,
+        &author_provider,
+        0,
+    ) {
+        Ok(bound) => bound,
+        Err(failure) => {
+            engine.persist_single_candidate_terminal_phase(
+                crate::product::models::SingleCandidatePhase::Failed,
+            );
+            return Err(SingleCandidateProviderRunError::Message(format!("{failure}")));
+        }
+    };
     // T6 fix-loop r2：trust 分类已下沉 start_work_item_plan_author 的
     // Logical 分支共享口（preflight 之后的撤销窗口残余同样以分类面呈现）。
     let provider_session = start_work_item_plan_author(
@@ -698,7 +701,7 @@ pub(crate) async fn run_single_candidate_author(
         Arc::clone(&provider_for_run),
         provider_input,
         run_cancel.clone(),
-        plan_split_run.as_ref(),
+        Some(&bound.split),
     )
     .await;
     let full_output = match engine
@@ -713,7 +716,7 @@ pub(crate) async fn run_single_candidate_author(
         Ok(output) => output,
         Err(message) => {
             crate::web::workspace_ws_handler::run::fail_plan_split_run(
-                plan_split_run.as_ref(),
+                Some(&bound.split),
                 &format!("provider session drive failed: {message}"),
             );
             engine.persist_single_candidate_terminal_phase(
@@ -722,11 +725,23 @@ pub(crate) async fn run_single_candidate_author(
             return Err(SingleCandidateProviderRunError::AlreadyFinished);
         }
     };
-    crate::web::workspace_ws_handler::run::close_plan_split_run_with_markdown(
-        plan_split_run.as_ref(),
-        &full_prompt,
-        &full_output,
-    );
+    // P08 严格收口（complete → 读回真实 raw → 逐字比较 → 才 finalize 纪元）。
+    // 失败保留严格证据错误原文并立即停止，不交付无 durable raw 的 source。
+    let mut current_round: Option<(ScEvidenceRef, ScRoundIdentity)> =
+        match sc_failure_transport::close_sc_split_round(
+            &lifecycle,
+            &bound,
+            &full_prompt,
+            &full_output,
+        ) {
+            Ok(raw) => Some((raw, bound.round.clone())),
+            Err(failure) => {
+                engine.persist_single_candidate_terminal_phase(
+                    crate::product::models::SingleCandidatePhase::Failed,
+                );
+                return Err(SingleCandidateProviderRunError::Message(format!("{failure}")));
+            }
+        };
     let delivery = prepare_author_delivery_for_compile(&full_output);
     emit_author_heading_normalized_event(
         engine,
@@ -768,6 +783,14 @@ pub(crate) async fn run_single_candidate_author(
                 // Task 6：四类失败共用同一耐久教学窗口——establish → 漂移
                 // 核验 → claim；Denied/Drift ⇒ 不重驱（既有失败面收口）。
                 let grant = 'teach: {
+                    // 当前轮 raw 未归档，不消费教学窗口，也不发起额外 start。
+                    let raw_archived = matches!(
+                        current_round.as_ref(),
+                        Some((ScEvidenceRef::Available { .. }, _))
+                    );
+                    if !raw_archived {
+                        break 'teach None;
+                    }
                     let TeachingVerdict::Eligible { payload } =
                         teaching_verdict(&diagnostics, &[])
                     else {
@@ -800,23 +823,28 @@ pub(crate) async fn run_single_candidate_author(
                 );
                 if let Some((attempt, reredrive_prompt)) = grant {
                     first_round_failure.get_or_insert_with(|| reasons.join("; "));
-                    compile_source = drive_compile_teaching_reredrive(
-                        engine,
-                        &lifecycle,
-                        &launch,
-                        &provider_for_run,
-                        &run_cancel,
-                        command_rx,
-                        &node_id,
-                        &author_provider,
-                        "compile_reredrive",
-                        "SC compile 失败教学重驱提示词",
-                        "typed 完备判据（parse 码表 / lowering fault / IR fault，事实齐全且可定位）compile 失败的教学重驱（含 typed 载荷与错误原文），恰一次",
-                        &reredrive_prompt,
-                        &repository.path,
-                        &attempt,
-                    )
-                    .await?;
+                    let ScAuthorRoundDelivery { source, raw, round } =
+                        drive_compile_teaching_reredrive(
+                            engine,
+                            &lifecycle,
+                            &launch,
+                            &provider_for_run,
+                            &run_cancel,
+                            command_rx,
+                            &node_id,
+                            &author_provider,
+                            "compile_reredrive",
+                            "SC compile 失败教学重驱提示词",
+                            "typed 完备判据（parse 码表 / lowering fault / IR fault，事实齐全且可定位）compile 失败的教学重驱（含 typed 载荷与错误原文），恰一次",
+                            &reredrive_prompt,
+                            &repository.path,
+                            &attempt,
+                            &bound,
+                            current_round.as_ref(),
+                        )
+                        .await?;
+                    compile_source = source;
+                    current_round = Some((raw, round));
                     continue;
                 }
                     let detail = reasons.join("; ");
@@ -863,6 +891,14 @@ pub(crate) async fn run_single_candidate_author(
         if preflight.has_failures() {
             // Task 6：与 compile 类共用同一耐久教学窗口（无独立槽位）。
             let grant = 'teach: {
+                // 与 compile 臂同门：缺失当前 raw 不消费教学窗口。
+                let raw_archived = matches!(
+                    current_round.as_ref(),
+                    Some((ScEvidenceRef::Available { .. }, _))
+                );
+                if !raw_archived {
+                    break 'teach None;
+                }
                 let TeachingVerdict::Eligible { .. } = preflight.to_teaching_verdict() else {
                     break 'teach None;
                 };
@@ -888,23 +924,28 @@ pub(crate) async fn run_single_candidate_author(
             if let Some((attempt, reredrive_prompt)) = grant {
                 first_round_failure
                     .get_or_insert_with(|| preflight.presentation_reasons().join("; "));
-                compile_source = drive_compile_teaching_reredrive(
-                    engine,
-                    &lifecycle,
-                    &launch,
-                    &provider_for_run,
-                    &run_cancel,
-                    command_rx,
-                    &node_id,
-                    &author_provider,
-                    "ir_reredrive",
-                    "SC IR 校验失败教学重驱提示词",
-                    "IR 校验失败（unknown_requirement_ref / acceptance_criterion_without_reviewer_check 等）的教学重驱（含错误原文与修正指令），恰一次",
-                    &reredrive_prompt,
-                    &repository.path,
-                    &attempt,
-                )
-                .await?;
+                let ScAuthorRoundDelivery { source, raw, round } =
+                    drive_compile_teaching_reredrive(
+                        engine,
+                        &lifecycle,
+                        &launch,
+                        &provider_for_run,
+                        &run_cancel,
+                        command_rx,
+                        &node_id,
+                        &author_provider,
+                        "ir_reredrive",
+                        "SC IR 校验失败教学重驱提示词",
+                        "IR 校验失败（unknown_requirement_ref / acceptance_criterion_without_reviewer_check 等）的教学重驱（含错误原文与修正指令），恰一次",
+                        &reredrive_prompt,
+                        &repository.path,
+                        &attempt,
+                        &bound,
+                        current_round.as_ref(),
+                    )
+                    .await?;
+                compile_source = source;
+                current_round = Some((raw, round));
                 continue;
             }
             let detail = preflight.presentation_reasons().join("; ");
@@ -948,7 +989,12 @@ pub(crate) async fn run_single_candidate_author(
             }) => {
                 let repair_prompt =
                     crate::product::workspace_engine::single_candidate_structure_failure::author_structure_repair_prompt(&failure);
-                let attempt = {
+                // 结构臂亦只消费当前轮已归档的 raw，不以日志代替证据。
+                let raw_archived = matches!(
+                    current_round.as_ref(),
+                    Some((ScEvidenceRef::Available { .. }, _))
+                );
+                let attempt = if raw_archived {
                     let request = sc_teaching_failure_request(
                         &teaching_binding,
                         failure_source_sha256,
@@ -960,12 +1006,14 @@ pub(crate) async fn run_single_candidate_author(
                         &repair_prompt,
                     );
                     authorize_sc_teaching_reredrive(&lifecycle, engine, &request)?
+                } else {
+                    None
                 };
                 if let Some(attempt) = attempt {
                     first_round_failure.get_or_insert_with(
                         super::single_candidate_structure_reredrive::structure_gate_first_round_failure,
                     );
-                    compile_source =
+                    let ScAuthorRoundDelivery { source, raw, round } =
                         super::single_candidate_structure_reredrive::drive_structure_gate_reredrive(
                             engine,
                             &lifecycle,
@@ -978,8 +1026,12 @@ pub(crate) async fn run_single_candidate_author(
                             &repair_prompt,
                             &repository.path,
                             Some(&attempt),
+                            &bound,
+                            current_round.as_ref(),
                         )
                         .await?;
+                    compile_source = source;
+                    current_round = Some((raw, round));
                     continue;
                 }
                 // Denied/Drift ⇒ 停止该生成自动链：保留 last-valid refs 与
