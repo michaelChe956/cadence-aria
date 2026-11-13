@@ -326,6 +326,10 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   useEffect(() => {
     let alive = true;
     let debounceTimer: CatalogRefreshTimer | null = null;
+    // P2/F9（无限轮询修复）：dirty 补跑的**独立槽位**——此前它与普通 250ms
+    // 防抖共用一个槽位，补跑等待期内的任何唤醒都会把它取消并改排 250ms ⇒
+    // 「补跑至少间隔 1s」被完全绕过（连续档回归）。两者必须分开。
+    let dirtyTimer: CatalogRefreshTimer | null = null;
     let periodicTimer: CatalogRefreshTimer | null = null;
     let inFlight = false;
     let dirty = false;
@@ -396,6 +400,12 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
         debounceTimer = null;
       }
     };
+    const clearDirtyTimer = () => {
+      if (dirtyTimer !== null) {
+        cancelRefresh(dirtyTimer);
+        dirtyTimer = null;
+      }
+    };
 
     // P3（无限轮询修复）：下一轮周期排程——空闲（无进行中事实）退避到
     // 60s 档；document.hidden 时暂停（不排下一轮），恢复可见时补跑。
@@ -410,12 +420,16 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
       periodicTimer = scheduleRefresh(runCatalogRefresh, intervalMs);
     };
 
-    // P2（无限轮询修复）：dirty 补跑经防抖槽至少间隔 DIRTY_RERUN_MIN_DELAY_MS
-    // 再启动；等待期内的新唤醒合并为同一次补跑，不叠加。
+    // P2/F9（无限轮询修复）：dirty 补跑在**独立槽位**上至少间隔
+    // DIRTY_RERUN_MIN_DELAY_MS 再启动；等待期内的新唤醒合并为同一次补跑，
+    // 不叠加、也不得把它提前（此前共用防抖槽时会被 250ms 档顶掉）。
     const scheduleDirtyRerun = () => {
+      clearDirtyTimer();
+      // 普通 250ms 防抖若已排程，会早于补跑的最小间隔执行 ⇒ 撤销（补跑是
+      // 全量 GET，会带上这段等待期内的任何新事实）。
       clearDebounceTimer();
-      debounceTimer = scheduleRefresh(() => {
-        debounceTimer = null;
+      dirtyTimer = scheduleRefresh(() => {
+        dirtyTimer = null;
         runCatalogRefresh();
       }, DIRTY_RERUN_MIN_DELAY_MS);
     };
@@ -639,6 +653,12 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
         dirty = true;
         return;
       }
+      // P2/F9：dirty 补跑等待期内的新唤醒**并入**已排的补跑（补跑是全量
+      // GET，会带上这期间的新事实）——既不取消它，也不另排 250ms 档（那会把
+      // 补跑提前到最小间隔之前 ⇒ 「补跑至少间隔 1s」被绕过、连续档回归）。
+      if (dirtyTimer !== null) {
+        return;
+      }
       if (debounceTimer !== null) {
         cancelRefresh(debounceTimer);
       }
@@ -661,6 +681,9 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
       if (document.hidden) {
         clearPeriodicTimer();
         clearDebounceTimer();
+        // P2/F9：隐藏即暂停——已排的 dirty 补跑同样撤销（回到可见时立刻
+        // 补一轮，事实不丢）。
+        clearDirtyTimer();
         return;
       }
       runCatalogRefresh();
@@ -674,6 +697,9 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (debounceTimer !== null) {
         cancelRefresh(debounceTimer);
+      }
+      if (dirtyTimer !== null) {
+        cancelRefresh(dirtyTimer);
       }
       if (periodicTimer !== null) {
         cancelRefresh(periodicTimer);
