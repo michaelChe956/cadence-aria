@@ -537,3 +537,7 @@ mod tests;
 #[cfg(test)]
 #[path = "workspace_sc_teaching_fault_matrix_tests.rs"]
 mod fault_matrix_tests;
+
+#[cfg(test)]
+#[path = "workspace_sc_teaching_window_claim_tests.rs"]
+mod claim_tests;
