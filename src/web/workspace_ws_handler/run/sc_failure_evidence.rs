@@ -28,14 +28,15 @@ use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceEvent, ScFailureEvidenceRead,
 };
+use crate::product::work_item_plan_policy::ScTeachingAttemptRef;
+use crate::product::workspace_engine::PlanningCompileFailure;
 use crate::product::workspace_engine::WorkspaceEngine;
 use crate::product::workspace_engine::single_candidate_structure_failure::{
     STRUCTURE_STABLE_CODE, author_structure_repair_prompt,
 };
-use crate::product::workspace_engine::types::PlanningCompileFailure;
 use crate::web::workspace_ws_types::{
     ScFailureChainIdentity, ScFailureClass, ScRoundEvidence, ScRoundLaunchState,
-    ScTeachingAttemptRef, ScTeachingDecision, ScTeachingPromptEvidence,
+    ScTeachingDecision, ScTeachingPromptEvidence,
 };
 
 
