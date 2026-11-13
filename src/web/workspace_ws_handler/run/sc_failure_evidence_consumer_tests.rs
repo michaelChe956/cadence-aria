@@ -58,6 +58,15 @@ fn fixture() -> (tempfile::TempDir, LifecycleStore, ScFailureScope) {
     (tmp, lifecycle, scope)
 }
 
+/// 本轮 split 产物的真实 locator——直接复用 store 的同一构造，不复制格式串
+/// （store 校验 FailureObserved 的 raw/source locator 必须与之逐字相等）。
+fn split_locator(bound: &ScBoundProviderRound) -> String {
+    crate::product::lifecycle_store::sc_failure_evidence::sc_failure_split_locator(
+        &bound.round.workspace_session_id,
+        bound.round.role_run_seq,
+    )
+}
+
 fn bind_round(lifecycle: &LifecycleStore, scope: &ScFailureScope) -> ScBoundProviderRound {
     begin_sc_failure_round(
         lifecycle,
@@ -96,12 +105,11 @@ fn diagnostic(code: &str, line: usize, message: &str) -> CompilerDiagnostic {
 #[test]
 fn observe_sc_failure_persists_full_untruncated_facts_in_real_store() {
     let (_tmp, lifecycle, scope) = fixture();
-    let session_id = scope.session_id.clone();
     let bound = bind_round(&lifecycle, &scope);
 
     let raw_body = "raw provider output (verbatim)";
     let raw = ScEvidenceRef::Available {
-        locator: format!("sc-split-output/v1/{session_id}/0"),
+        locator: split_locator(&bound),
         sha256: independent_sha256(raw_body),
         bytes: raw_body.len() as u64,
     };
@@ -150,7 +158,7 @@ fn observe_sc_failure_persists_full_untruncated_facts_in_real_store() {
     assert_eq!(repair_instructions.as_slice(), instructions.as_slice());
     assert_eq!(read_raw.clone(), raw.clone(), "raw 必须是本轮真实引用");
     let expected_source = ScEvidenceRef::Available {
-        locator: format!("sc-split-output/v1/{session_id}/0"),
+        locator: split_locator(&bound),
         sha256: independent_sha256(compile_source),
         bytes: compile_source.len() as u64,
     };
@@ -184,7 +192,6 @@ fn observe_sc_failure_persists_full_untruncated_facts_in_real_store() {
 #[test]
 fn evidence_write_failure_leaves_no_failure_observed_rows() {
     let (_tmp, lifecycle, scope) = fixture();
-    let session_id = scope.session_id.clone();
     let bound = bind_round(&lifecycle, &scope);
 
     // 合法 64 位小写 hex，但与本轮身份四元组不一致 ⇒ 真实 store 写准入失败。
@@ -192,7 +199,7 @@ fn evidence_write_failure_leaves_no_failure_observed_rows() {
     tampered.chain_id = format!("chain-v1-{}", "0".repeat(64));
 
     let raw = ScEvidenceRef::Available {
-        locator: format!("sc-split-output/v1/{session_id}/0"),
+        locator: split_locator(&bound),
         sha256: independent_sha256("raw body"),
         bytes: "raw body".len() as u64,
     };
