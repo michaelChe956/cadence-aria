@@ -54,7 +54,7 @@ use crate::web::types::GenerateWorkItemsRequest;
 #[cfg(test)]
 use crate::web::workspace_ws_types::WorkItemGenerationModeDto;
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, ArtifactVersion, ArtifactVersionSummary, ChoiceOption, ChoiceQuestion,
+    ArtifactPayload, ArtifactVersion, ChoiceOption, ChoiceQuestion,
     NodeDetailSummary, ProviderConfigSnapshot, RecoverableInterruptedOperation,
     RecoverableInterruptedRun, RepositoryProfileDto, ReviewFinding, ReviewFindingSeverity,
     ReviewGate, ReviewVerdict, ReviewVerdictType, StructuredOutputDiagnostic, TimelineNode,
