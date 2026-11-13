@@ -1,7 +1,7 @@
-//! P08b run-bound 身份与 durable launch 纪元（`PlanSplitRunContext` 单元）。
-//!
-//! 本文件由 `gateway_start.rs` 以 `include!` 引入**同一模块**（可见性与调用面
-//! 完全不变），只为控制 gateway 主文件长度——**纯搬移，无行为改动**。
+// P08b run-bound 身份与 durable launch 纪元（`PlanSplitRunContext` 单元）。
+//
+// 本文件由 `gateway_start.rs` 以 `include!` 引入**同一模块**（可见性与调用面
+// 完全不变），只为控制 gateway 主文件长度——**纯搬移，无行为改动**。
 
 /// Task 1b 段②:WS streaming Plan/split 的 run 身份绑定——caller 先 begin,
 /// `start_work_item_plan_author` 消费它做 prepare 前 sink 绑定,成功 complete、
