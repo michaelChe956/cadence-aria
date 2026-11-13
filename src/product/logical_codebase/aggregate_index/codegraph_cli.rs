@@ -38,6 +38,13 @@ pub fn parse_codegraph_version(output: &str) -> Option<(u64, u64, u64)> {
 }
 const OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 
+/// `codegraph files --json` 的专用 stdout 上限。
+///
+/// 文件清单载荷随聚合根规模线性膨胀（实测 9k~20k 文件时为 1.3~3.9 MB），
+/// 通用 1 MiB 上限会把 JSON 尾部截断并把残缺载荷误报成解析失败。
+/// 该上限只用于 `files`，其余命令维持 1 MiB。
+const FILES_OUTPUT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AggregateIndexError {
     #[error("aggregate_index_degraded:{code}: {message}")]
@@ -379,6 +386,16 @@ mod tests {
             }
         }
 
+        /// 构造 stdout 已被上限截断的成功结果（上游按上限保留前缀、丢弃其余）。
+        fn truncated_success(stdout: &str) -> Self {
+            Self {
+                result: Ok(BoundedCommandResult {
+                    stdout_truncated: true,
+                    ..command_result_with(stdout, "", Some(0), false, false)
+                }),
+            }
+        }
+
         fn failure(exit_code: i32, stderr: &str) -> Self {
             Self {
                 result: Ok(command_result_with(
@@ -636,6 +653,35 @@ mod tests {
                 if *code == "codegraph_files_empty_index"),
             "empty index must be business-semantic, got: {error}"
         );
+    }
+
+    /// 现场（聚合根 9k~20k 文件，`codegraph files --json` 载荷 1.3~3.9 MB）：
+    /// stdout 超过上限后被截断成 JSON 前缀，解析必然失败。截断必须以专用码
+    /// 报出（不得混同为「输出不是合法 JSON」），消息要带上上限字节数。
+    #[test]
+    fn files_reports_truncated_output_with_dedicated_code() {
+        let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
+            CommandCapture::truncated_success("[{\"path\":\"src/lib.rs\""),
+        ]));
+        let cli = CodeGraphCli::new(runner, "codegraph".into());
+        let error = cli.files(Path::new("/aggregate")).unwrap_err();
+        match error {
+            AggregateIndexError::Failed { code, message } => {
+                assert_eq!(
+                    code, "codegraph_files_output_truncated",
+                    "truncated output must not be reported as an invalid-JSON failure"
+                );
+                assert!(
+                    message.contains(&FILES_OUTPUT_LIMIT_BYTES.to_string()),
+                    "message must carry the stdout limit in bytes: {message}"
+                );
+                assert!(
+                    message.contains("截断"),
+                    "message must state that the output was truncated: {message}"
+                );
+            }
+            other => panic!("expected a failed error, got {other:?}"),
+        }
     }
 
     fn assert_clean_environment(request: &BoundedCommandRequest) {
