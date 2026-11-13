@@ -438,6 +438,12 @@ impl ProcessManager {
             .args(args)
             .current_dir(working_dir)
             .envs(env_vars);
+        // 计划 2026-11-13 包 2.4:子进程 PATH 显式下发 overlay 合并值——
+        // env_vars 含 PATH 时覆盖为合并值,不含时也显式写,使 overlay 目录
+        // 到达子进程;overlay 为空时与宿主 PATH 等值,继承语义不变。
+        if let Some(merged_path) = path_env(env_vars) {
+            command_builder.env("PATH", merged_path);
+        }
         spawn_prepared(command, command_builder).await
     }
 
@@ -523,10 +529,15 @@ fn command_is_resolvable(
 fn path_env(env_vars: &BTreeMap<String, String>) -> Option<OsString> {
     // A1-a(Bug45 批2 环境回退底座):env_vars 无 PATH 时回退宿主 PATH
     // (std::env)——裸名 CLI 解析不断链;显式 PATH 仍优先(覆盖层)。
-    env_vars
-        .get("PATH")
-        .map(OsString::from)
-        .or_else(|| std::env::var_os("PATH"))
+    // 计划 2026-11-13 包 2.4:可执行性判定与下发的 PATH 都改为 overlay
+    // 合并后的值(effective_path 在 overlay 为空时原样返回 base,零行为变化)。
+    let base = env_vars.get("PATH").map(String::as_str);
+    if base.is_none() && std::env::var_os("PATH").is_none() {
+        return None;
+    }
+    Some(OsString::from(
+        crate::cross_cutting::path_overlay::effective_path(base),
+    ))
 }
 
 fn command_missing(command: &str) -> ProviderAdapterError {
