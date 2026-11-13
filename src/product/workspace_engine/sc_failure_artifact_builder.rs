@@ -6,9 +6,10 @@
 // `Durable` 取日志里的真实 `ChainTerminal`；`Local` 取调用方对真实已验证前缀的
 // 观察（腐坏日志场景），local 绝不入日志、不计前缀字节。
 //
-// 本模块是 `sc_failure_artifacts.rs` 的子模块（`#[path]` 登记），对外只暴露
-// `pub(super)` 的组包入口、摘要助手与共享错误码：调用方（publisher / 用例）经
-// `super::sc_failure_artifact_builder::…` 取用，不做反向导出、不加转发函数。
+// 本模块是 `sc_failure_artifacts.rs` 的私有子模块（`#[path]` 登记）：模块本身不
+// crate 全开放，只有组包入口 `build_sc_failure_repair_package` 是 crate 可见（供
+// handler 侧真实 consumer 经 `crate::product::workspace_engine::…` 取用）；摘要助手
+// 与共享错误码保持 `pub(super)` 私有，不导出、不加转发函数。
 
 use sha2::{Digest, Sha256};
 
@@ -67,7 +68,7 @@ struct TerminalFacts {
 /// 纯组包：确定性、无副作用。非终局读视图 / 缺已验证前缀 / 失败轮缺显式教学
 /// 决定 / 终局声明的失败轮没有 `FailureObserved` 或没有 `RoundBound` 事实，
 /// 一律 `Err`，不产半成品包、不伪造 digest 与 locator。
-pub(super) fn build_sc_failure_repair_package(
+pub(crate) fn build_sc_failure_repair_package(
     identity: &ScFailureChainIdentity,
     evidence: &ScFailureEvidenceRead,
     terminal_input: ScTerminalInput<'_>,

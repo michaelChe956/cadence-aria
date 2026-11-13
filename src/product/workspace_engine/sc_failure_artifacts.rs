@@ -28,9 +28,13 @@ use super::{EngineEvent, WorkspaceEngine};
 mod sc_failure_artifact_builder;
 
 use self::sc_failure_artifact_builder::{
-    CODE_PACKAGE_INVALID, CODE_PACKAGE_SERIALIZE, CODE_SCOPE_MISMATCH,
-    build_sc_failure_repair_package, sha256_hex,
+    CODE_PACKAGE_INVALID, CODE_PACKAGE_SERIALIZE, CODE_SCOPE_MISMATCH, sha256_hex,
 };
+
+/// 组包器入口导出给 crate 内的真实 consumer（handler 侧 terminal 组包）：
+/// `crate::product::workspace_engine::build_sc_failure_repair_package`。
+/// 摘要助手与共享错误码保持私有导入，不导出；无转发方法、无二次 fold、无同名 shim。
+pub(crate) use self::sc_failure_artifact_builder::build_sc_failure_repair_package;
 
 
 // ── P11 严格 publisher（Plan §2.5）────────────────────────────────────
