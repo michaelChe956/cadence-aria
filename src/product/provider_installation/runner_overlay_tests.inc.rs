@@ -540,3 +540,50 @@ async fn resolve_effective_prefix_skips_npm_global_when_bin_not_on_path() {
     );
     assert_eq!(resolved, fallback, "应落到兜底前缀");
 }
+
+/// 装成功后必须把「安装产物的 bin 目录」登记进 PATH overlay ⇒ 平台自身的
+/// 命令可见 PATH 立刻包含新装的 CLI（决策 D1/D2）。
+#[tokio::test]
+async fn install_registers_install_bin_dir_into_path_overlay() {
+    // overlay 是进程级共享状态 ⇒ 必须持全局锁并在结束时清空。
+    let _lock = crate::cross_cutting::path_overlay::overlay_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::cross_cutting::path_overlay::clear();
+
+    let root = tempdir().expect("root");
+    let prefix = root.path().join("installation");
+    let bin = prefix.join("bin");
+    std::fs::create_dir_all(&bin).expect("bin dir");
+    std::fs::write(bin.join("codex"), b"#!/bin/sh\n").expect("cli stub");
+
+    let install_runner = ScriptedRunner::new(vec![success("added 1 package")], Duration::ZERO);
+    let mut execution = execution(
+        root.path(),
+        install_runner.clone(),
+        SpyProber::new(Some("1.0.5")),
+    );
+    execution.path_value = Some(root.path().join("empty-bin").to_string_lossy().into_owned());
+    execution.npm_prefix = prefix.clone();
+
+    let job = execution
+        .store
+        .create("codex", FixedClock.now())
+        .expect("create");
+    execution
+        .run(&job.job_id, InstallTarget::Provider(ProviderName::Codex))
+        .await;
+
+    let registered = crate::cross_cutting::path_overlay::snapshot();
+    assert!(
+        registered.contains(&bin),
+        "装完必须把安装产物的 bin 目录登记进 overlay: {registered:?}"
+    );
+    let merged = crate::cross_cutting::path_overlay::effective_path(Some("/usr/bin"));
+    assert_eq!(
+        std::env::split_paths(&merged).next(),
+        Some(bin.clone()),
+        "登记的目录必须置前（平台自身探测立即可见）: {merged}"
+    );
+    crate::cross_cutting::path_overlay::clear();
+}
