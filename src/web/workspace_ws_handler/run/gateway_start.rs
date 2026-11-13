@@ -236,6 +236,125 @@ pub(crate) fn begin_plan_split_run(
     })
 }
 
+/// P08b:durable restore——仅凭已 begin 且经 StrictRoundBound 校验的冻结 handle
+/// 恢复 run 绑定上下文(跨进程/重启后等场景)。
+///
+/// 只读校验、零分配副作用:① 会话记录(`handle.workspace_session_id` 定位,
+/// id/project/issue/author_provider 逐字段相等);② 该 handle 的 `run.json`
+/// (`provider_run_id` 与 `handle.run_ref` 不透明字符串相等——不解析猜路径,
+/// `workspace_session_id`/`role_run_seq` 相等)。running 且未落 raw 输出收口时
+/// 恢复同样合法(不读 structured_output);不 begin、不推进 seq、不追加审计、
+/// 不收口,拒绝时也不修复盘上事实。
+pub(crate) fn plan_split_run_for_handle(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    provider: &crate::product::models::ProviderName,
+    handle: crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandle,
+) -> Result<PlanSplitRunContext, String> {
+    let reject = |step: &str, detail: String| -> String {
+        format!("plan_split_run_for_handle: {step}: {detail}")
+    };
+
+    let session_path = lifecycle
+        .workspace_sessions_root(project_id, issue_id)
+        .join(format!("{}.json", handle.workspace_session_id));
+    let session: crate::product::models::WorkspaceSessionRecord =
+        crate::product::json_store::read_json(&session_path).map_err(|error| {
+            reject(
+                "workspace_session_read",
+                format!("{}: {error}", session_path.display()),
+            )
+        })?;
+    if session.id != handle.workspace_session_id {
+        return Err(reject(
+            "workspace_session_identity",
+            format!("{} != handle {}", session.id, handle.workspace_session_id),
+        ));
+    }
+    if session.project_id != project_id || session.issue_id != issue_id {
+        return Err(reject(
+            "workspace_session_scope",
+            format!(
+                "{}/{} != {project_id}/{issue_id}",
+                session.project_id, session.issue_id
+            ),
+        ));
+    }
+    if &session.author_provider != provider {
+        return Err(reject(
+            "workspace_session_provider",
+            format!("{:?} != {:?}", session.author_provider, provider),
+        ));
+    }
+
+    let run_path = lifecycle
+        .work_item_split_provider_run_dir(&handle)
+        .map_err(|error| reject("split_run_path", error.to_string()))?
+        .join("run.json");
+    let run: serde_json::Value =
+        crate::product::json_store::read_json(&run_path).map_err(|error| {
+            reject("split_run_read", format!("{}: {error}", run_path.display()))
+        })?;
+    let provider_run_id = run
+        .get("provider_run_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            reject(
+                "split_run_record",
+                format!("missing provider_run_id in {}", run_path.display()),
+            )
+        })?
+        .to_string();
+    if provider_run_id != handle.run_ref {
+        return Err(reject(
+            "split_run_identity",
+            format!(
+                "provider_run_id {provider_run_id} != handle.run_ref {}",
+                handle.run_ref
+            ),
+        ));
+    }
+    let run_session_id = run
+        .get("workspace_session_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            reject(
+                "split_run_record",
+                format!("missing workspace_session_id in {}", run_path.display()),
+            )
+        })?;
+    if run_session_id != handle.workspace_session_id {
+        return Err(reject(
+            "split_run_session",
+            format!("{run_session_id} != handle {}", handle.workspace_session_id),
+        ));
+    }
+    let run_role_run_seq = run
+        .get("role_run_seq")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            reject(
+                "split_run_record",
+                format!("missing role_run_seq in {}", run_path.display()),
+            )
+        })?;
+    if run_role_run_seq != handle.role_run_seq {
+        return Err(reject(
+            "split_run_seq",
+            format!("{run_role_run_seq} != handle {}", handle.role_run_seq),
+        ));
+    }
+
+    Ok(PlanSplitRunContext {
+        handle,
+        lifecycle: lifecycle.clone(),
+        project_id: project_id.to_string(),
+        issue_id: issue_id.to_string(),
+        provider: provider.clone(),
+    })
+}
+
 /// B2b1(Task 5.2,设计 §4.1/§4.2):LC plan run 的 durable launch 纪元
 /// 事实——全部落 `WorkspaceSessionRecord`(排它锁内 read-modify-write,
 /// 与 lifecycle_store 写方同一文件锁约定)。
@@ -988,155 +1107,5 @@ mod tests {
                 .is_ok()
         );
     }
-
-    // -----------------------------------------------------------------------
-    // P08b(durable restore):已 begin 的 split run 句柄在 store 重建后必须能
-    // 恢复同身份 `PlanSplitRunContext`——不重新分配 seq、不 begin、不写盘;
-    // 跨 session/project/issue/provider 绑定与盘上 run/session 记录篡改一律
-    // fail-closed;running 轮且无 raw 输出收口时恢复合法。
-    // -----------------------------------------------------------------------
-    fn p08b_fixture() -> (
-        tempfile::TempDir,
-        crate::product::lifecycle_store::LifecycleStore,
-        String,
-        String,
-        ProviderName,
-        crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandle,
-    ) {
-        use crate::product::app_paths::ProductAppPaths;
-        use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
-        use crate::product::models::WorkspaceType;
-
-        let tmp = tempfile::TempDir::new().expect("p08b temp root");
-        let store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
-        let session = store
-            .create_workspace_session(CreateWorkspaceSessionInput {
-                project_id: "project_p08b".to_string(),
-                issue_id: "issue_p08b".to_string(),
-                entity_id: "plan_p08b".to_string(),
-                workspace_type: WorkspaceType::WorkItemPlan,
-                author_provider: ProviderName::Codex,
-                reviewer_provider: None,
-                review_rounds: 0,
-                superpowers_enabled: false,
-                openspec_enabled: false,
-                work_item_plan_options: None,
-            })
-            .expect("p08b session");
-        let provider = session.author_provider.clone();
-        let ctx = begin_plan_split_run(&store, "project_p08b", "issue_p08b", &provider, &session.id)
-            .expect("p08b begin");
-        (
-            tmp,
-            store,
-            "project_p08b".to_string(),
-            "issue_p08b".to_string(),
-            provider,
-            ctx.handle,
-        )
-    }
-
-    #[test]
-    fn p08b_restore_reuses_handle_identity_across_store_rebuild() {
-        use crate::product::lifecycle_store::LifecycleStore;
-
-        let (_tmp, store, project, issue, provider, handle) = p08b_fixture();
-        let run_dir = store
-            .work_item_split_provider_run_dir(&handle)
-            .expect("p08b run dir");
-        let run_path = run_dir.join("run.json");
-        let session_path = store
-            .workspace_sessions_root(&project, &issue)
-            .join(format!("{}.json", handle.workspace_session_id));
-        let run_before = std::fs::read(&run_path).expect("p08b run.json bytes");
-        let session_before = std::fs::read(&session_path).expect("p08b session bytes");
-        let seq_dirs_before = std::fs::read_dir(run_dir.parent().expect("p08b session dir"))
-            .expect("p08b split runs dir")
-            .count();
-
-        // 仅凭 durable handle 在新 store 实例恢复:running 轮、无 raw 输出收口合法。
-        let reopened = LifecycleStore::new(store.app_paths());
-        let restored =
-            plan_split_run_for_handle(&reopened, &project, &issue, &provider, handle.clone())
-                .expect("p08b durable handle must restore without new allocation");
-
-        assert_eq!(restored.handle, handle, "恢复句柄身份必须逐字段相同");
-        assert_eq!(restored.project_id, project, "绑定 project 原样恢复");
-        assert_eq!(restored.issue_id, issue, "绑定 issue 原样恢复");
-        assert_eq!(restored.provider, provider, "绑定 provider 原样恢复");
-        assert_eq!(
-            restored.lifecycle.app_paths().root(),
-            store.app_paths().root(),
-            "恢复上下文必须克隆同一 lifecycle 根"
-        );
-        // 不 begin/不推进 seq/不写盘:run 记录、会话记录、run 目录集合逐字节不变。
-        assert_eq!(std::fs::read(&run_path).expect("p08b run.json bytes"), run_before);
-        assert_eq!(std::fs::read(&session_path).expect("p08b session bytes"), session_before);
-        assert_eq!(
-            std::fs::read_dir(run_dir.parent().expect("p08b session dir"))
-                .expect("p08b split runs dir")
-                .count(),
-            seq_dirs_before,
-            "restore 不得分配新 role_run_seq 目录"
-        );
-    }
-
-    #[test]
-    fn p08b_restore_rejects_tampered_bindings() {
-        let (_tmp, store, project, issue, provider, handle) = p08b_fixture();
-        let run_path = store
-            .work_item_split_provider_run_dir(&handle)
-            .expect("p08b run dir")
-            .join("run.json");
-
-        // ① 调用方绑定参数与 durable 事实不符:project/issue/provider 参数表。
-        for (label, wrong_project, wrong_issue, wrong_provider) in [
-            ("project", "project_p08b_other", issue.as_str(), provider.clone()),
-            ("issue", project.as_str(), "issue_p08b_other", provider.clone()),
-            ("provider", project.as_str(), issue.as_str(), ProviderName::ClaudeCode),
-        ] {
-            let rejected = plan_split_run_for_handle(
-                &store,
-                wrong_project,
-                wrong_issue,
-                &wrong_provider,
-                handle.clone(),
-            );
-            assert!(rejected.is_err(), "绑定不符({label})必须拒绝");
-        }
-
-        // ② 盘上 run.json 的 role_run_seq 被改写:必须可见 Err 且不静默修复盘上事实。
-        let run_original = std::fs::read(&run_path).expect("p08b run.json bytes");
-        let mut run_json: serde_json::Value =
-            serde_json::from_slice(&run_original).expect("p08b json");
-        run_json["role_run_seq"] = serde_json::json!(handle.role_run_seq + 1);
-        let run_tampered = serde_json::to_vec(&run_json).expect("p08b encode");
-        std::fs::write(&run_path, &run_tampered).expect("p08b tamper run.json");
-        assert!(
-            plan_split_run_for_handle(&store, &project, &issue, &provider, handle.clone()).is_err(),
-            "run.json role_run_seq 篡改必须拒绝"
-        );
-        assert_eq!(
-            std::fs::read(&run_path).expect("p08b run.json bytes"),
-            run_tampered,
-            "拒绝对盘上事实零修复"
-        );
-        std::fs::write(&run_path, &run_original).expect("p08b restore run.json");
-
-        // ③ 会话记录 author_provider 被改写:provider 绑定不再成立,必须拒绝。
-        let session_path = store
-            .workspace_sessions_root(&project, &issue)
-            .join(format!("{}.json", handle.workspace_session_id));
-        let session_original = std::fs::read(&session_path).expect("p08b session bytes");
-        let mut session_json: serde_json::Value =
-            serde_json::from_slice(&session_original).expect("p08b session json");
-        session_json["author_provider"] = serde_json::json!("claude_code");
-        std::fs::write(&session_path, serde_json::to_vec(&session_json).expect("p08b encode"))
-            .expect("p08b tamper session");
-        assert!(
-            plan_split_run_for_handle(&store, &project, &issue, &provider, handle.clone()).is_err(),
-            "session author_provider 篡改必须拒绝"
-        );
-        std::fs::write(&session_path, &session_original).expect("p08b restore session");
-    }
+    include!("gateway_start_parts/p08b_restore_cases.inc.rs");
 }
