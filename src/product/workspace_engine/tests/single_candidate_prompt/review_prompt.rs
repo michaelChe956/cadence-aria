@@ -4,6 +4,95 @@
 
 use super::*;
 
+/// D1（REQ-WSC-06「reviewer 无损紧凑序列化」）：提取 reviewer prompt 中
+/// `\n### {title}\n` 段的 JSON 载荷——流式解析只消费一个完整 JSON 值，
+/// 返回裁掉尾随空白后的载荷文本与解析对象。
+fn compact_section_payload<'a>(prompt: &'a str, title: &str) -> (&'a str, serde_json::Value) {
+    let heading = format!("\n### {title}\n");
+    let start = prompt
+        .find(&heading)
+        .unwrap_or_else(|| panic!("review prompt section `{title}` missing"));
+    let rest = &prompt[start + heading.len()..];
+    let mut stream =
+        serde_json::Deserializer::from_str(rest).into_iter::<serde_json::Value>();
+    let value = stream
+        .next()
+        .unwrap_or_else(|| panic!("review prompt section `{title}` carries no JSON"))
+        .unwrap_or_else(|error| panic!("section `{title}` JSON parse failed: {error}"));
+    let consumed = stream.byte_offset();
+    (&rest[..consumed].trim_end(), value)
+}
+
+/// D1（REQ-WSC-06）单段验收三件事：解析对象与期望 deep-equal（键、值、
+/// 数组顺序、refs 全保真）；载荷单行无缩进（真 compact）；同一对象的
+/// pretty 重序列化字节数严格大于载荷（字节严格下降的逐段形态；只保证
+/// 字节下降，不承诺 token 同比或质量必升）。
+fn assert_section_compact_deep_equal(prompt: &str, title: &str, expected: &serde_json::Value) {
+    let (payload, value) = compact_section_payload(prompt, title);
+    assert_eq!(
+        &value, expected,
+        "section `{title}` must stay deep-equal after compact serialization"
+    );
+    assert!(
+        !payload.contains('\n'),
+        "section `{title}` must be single-line compact JSON, got: {payload}"
+    );
+    let pretty = serde_json::to_string_pretty(&value).expect("pretty baseline");
+    assert!(
+        payload.len() < pretty.len(),
+        "section `{title}` compact {} bytes must be strictly smaller than pretty {} bytes",
+        payload.len(),
+        pretty.len()
+    );
+}
+
+/// 测试侧独立镜像 SC 投影的候选映射（不经被测序列化路径）。
+fn expected_contract_candidate(
+    target_repository_id: &str,
+    contract: &crate::product::work_item_contract::CanonicalWorkItemContract,
+) -> serde_json::Value {
+    serde_json::json!({
+        "target_repository_id": target_repository_id,
+        "identity": serde_json::to_value(&contract.identity).expect("identity value"),
+        "goal": serde_json::to_value(&contract.goal).expect("goal value"),
+        "tasks": serde_json::to_value(&contract.tasks).expect("tasks value"),
+        "write_policy": serde_json::to_value(&contract.write_policy).expect("write policy value"),
+        "acceptance_criteria": serde_json::to_value(&contract.acceptance_criteria).expect("acceptance criteria value"),
+        "verification_checks": serde_json::to_value(&contract.verification_checks).expect("verification checks value"),
+        "depends_on": serde_json::to_value(&contract.depends_on).expect("depends_on value"),
+        "input_contracts": serde_json::to_value(&contract.input_contracts).expect("input contracts value"),
+        "output_contracts": serde_json::to_value(&contract.output_contracts).expect("output contracts value"),
+    })
+}
+
+/// Cross-Item 供需投影的测试侧镜像（值完整保留，D1 不删语义内容）。
+fn expected_cross_item_supply_demand(
+    contracts: &[crate::product::work_item_contract::CanonicalWorkItemContract],
+) -> serde_json::Value {
+    serde_json::json!({
+        "supplies": contracts.iter().map(|contract| serde_json::json!({
+            "work_item_id": contract.identity.logical_work_item_id.as_str(),
+            "provided_output_contracts": serde_json::to_value(&contract.output_contracts).expect("output contracts value"),
+        })).collect::<Vec<_>>(),
+        "demands": contracts.iter().map(|contract| serde_json::json!({
+            "work_item_id": contract.identity.logical_work_item_id.as_str(),
+            "depends_on": serde_json::to_value(&contract.depends_on).expect("depends_on value"),
+            "required_input_contracts": serde_json::to_value(&contract.input_contracts).expect("input contracts value"),
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// 覆盖投影期望：用生产侧确定性投影函数对 fixture 契约重算（同输入同口径）。
+fn expected_reviewer_coverage(
+    contracts: &[crate::product::work_item_contract::CanonicalWorkItemContract],
+) -> serde_json::Value {
+    let graph = crate::product::work_item_contract::build_dependency_contract_graph(contracts)
+        .expect("dependency contract graph");
+    serde_json::to_value(
+        crate::product::work_item_contract::project_contract_reviewer_coverage(&graph),
+    )
+    .expect("coverage projection value")
+}
 #[test]
 fn single_candidate_review_prompt_reads_compiled_ir_and_mechanical_report() {
     let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
@@ -32,7 +121,7 @@ fn single_candidate_review_prompt_reads_compiled_ir_and_mechanical_report() {
         items: vec![
             PlanCandidateItemIr {
                 target_repository_id: "repository_0001".to_string(),
-                contract: contract_a,
+                contract: contract_a.clone(),
                 verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
                     checks: Vec::new(),
                 },
@@ -40,7 +129,7 @@ fn single_candidate_review_prompt_reads_compiled_ir_and_mechanical_report() {
             },
             PlanCandidateItemIr {
                 target_repository_id: "repository_0001".to_string(),
-                contract: contract_b,
+                contract: contract_b.clone(),
                 verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
                     checks: Vec::new(),
                 },
@@ -144,6 +233,68 @@ fn single_candidate_review_prompt_reads_compiled_ir_and_mechanical_report() {
             .prompt
             .contains("compiled markdown is not authoritative")
     );
+
+    // D1（REQ-WSC-06「reviewer 无损紧凑序列化」）：SC 本体 JSON 段 compact 化后，
+    // 逐段解析 deep-equal（键、值、数组顺序、refs 保真）+ 单行 + 字节严格小于
+    // 同一对象的 pretty 形态；该 fixture 覆盖六段（含非空 findings 的报告段）。
+    let ir_ref_now = engine
+        .session
+        .plan_candidate_ir_ref
+        .as_deref()
+        .expect("ir ref");
+    let report_ref_now = engine
+        .session
+        .mechanical_report_ref
+        .as_deref()
+        .expect("report ref");
+    let contracts = [contract_a.clone(), contract_b.clone()];
+    assert_section_compact_deep_equal(
+        &input.prompt,
+        "Canonical Contract Candidates",
+        &serde_json::json!([
+            expected_contract_candidate("repository_0001", &contract_a),
+            expected_contract_candidate("repository_0001", &contract_b),
+        ]),
+    );
+    assert_section_compact_deep_equal(
+        &input.prompt,
+        "Dependency Contract Graph",
+        &serde_json::json!({
+            "topological_order": ["wi-a", "wi-b"],
+            "edges": ["wi-a -> wi-b"],
+        }),
+    );
+    assert_section_compact_deep_equal(
+        &input.prompt,
+        "Reviewer Capability Coverage Projection",
+        &expected_reviewer_coverage(&contracts),
+    );
+    assert_section_compact_deep_equal(
+        &input.prompt,
+        "Cross-Item Contract Supply / Demand",
+        &expected_cross_item_supply_demand(&contracts),
+    );
+    assert_section_compact_deep_equal(
+        &input.prompt,
+        "Projection Validation Report",
+        &serde_json::json!({
+            "source_revision_hash": ir_record.ir.source_revision_hash.as_str(),
+            "compiler_version": ir_record.ir.compiler_version.as_str(),
+            "summary": {
+                "error_count": 0,
+                "warning_count": 1,
+            },
+            "findings": serde_json::to_value(&report.report.findings).expect("findings value"),
+        }),
+    );
+    assert_section_compact_deep_equal(
+        &input.prompt,
+        "Immutable Candidate Artifact Refs",
+        &serde_json::json!({
+            "plan_candidate_ir_ref": ir_ref_now,
+            "mechanical_report_ref": report_ref_now,
+        }),
+    );
 }
 
 #[test]
@@ -173,6 +324,101 @@ fn single_candidate_review_prompt_fails_closed_when_artifact_refs_are_missing() 
         .expect_err("missing refs must fail closed");
     assert!(error.contains("plan_candidate_ir_ref"));
     assert!(error.contains("mechanical_report_ref"));
+}
+
+/// D1（REQ-WSC-06）：compact 序列化不触碰绑定校验——session 指向的
+/// durable IR 与机械报告绑定不匹配（report 绑定另一条合法 IR）仍拒发。
+#[test]
+fn single_candidate_review_prompt_refuses_durable_binding_mismatch() {
+    let (_tmp, _checkpoint_store, lifecycle, plan_id, mut engine) =
+        super::super::make_work_item_plan_engine_with_draft_candidate(
+            "single_candidate_review_binding_mismatch",
+        );
+    let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let source = "# single candidate binding mismatch source\n";
+    let mut source_revision = SourceRevisionRecord {
+        id: "source-binding".to_string(),
+        source: source.to_string(),
+        source_revision_hash: source_hash(source),
+        content_hash: String::new(),
+    };
+    source_revision.content_hash = source_revision.content_hash().expect("source content hash");
+    source_store
+        .put_source_revision("project_0001", "issue_0001", &plan_id, &source_revision)
+        .expect("persist source revision");
+    let build_ir_record = |id: &str| {
+        let mut record = PlanCandidateIrRecord {
+            id: id.to_string(),
+            source_revision_id: source_revision.id.clone(),
+            ir: PlanCandidateIr {
+                source_revision_hash: source_revision.source_revision_hash.clone(),
+                compiler_version: WORK_ITEM_PLAN_COMPILER_VERSION.to_string(),
+                items: vec![PlanCandidateItemIr {
+                    target_repository_id: "repository_0001".to_string(),
+                    contract: crate::product::work_item_contract::canonical_contract_fixture(
+                        "wi-a",
+                    ),
+                    verification_plan: crate::product::models::WorkItemDraftVerificationPlan {
+                        checks: Vec::new(),
+                    },
+                    trusted_commands: Vec::new(),
+                }],
+            },
+            content_hash: String::new(),
+        };
+        record.content_hash = record.content_hash().expect("IR content hash");
+        record
+    };
+    let ir_record = build_ir_record("ir-bound");
+    let other_ir_record = build_ir_record("ir-other");
+    let ir_ref = source_store
+        .put_plan_candidate_ir("project_0001", "issue_0001", &plan_id, &ir_record)
+        .expect("persist compiled IR");
+    source_store
+        .put_plan_candidate_ir("project_0001", "issue_0001", &plan_id, &other_ir_record)
+        .expect("persist other compiled IR");
+    let mut report = PlanCandidateMechanicalReportRecord {
+        id: "report-binding".to_string(),
+        source_revision_id: source_revision.id,
+        ir_id: other_ir_record.id,
+        report: PlanCandidateMechanicalReport {
+            source_revision_hash: ir_record.ir.source_revision_hash.clone(),
+            compiler_version: ir_record.ir.compiler_version.clone(),
+            findings: Vec::new(),
+        },
+        // SG3a.0：旧 fixture 形态（无结构报告）。
+        structure_report: None,
+        content_hash: String::new(),
+    };
+    report.content_hash = report.content_hash().expect("report content hash");
+    let report_ref = source_store
+        .put_mechanical_report("project_0001", "issue_0001", &plan_id, &report)
+        .expect("persist mechanical report");
+
+    let mut record = lifecycle
+        .get_workspace_session(&engine.session().session_id)
+        .expect("load session");
+    record.flow_kind = WorkItemPlanFlowKind::SingleCandidate;
+    record.plan_candidate_ir_ref = Some(ir_ref);
+    record.mechanical_report_ref = Some(report_ref);
+    write_json(
+        &lifecycle
+            .app_paths()
+            .issue_root(&record.project_id, &record.issue_id)
+            .join("workspace-sessions")
+            .join(format!("{}.json", record.id)),
+        &record,
+    )
+    .expect("persist session refs");
+    engine.session = crate::product::workspace_engine::types::WorkspaceSession::from_record(record);
+
+    let error = engine
+        .build_work_item_plan_review_input()
+        .expect_err("durable binding mismatch must refuse to emit");
+    assert!(
+        error.contains("bindings mismatch"),
+        "typed stop must name the durable binding mismatch: {error}"
+    );
 }
 
 #[test]
@@ -644,5 +890,190 @@ mod sg3a1_structure_input {
         // 拒发不产生任何 review 状态变化。
         assert_eq!(engine3.session.review_rounds, rounds_before_drift);
         assert_eq!(engine3.session.review_invocation_scope, scope_before_drift);
+    }
+
+    /// D1（REQ-WSC-06「reviewer 无损紧凑序列化」）：同一真实 IR/report/
+    /// structure fixture 的**全部 9 段**投影——逐段 deep-equal + 单行 +
+    /// 字节严格小于同一对象 pretty 形态；段顺序稳定；标题、refs、
+    /// nonce/scope 事实与结构修复审计说明完整；总 prompt 仍在 96KiB
+    /// 既有上限内（compact 只降字节，不承诺 token 同比或质量必升）。
+    #[test]
+    fn sg_03a_1_review_prompt_sections_compact_deep_equal_and_smaller() {
+        let (_tmp, lifecycle, engine, report_ref) =
+            sg3a1_sealed_session("d1_compact", |_| {});
+        let input = engine
+            .build_work_item_plan_review_input()
+            .expect("compact single-candidate review input");
+
+        let source_ref = engine
+            .session
+            .work_item_plan_source_revision_ref
+            .clone()
+            .expect("source ref");
+        let ir_ref = engine
+            .session
+            .plan_candidate_ir_ref
+            .clone()
+            .expect("ir ref");
+        let (ir_record, payload) = {
+            let source_store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+            let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
+                project_id: engine.session.project_id.clone(),
+                issue_id: engine.session.issue_id.clone(),
+                plan_id: engine.session.entity_id.clone(),
+            };
+            let ir_record = source_store
+                .get_plan_candidate_ir(&scope, &ir_ref)
+                .expect("reload IR record");
+            let payload = source_store
+                .get_mechanical_report(&scope, &report_ref)
+                .expect("reload report record")
+                .structure_report
+                .expect("structure payload");
+            (ir_record, payload)
+        };
+
+        // 本体六段（从同一 durable IR/report 重载的期望值镜像）。
+        let contracts = ir_record
+            .ir
+            .items
+            .iter()
+            .map(|item| item.contract.clone())
+            .collect::<Vec<_>>();
+        assert_section_compact_deep_equal(
+            &input.prompt,
+            "Canonical Contract Candidates",
+            &serde_json::json!(ir_record
+                .ir
+                .items
+                .iter()
+                .map(|item| expected_contract_candidate(&item.target_repository_id, &item.contract))
+                .collect::<Vec<_>>()),
+        );
+        assert_section_compact_deep_equal(
+            &input.prompt,
+            "Dependency Contract Graph",
+            &serde_json::json!({
+                "topological_order": ["wi-a", "wi-b"],
+                "edges": ["wi-a -> wi-b"],
+            }),
+        );
+        assert_section_compact_deep_equal(
+            &input.prompt,
+            "Reviewer Capability Coverage Projection",
+            &expected_reviewer_coverage(&contracts),
+        );
+        assert_section_compact_deep_equal(
+            &input.prompt,
+            "Cross-Item Contract Supply / Demand",
+            &expected_cross_item_supply_demand(&contracts),
+        );
+        assert_section_compact_deep_equal(
+            &input.prompt,
+            "Projection Validation Report",
+            &serde_json::json!({
+                "source_revision_hash": ir_record.ir.source_revision_hash.as_str(),
+                "compiler_version": ir_record.ir.compiler_version.as_str(),
+                "summary": {
+                    "error_count": 0,
+                    "warning_count": 0,
+                },
+                "findings": serde_json::Value::Array(Vec::new()),
+            }),
+        );
+        assert_section_compact_deep_equal(
+            &input.prompt,
+            "Immutable Candidate Artifact Refs",
+            &serde_json::json!({
+                "plan_candidate_ir_ref": ir_ref.as_str(),
+                "mechanical_report_ref": report_ref.as_str(),
+            }),
+        );
+
+        // 结构三段（同一 record 的 Some 结构 payload）。
+        assert_section_compact_deep_equal(
+            &input.prompt,
+            "Deterministic Structure Report",
+            &serde_json::json!({
+                "effective_edges": serde_json::to_value(&payload.effective_edges).expect("effective edges value"),
+                "cycle_witness": serde_json::to_value(&payload.cycle_witness).expect("cycle witness value"),
+                "findings": serde_json::to_value(&payload.findings).expect("structure findings value"),
+                "structurally_valid": payload.structurally_valid,
+                "protected_predicates": serde_json::to_value(&payload.protected_predicates).expect("protected predicates value"),
+            }),
+        );
+        assert_section_compact_deep_equal(
+            &input.prompt,
+            "Structure Context Identity",
+            &serde_json::json!({
+                "source_revision_ref": source_ref.as_str(),
+                "plan_candidate_ir_ref": ir_ref.as_str(),
+                "mechanical_report_ref": report_ref.as_str(),
+                "source_hash": payload.source_hash.as_str(),
+                "context_digest": payload.context_digest.as_str(),
+                "rule_version": payload.rule_version.as_str(),
+                "report_digest": payload.report_digest.as_str(),
+            }),
+        );
+        assert_section_compact_deep_equal(
+            &input.prompt,
+            "Structural Repair Audit",
+            &serde_json::json!({
+                "instruction_refs": serde_json::to_value(&payload.instruction_refs).expect("instruction refs value"),
+                "repair_audit_refs": serde_json::to_value(&payload.repair_audit_refs).expect("repair audit refs value"),
+            }),
+        );
+
+        // 9 段顺序稳定（本体六段在前、结构三段在后）。
+        let mut cursor = 0usize;
+        for title in [
+            "Canonical Contract Candidates",
+            "Dependency Contract Graph",
+            "Reviewer Capability Coverage Projection",
+            "Cross-Item Contract Supply / Demand",
+            "Projection Validation Report",
+            "Immutable Candidate Artifact Refs",
+            "Deterministic Structure Report",
+            "Structure Context Identity",
+            "Structural Repair Audit",
+        ] {
+            let position = input
+                .prompt
+                .find(&format!("\n### {title}\n"))
+                .unwrap_or_else(|| panic!("section `{title}` missing"));
+            assert!(
+                position >= cursor,
+                "section order must stay stable at `{title}`"
+            );
+            cursor = position;
+        }
+
+        // 标题、refs、nonce/scope 事实与结构修复审计说明完整在场。
+        assert!(input.prompt.contains("## Plan Review Context"));
+        assert!(input.prompt.contains("结构修复审计说明"));
+        assert!(input.prompt.contains("[review_repetition_discipline]"));
+        assert!(input.prompt.contains("审核边界"));
+        assert!(input.prompt.contains(&report_ref));
+        let contract = input
+            .structured_output_contract
+            .as_ref()
+            .expect("structured output contract");
+        assert!(
+            input.prompt.contains(contract.nonce.as_str()),
+            "nonce fact must stay in prompt"
+        );
+        assert!(
+            input.prompt.contains("\"review_scope\":\"outline\""),
+            "scope fact must stay in schema"
+        );
+
+        // 预算：compact 后仍在 96KiB 既有上限内。
+        assert!(input.prompt.len() <= 96 * 1024);
+        assert!(
+            crate::product::workspace_engine::prompts::ensure_single_candidate_review_prompt_budget(
+                &input.prompt
+            )
+            .is_ok()
+        );
     }
 }
