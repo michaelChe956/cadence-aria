@@ -1090,6 +1090,17 @@ async fn complete_sc_routing_review(engine: &mut WorkspaceEngine, verdict: Revie
         .await;
 }
 
+/// B3收口：在场门必须是审批门（零评审义务、相位 Approval），非升级门（升级面=EnterHumanGate）。
+fn sc_assert_pure_approval_gate(engine: &WorkspaceEngine) {
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    let expected_phase = Some(crate::product::models::SingleCandidatePhase::Approval);
+    assert_eq!(engine.session.single_candidate_phase, expected_phase);
+    let snapshot = engine.session.human_gate_snapshot.as_ref();
+    let gate = snapshot.expect("审批门快照在场");
+    assert_eq!(gate.trigger, HumanReason::NativeHumanRequired);
+    assert!(gate.findings.is_empty() && gate.repeated_fingerprints.is_empty());
+}
+
 /// 工作包 4.1（红测）：F5-B 闸门两侧必须同用会话有效视图——上一轮持久化的
 /// 是 provider 原始 verdict，窄例外建议不投影就会以 Repairable 指纹留在上一轮
 /// 非 advisory 集合，令同指纹防打转闸门漏触发（收敛延迟一轮）。
@@ -1133,29 +1144,18 @@ async fn sc_suggestion_only_revise_never_escalates_until_the_cycle_budget_really
 
     engine.start_review().await;
     complete_sc_routing_review(&mut engine, suggestion_only()).await;
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-    assert_eq!(
-        engine.session.single_candidate_phase,
-        Some(crate::product::models::SingleCandidatePhase::Approval)
-    );
-    assert!(engine.session.human_gate_snapshot.is_none());
+    sc_assert_pure_approval_gate(&engine);
 
     engine.start_review().await;
     complete_sc_routing_review(&mut engine, suggestion_only()).await;
-    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
-    assert!(engine.session.human_gate_snapshot.is_none());
+    sc_assert_pure_approval_gate(&engine);
     assert_eq!(engine.session.run_history.verification_review_count, 1);
 
     engine.start_review().await;
     complete_sc_routing_review(&mut engine, suggestion_only()).await;
-    assert_eq!(
-        engine
-            .session
-            .human_gate_snapshot
-            .as_ref()
-            .map(|gate| gate.trigger),
-        Some(HumanReason::RepairBudgetExhausted)
-    );
+    let snapshot = engine.session.human_gate_snapshot.as_ref();
+    let gate = snapshot.expect("耗尽停机门在场");
+    assert_eq!(gate.trigger, HumanReason::RepairBudgetExhausted);
     assert_eq!(engine.session.run_history.verification_review_count, 1);
     assert_eq!(engine.session.run_history.repairs_used, 0, "三轮均零作者返修");
 }
