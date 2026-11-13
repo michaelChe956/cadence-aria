@@ -240,6 +240,8 @@ impl LifecycleStore {
             target_round_ordinal,
             &digest,
         );
+        // 先按借用判类别，再把 disposition 移入 evidence（避免 use-after-move）。
+        let unavailable = matches!(&disposition, ScPromptDisposition::Unavailable);
         let evidence = ScTeachingPromptEvidence {
             failed_round_id: failed_round_id.to_string(),
             target_round_ordinal,
@@ -251,13 +253,14 @@ impl LifecycleStore {
             },
             disposition,
         };
-        let event = match disposition {
-            ScPromptDisposition::Unavailable => ScFailureEvidenceEvent::PromptUnavailable {
+        let event = if unavailable {
+            ScFailureEvidenceEvent::PromptUnavailable {
                 evidence: evidence.clone(),
-            },
-            _ => ScFailureEvidenceEvent::PromptPrepared {
+            }
+        } else {
+            ScFailureEvidenceEvent::PromptPrepared {
                 evidence: evidence.clone(),
-            },
+            }
         };
         let log_path = directory.join(SC_FAILURE_EVIDENCE_LOG);
         let _lock = self.sc_failure_log_lock(&directory, STEP)?;

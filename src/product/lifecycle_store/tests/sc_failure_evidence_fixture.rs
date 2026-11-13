@@ -86,7 +86,7 @@ pub(crate) fn complete_raw(store: &LifecycleStore, handle: &WorkItemSplitProvide
 
 /// chain/round 全部由真实 handle 构造（locator 不解析不透明 run_ref 猜路径）。
 pub(crate) fn bound_round(
-    store: &LifecycleStore,
+    _store: &LifecycleStore,
     session_id: &str,
     handle: &WorkItemSplitProviderRunHandle,
 ) -> (ScFailureChainIdentity, ScRoundIdentity) {
