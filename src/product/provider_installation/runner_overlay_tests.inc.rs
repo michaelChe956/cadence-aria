@@ -963,3 +963,55 @@ async fn update_targets_existing_install_that_is_not_on_path() {
     );
 }
 
+/// 更新后**版本未变** ⇒ 明确报「命令仍是旧版」，不得静默成功（2.10③；
+/// magpie `still X after cmd; Y is out`）。
+#[tokio::test]
+async fn update_reports_still_old_version_when_version_unchanged() {
+    let root = tempdir().expect("root");
+    let prefix = root.path().join("installation");
+    // 已安装 ⇒ 本次是「更新」而不是「安装」。
+    let package_dir = prefix
+        .join("lib")
+        .join("node_modules")
+        .join("@openai")
+        .join("codex");
+    std::fs::create_dir_all(&package_dir).expect("package dir");
+    std::fs::write(
+        package_dir.join("package.json"),
+        br#"{"name":"@openai/codex","version":"1.0.0"}"#,
+    )
+    .expect("package.json");
+    std::fs::create_dir_all(prefix.join("bin")).expect("bin dir");
+
+    let install_runner = ScriptedRunner::new(vec![success("added 1 package")], Duration::ZERO);
+    let mut execution = execution(root.path(), install_runner, SpyProber::new(Some("1.0.0")));
+    execution.path_value = Some(root.path().join("empty-bin").to_string_lossy().into_owned());
+    execution.npm_prefix = prefix.clone();
+
+    let job = execution
+        .store
+        .create("codex", FixedClock.now())
+        .expect("create");
+    execution
+        .run(&job.job_id, InstallTarget::Provider(ProviderName::Codex))
+        .await;
+
+    let done = execution
+        .store
+        .get(&job.job_id)
+        .expect("io")
+        .expect("job exists");
+    let failure = done
+        .failure
+        .expect("版本未变必须明确报出来（不得静默成功）");
+    assert!(
+        failure.message.contains("命令仍是旧版"),
+        "错误文案必须明确报「命令仍是旧版」: {}",
+        failure.message
+    );
+    assert!(
+        failure.message.contains("1.0.0"),
+        "错误文案必须点名当前版本: {}",
+        failure.message
+    );
+}
