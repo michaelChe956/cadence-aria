@@ -9,18 +9,20 @@
 //! 终局 fold。
 use super::evidence_store_failure;
 use super::super::sc_teaching_audit::sc_failure_step_error;
+use super::super::sc_teaching_source::{ScTeachingSourceInput, resolve_sc_teaching_source};
 use super::SingleCandidateProviderRunError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceError, ScFailureEvidenceEvent, ScFailureEvidenceRead,
     sc_failure_evidence_log_ref,
 };
-use crate::product::lifecycle_store::sc_failure_publication::ScLocalTerminal;
+use crate::product::lifecycle_store::sc_failure_publication::{ScLocalTerminal, ScTerminalInput};
 use crate::product::work_item_plan_policy::ScTeachingAttemptRef;
 use crate::product::workspace_engine::WorkspaceEngine;
+use crate::product::workspace_engine::build_sc_failure_repair_package;
 use crate::web::workspace_ws_types::{
-    ScFailureChainIdentity, ScMissingEvidence, ScPackageCompleteness, ScRoundIdentity,
-    ScRoundLaunchState,
+    ScEvidenceRef, ScFailureChainIdentity, ScMissingEvidence, ScPackageCompleteness,
+    ScRoundIdentity, ScRoundLaunchState,
 };
 
 /// 终局类：三类机械失败 + 教学中断（与包 `terminal_class` 同一字面量）。
@@ -35,6 +37,7 @@ pub(in crate::web::workspace_ws_handler::run) const SC_TERMINAL_CLASS_TEACHING_I
 const SC_TERMINAL_STEP: &str = "finalize_sc_failure_chain";
 const SC_TERMINAL_UNKNOWN_CODE: &str = "sc_failure_launch_observation_unknown";
 const SC_TERMINAL_OUTPUT_MISSING_CODE: &str = "sc_failure_output_not_delivered";
+const SC_TERMINAL_PHASE_UNCONFIRMED_CODE: &str = "sc_failure_terminal_phase_unconfirmed";
 
 /// 终局结果：`Durable` = 已 append 并严格读回；`Prefix` = 日志损坏/写读失败，
 /// **未 append**，只带严格前缀与本地终局事实（P19d 以真实前缀组包）。
@@ -225,11 +228,8 @@ pub(in crate::web::workspace_ws_handler::run) async fn terminal_exit_error(
         &original_message,
         launch_observations,
     ) {
-        Ok(_terminal) => {
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
-            );
-            SingleCandidateProviderRunError::Message(original_message)
+        Ok(outcome) => {
+            terminal_outcome_error(engine, lifecycle, chain, outcome, original_message).await
         }
         Err(error) if error.code == SC_TERMINAL_UNKNOWN_CODE => {
             // 未知启动观察：先返回等待，零 Failed。
@@ -280,4 +280,160 @@ pub(in crate::web::workspace_ws_handler::run) fn teaching_launch_observations(
         },
     };
     vec![(round.round_id.clone(), state)]
+}
+
+/// 交包前的 source 真实核验：每个失败轮都用 P20 输入（该轮真实
+/// class/raw/source）读回失败源；读回失败**只**追加一条 `source` 缺项（同 bound
+/// round），由 builder 按 `(round, kind)` 把 `Available` 投影为 `Missing`——
+/// 不改 verified entries、不改证据字节摘要、不猜 launch 状态、不反填 raw。
+fn source_missing_evidence(
+    lifecycle: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+    read: &ScFailureEvidenceRead,
+) -> Vec<ScMissingEvidence> {
+    let mut missing = Vec::new();
+    for entry in &read.entries {
+        let ScFailureEvidenceEvent::FailureObserved {
+            round_id,
+            failure_class: Some(class),
+            raw,
+            source,
+            ..
+        } = &entry.event
+        else {
+            continue;
+        };
+        // 只有 `Available` 才需要核验；显式 `Missing` 是当时的真实事实。
+        if !matches!(source, ScEvidenceRef::Available { .. }) {
+            continue;
+        }
+        let Some(round) = read.entries.iter().find_map(|entry| match &entry.event {
+            ScFailureEvidenceEvent::RoundBound { round } if &round.round_id == round_id => {
+                Some(round)
+            }
+            _ => None,
+        }) else {
+            continue;
+        };
+        let input = ScTeachingSourceInput {
+            identity: round,
+            failure_class: class,
+            raw,
+            source,
+        };
+        if let Err(error) = resolve_sc_teaching_source(lifecycle, &chain.scope, &input) {
+            missing.push(ScMissingEvidence {
+                round_id: round_id.clone(),
+                kind: "source".to_string(),
+                code: error.code,
+                detail: error.detail,
+                locator: None,
+            });
+        }
+    }
+    missing
+}
+
+/// 从真实 durable `ChainTerminal` 行取同一终端事实（source 核验失败时改用
+/// `Local`）：launch 观察来自该实际事件，绝不按包自身推断。
+fn durable_terminal_facts(read: &ScFailureEvidenceRead) -> Option<ScLocalTerminal> {
+    read.entries.iter().rev().find_map(|entry| match &entry.event {
+        ScFailureEvidenceEvent::ChainTerminal {
+            last_failure_round_id,
+            last_physical_round_id,
+            terminal_class,
+            terminal_reason,
+            launch_observations,
+            completeness,
+            missing_evidence,
+        } => Some(ScLocalTerminal {
+            last_failure_round_id: last_failure_round_id.clone(),
+            last_physical_round_id: last_physical_round_id.clone(),
+            terminal_class: terminal_class.clone(),
+            terminal_reason: terminal_reason.clone(),
+            launch_observations: launch_observations.clone(),
+            completeness: completeness.clone(),
+            missing_evidence: missing_evidence.clone(),
+        }),
+        _ => None,
+    })
+}
+
+/// 终局已组（`Durable`/`Prefix`）后的唯一收口：真实 source 核验 → 真实组包 →
+/// 严格发布 → 失败相位 durable 回读确认 → 才回原始失败原文。
+///
+/// - `Unknown` 到不了这里（`finalize` 已先返回 typed Waiting，零 publish）；
+/// - 证据视图逐字使用：`Durable` 走 `ScTerminalInput::Durable`，`Prefix` 走
+///   `ScTerminalInput::Local`；source 读回失败才转 `Local` + `Incomplete`（真实
+///   日志里 `Available` 仍是当时事实，只是终局投影如实标缺）；
+/// - 发布成功 ≠ candidate 成功：这里只闭合真实失败终局的发布与相位；
+/// - 发布失败文本带 store `code`/`detail`/`publication_incomplete`，不吞原错。
+async fn terminal_outcome_error(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+    outcome: ScFailureTerminalOutcome,
+    original_message: String,
+) -> SingleCandidateProviderRunError {
+    let (read, prefix_local) = match outcome {
+        ScFailureTerminalOutcome::Durable(read) => (read, None),
+        ScFailureTerminalOutcome::Prefix { read, terminal } => (read, Some(terminal)),
+    };
+    let missing_sources = source_missing_evidence(lifecycle, chain, &read);
+    let local = match prefix_local {
+        // `Prefix` 已经带真实前缀终端事实：缺项追加即可。
+        Some(mut facts) => {
+            if !missing_sources.is_empty() {
+                facts.completeness = ScPackageCompleteness::Incomplete;
+                facts.missing_evidence.extend(missing_sources);
+            }
+            Some(facts)
+        }
+        // 无 source 读回失败：保持 `Durable`（不无谓改写成 Local、不白克隆终局行）。
+        None if missing_sources.is_empty() => None,
+        // source 读回失败：用真实 durable 终局行转 `Local` + `Incomplete`。
+        None => durable_terminal_facts(&read).map(|mut facts| {
+            facts.completeness = ScPackageCompleteness::Incomplete;
+            facts.missing_evidence.extend(missing_sources);
+            facts
+        }),
+    };
+    let terminal_input = match &local {
+        Some(facts) => ScTerminalInput::Local(facts),
+        None => ScTerminalInput::Durable,
+    };
+    let published = match build_sc_failure_repair_package(chain, &read, terminal_input) {
+        Ok(package) => engine.publish_sc_failure_repair_package(package).await,
+        Err(error) => Err(error),
+    };
+    engine.persist_single_candidate_terminal_phase(
+        crate::product::models::SingleCandidatePhase::Failed,
+    );
+    // 既有 void persist + 真实读回：失败码从这里准确可见，不新增 checked shim。
+    let confirmed = lifecycle
+        .get_workspace_session(&chain.scope.session_id)
+        .map(|record| {
+            matches!(
+                record.single_candidate_phase,
+                Some(crate::product::models::SingleCandidatePhase::Failed)
+            )
+        });
+    match (published, confirmed) {
+        (Ok(_artifact_ref), Ok(true)) => {
+            SingleCandidateProviderRunError::Message(original_message)
+        }
+        (Ok(_artifact_ref), Ok(false)) => SingleCandidateProviderRunError::Message(format!(
+            "{SC_TERMINAL_PHASE_UNCONFIRMED_CODE}: 失败相位回读不是 Failed；\
+             原始失败原因：{original_message}"
+        )),
+        (Ok(_artifact_ref), Err(error)) => SingleCandidateProviderRunError::Message(format!(
+            "{SC_TERMINAL_PHASE_UNCONFIRMED_CODE}: 失败相位回读失败（{error:?}）；\
+             原始失败原因：{original_message}"
+        )),
+        (Err(error), _) => SingleCandidateProviderRunError::Message(format!(
+            "SC 失败终局发布失败：{}: {}（publication_incomplete={}）；\
+             原始失败原因：{original_message}",
+            error.code, error.detail, error.publication_incomplete
+        )),
+    }
 }
