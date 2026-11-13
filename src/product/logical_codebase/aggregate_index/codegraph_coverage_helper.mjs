@@ -71,7 +71,11 @@ async function main() {
   if (typeof CodeGraph !== "function" || typeof CodeGraph.open !== "function") {
     return fail("sdk_incompatible", `${sdkPath} does not export CodeGraph.open`);
   }
-  const cg = await CodeGraph.open(root);
+  // 显式只读：上游默认 open 可能迁移 schema / 自愈索引 / 维护 WAL，不是
+  // 严格只读。1.6.2 的 `CodeGraph.open(projectRoot, { readOnly: true })` 支持
+  // 该选项（`src/index.ts:120 OpenOptions.readOnly`、`src/index.ts:484`；
+  // 其自家 `status` 命令同样用只读打开）。
+  const cg = await CodeGraph.open(root, { readOnly: true });
   if (typeof cg.hasFilesUnder !== "function") {
     return fail("sdk_incompatible", "CodeGraph instance has no hasFilesUnder()");
   }
