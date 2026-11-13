@@ -3,7 +3,6 @@ import { DialogShell } from "../components/shared/DialogShell";
 import { useState, type ComponentProps } from "react";
 import type {
   ProviderPermissionMode,
-  ScFailureRepairPackage,
   WorkItemPlanArtifactPayload,
   WorkspaceArtifactVersionResponse,
   WorkspaceProviderName,
@@ -72,60 +71,6 @@ function isOptionalReviewFinding(finding: unknown): boolean {
   );
 }
 
-// P19b：SC 失败修复包（A4 wire）的 REST 载荷形状校验。逐字段镜像
-// ScFailureRepairPackage 的必填键，缺任一必填键即视为非本类型——不靠
-// 类型断言放行，避免把形状不对的载荷冒充成修复包。
-function isScEvidenceRefShape(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  if (value.status === "available") {
-    return (
-      typeof value.locator === "string" &&
-      typeof value.sha256 === "string" &&
-      typeof value.bytes === "number"
-    );
-  }
-  if (value.status === "missing") {
-    return (
-      typeof value.code === "string" &&
-      typeof value.detail === "string" &&
-      typeof value.round_id === "string"
-    );
-  }
-  return false;
-}
-
-export function isScFailureRepairPackage(
-  value: unknown,
-): value is ScFailureRepairPackage {
-  if (!isRecord(value)) {
-    return false;
-  }
-  return (
-    typeof value.schema_version === "number" &&
-    typeof value.package_id === "string" &&
-    typeof value.chain_id === "string" &&
-    typeof value.session_id === "string" &&
-    typeof value.project_id === "string" &&
-    typeof value.issue_id === "string" &&
-    typeof value.plan_id === "string" &&
-    typeof value.terminal_class === "string" &&
-    typeof value.terminal_reason === "string" &&
-    (value.completeness === "complete" || value.completeness === "incomplete") &&
-    Array.isArray(value.rounds) &&
-    Array.isArray(value.teaching_prompts) &&
-    Array.isArray(value.missing_evidence) &&
-    typeof value.evidence_log_ref === "string" &&
-    typeof value.evidence_digest === "string" &&
-    typeof value.evidence_through_entry_key === "string" &&
-    isScEvidenceRefShape(value.last_provider_output) &&
-    isRecord(value.last_failure_source) &&
-    typeof value.last_failure_source.source_round_id === "string" &&
-    isScEvidenceRefShape(value.last_failure_source.source)
-  );
-}
-
 export function normalizeWorkItemPlanArtifactResponse(
   artifact: WorkspaceArtifactVersionResponse["artifact"],
 ): WorkItemPlanArtifactPayload | null {
@@ -135,13 +80,6 @@ export function normalizeWorkItemPlanArtifactResponse(
   const artifactRecord: Record<string, unknown> = artifact;
   const artifactType =
     typeof artifactRecord.type === "string" ? artifactRecord.type : null;
-  // P19b：已正规化的 type+payload 形态（REST 与 WS 共用同一载荷形状）。
-  if (artifactType === "sc_failure_repair_package") {
-    const payload = artifactRecord.payload;
-    return isScFailureRepairPackage(payload)
-      ? { type: "sc_failure_repair_package", payload }
-      : null;
-  }
   if (
     artifactType &&
     "payload" in artifactRecord &&
@@ -155,6 +93,7 @@ export function normalizeWorkItemPlanArtifactResponse(
       "work_item_projection",
       "work_item_revision_history",
       "projection_validation",
+      "sc_failure_repair_package",
     ].includes(artifactType)
   ) {
     return artifact as WorkItemPlanArtifactPayload;
@@ -213,12 +152,13 @@ export function normalizeWorkItemPlanArtifactResponse(
       payload: artifactRecord.projection_validation,
     } as WorkItemPlanArtifactPayload;
   }
-  // P19b：REST 原始平铺键形态（与 WS artifact_update 同一原始键）。
+  // P19b：REST 原始平铺键形态（与 WS artifact_update 同一原始键），沿用
+  // 其余各键的同一「键存在即透传」分支。
   if ("sc_failure_repair_package" in artifactRecord) {
-    const payload = artifactRecord.sc_failure_repair_package;
-    return isScFailureRepairPackage(payload)
-      ? { type: "sc_failure_repair_package", payload }
-      : null;
+    return {
+      type: "sc_failure_repair_package",
+      payload: artifactRecord.sc_failure_repair_package,
+    } as WorkItemPlanArtifactPayload;
   }
   return null;
 }
