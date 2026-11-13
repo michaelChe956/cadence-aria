@@ -201,11 +201,14 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
                     format!("当前 operation 绑定 seq {seq} 但旧链内无对应 RoundBound：零启动"),
                 )
             })?;
+        // 必须带**原链身份**（Some(&original)）：传 None 会让 begin 以
+        // (scope, key, bound_node, bound_node, ordinal) 查询，跨原节点必然落空
+        // ⇒ 建新 chain/新 seq（= 对同一 operation 的第二物理启动）。
         let entry = begin_sc_failure_round(
             lifecycle,
             scope,
             business_key,
-            None,
+            Some(&original),
             &bound_round.node_id,
             provider,
             bound_round.round_ordinal,

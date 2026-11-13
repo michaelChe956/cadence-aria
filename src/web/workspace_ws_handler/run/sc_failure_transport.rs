@@ -604,41 +604,44 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_single_candidate_re
         Some(&bound.split),
     )
     .await;
-    // P25 F1：`Ok(ProviderSession)` 就是「提示词已物理送出」的边界——`Sent` 必须
-    // 在此 durable 记下，早于任何 drive/close 失败返回（interrupted 轮不再停留在
-    // Prepared）。start 被拒（Err）/ 构造失败 ⇒ 不写 Sent；Completed/Waiting 根本
-    // 不进入本函数。记录失败时发送已发生：不得再启动/重跑，按终局 Incomplete
-    // 收口（真实 missing）。
+    // Task 4（REQ-WSC-28C）：spawn 确认后、事件循环前同步回填（fail-closed）。
+    let reredrive_session =
+        engine.backfill_sc_teaching_launch(sc_teaching_attempt, reredrive_session);
+    // P25 F1：`Sent` 记录点在**既有 backfill_sc_teaching_launch 之后**（ledger 已记
+    // ActualStarted）、任何 drive/close 之前：
+    // - `Ok` ⇒ 提示词已物理送出，必须记 Sent；interrupted 轮不再停留 Prepared；
+    // - `Err`（start 被拒）/ 构造失败 ⇒ 不写 Sent；Completed/Waiting 不进本函数。
+    // 写失败时物理 run 与 ledger 启动事实都已成立：**不 drive、不 retry、不额外
+    // start**，显式取消该 run 并释放会话（不能只丢 channel 当 kill），再按 backfill
+    // 后的真实 Started 观察走既有 terminal Incomplete。
     if reredrive_session.is_ok()
         && let Some(boundary) = sent_boundary
-    {
-        if let Err(error) = crate::web::workspace_ws_handler::run::
+        && let Err(error) = crate::web::workspace_ws_handler::run::
             single_candidate_structure_reredrive::record_sc_teaching_prompt_sent(
             lifecycle,
             boundary.chain,
             boundary.verify,
             reredrive_prompt,
-        ) {
-            let observations = super::sc_failure_evidence::teaching_launch_observations(
-                lifecycle,
-                &bound.chain.scope.session_id,
-                &bound.round,
-                sc_teaching_attempt,
-            );
-            return Err(super::sc_failure_evidence::terminal_exit_error(
-                engine,
-                lifecycle,
-                &bound.chain,
-                super::sc_failure_evidence::SC_TERMINAL_CLASS_TEACHING_INTERRUPTED,
-                observations,
-                format!("SC 教学提示已真实发送，但 Sent 审计写入失败：{error}"),
-            )
-            .await);
-        }
+        )
+    {
+        run_cancel.cancel();
+        drop(reredrive_session);
+        let observations = super::sc_failure_evidence::teaching_launch_observations(
+            lifecycle,
+            &bound.chain.scope.session_id,
+            &bound.round,
+            sc_teaching_attempt,
+        );
+        return Err(super::sc_failure_evidence::terminal_exit_error(
+            engine,
+            lifecycle,
+            &bound.chain,
+            super::sc_failure_evidence::SC_TERMINAL_CLASS_TEACHING_INTERRUPTED,
+            observations,
+            format!("SC 教学提示已真实发送，但 Sent 审计写入失败：{error}"),
+        )
+        .await);
     }
-    // Task 4（REQ-WSC-28C）：spawn 确认后、事件循环前同步回填（fail-closed）。
-    let reredrive_session =
-        engine.backfill_sc_teaching_launch(sc_teaching_attempt, reredrive_session);
     let reredrive_output = match engine
         .drive_work_item_plan_provider_session_to_output(
             reredrive_session,

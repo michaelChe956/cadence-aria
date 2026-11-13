@@ -16,6 +16,7 @@ use crate::cross_cutting::tool_policy_audit::{
 };
 
 const NODE_ID: &str = "node_sc_0001";
+const BUSINESS_KEY_FOR_REPLAY: &str = "workspace_author:session:0";
 
 fn audited_start(lifecycle: &LifecycleStore, session_id: &str, role_run_seq: u64) {
     lifecycle
@@ -234,4 +235,65 @@ fn teaching_round_classifies_ready_completed_and_waiting() {
     }
     // 一轮 RoundBound 一行：原轮 + 教学 1 + 教学 2。
     assert_eq!(evidence_rows(&lifecycle, &original.chain), 3);
+}
+
+// P08 review F1 回归：已绑定 operation 的重入**必须**沿原链解析既有轮。
+// 传 None 会以 (scope, key, bound_node, bound_node, ordinal) 查询而落空，创建
+// 新 chain/新 seq（= 同一 operation 的第二物理启动）。此处只用消费者可见事实：
+// 原链 id 不变、seq 不变、证据行不增、零 start。
+#[test]
+fn bound_operation_reentry_keeps_original_chain_and_run_seq() {
+    let (_tmp, lifecycle, scope) = super::tests::sc_round_fixture();
+    let original = bind_original(&lifecycle, &scope);
+    let teaching = match begin_sc_teaching_round(
+        &lifecycle,
+        &original,
+        None,
+        NODE_ID,
+        &ProviderName::Fake,
+    )
+    .expect("teaching round binds")
+    {
+        ScRoundEntry::Ready(bound) => bound,
+        _ => panic!("un-started teaching round must classify Ready"),
+    };
+    let rows_before = evidence_rows(&lifecycle, &original.chain);
+    let seq_before = teaching.round.role_run_seq;
+    let starts_before = actual_starts(&lifecycle, &scope.session_id);
+
+    // 重入：同一 (node, ordinal) + 原链身份 ⇒ 命中既有轮，不建新链/新 seq。
+    match begin_sc_failure_round(
+        &lifecycle,
+        &scope,
+        BUSINESS_KEY_FOR_REPLAY,
+        Some(&original.chain),
+        NODE_ID,
+        &ProviderName::Fake,
+        teaching.round.round_ordinal,
+    )
+    .expect("bound re-entry resolves the existing round")
+    {
+        ScRoundEntry::Ready(replay) => {
+            assert_eq!(
+                replay.chain.chain_id, original.chain.chain_id,
+                "re-entry must stay on the original chain (no new chain/seq)"
+            );
+            assert_eq!(
+                replay.round.role_run_seq, seq_before,
+                "re-entry must reuse the bound run seq"
+            );
+            assert_eq!(replay.round.round_id, teaching.round.round_id);
+        }
+        _ => panic!("un-started bound round must classify Ready on re-entry"),
+    }
+    assert_eq!(
+        evidence_rows(&lifecycle, &original.chain),
+        rows_before,
+        "re-entry adds no RoundBound row"
+    );
+    assert_eq!(
+        actual_starts(&lifecycle, &scope.session_id),
+        starts_before,
+        "re-entry starts nothing"
+    );
 }
