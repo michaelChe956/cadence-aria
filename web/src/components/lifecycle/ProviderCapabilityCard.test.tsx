@@ -1038,4 +1038,76 @@ describe("ProviderCapabilityCard revalidate surface", () => {
       "消耗 provider 额度",
     );
   });
+
+  // F3（终审 2026-11-13）：已安装但**未核验**的行，既有父级 gate
+  // （`!cli_available || confirmed`）不渲染安装块 ⇒「暴露到终端 PATH」入口
+  // 不可达：用户刚装完（已安装、尚未做能力核验）时看不到暴露入口，功能不可用。
+  it("keeps the expose-to-terminal-PATH entry reachable for an installed but unverified provider", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const method = (init?.method ?? "GET").toUpperCase();
+        captured.push({ url, method, body: null });
+        if (method === "GET" && url === CAPABILITIES_URL) {
+          return jsonResponse(unknownProjection());
+        }
+        if (method === "GET" && url === "/api/providers/install-targets") {
+          return jsonResponse({
+            targets: [
+              {
+                target: "codex",
+                display_name: "Codex",
+                cli_available: true,
+                local_version: "1.0.0",
+                latest_version: "1.0.0",
+                latest_checked_at: "2026-11-13T00:00:00Z",
+                install_source: "npm @openai/codex",
+                action: "none",
+                off_path: true,
+              },
+            ],
+          });
+        }
+        if (method === "POST" && url === "/api/providers/codex/expose") {
+          return jsonResponse({
+            exposed: true,
+            command: "codex",
+            dir: "/home/demo/.local/bin",
+            target: "codex",
+          });
+        }
+        return jsonResponse(
+          { code: "not_found", message: `no route for ${method} ${url}` },
+          404,
+        );
+      }),
+    );
+
+    render(<ProviderCapabilityCard />);
+
+    const codexRow = await screen.findByTestId(
+      "provider-capability-provider-codex",
+    );
+    // 未核验（unknown 投影）⇒ 既有 gate 不渲染安装块，但暴露入口必须可达。
+    const exposeButton = within(codexRow).getByTestId(
+      "provider-capability-expose-codex",
+    );
+    expect(exposeButton).toBeEnabled();
+
+    await userEvent.click(exposeButton);
+
+    await waitFor(() => {
+      expect(
+        captured.find(
+          (request) =>
+            request.method === "POST" &&
+            request.url === "/api/providers/codex/expose",
+        ),
+      ).toBeTruthy();
+    });
+    expect(
+      within(codexRow).getByTestId("provider-capability-expose-result-codex"),
+    ).toHaveTextContent("已暴露到 /home/demo/.local/bin");
+  });
 });
