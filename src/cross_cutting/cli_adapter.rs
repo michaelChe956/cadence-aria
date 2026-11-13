@@ -772,6 +772,64 @@ mod host_inheritance_tests {
             output.stdout
         );
     }
+
+    /// 计划 2026-11-13 §五 2.12：同步捕获通道补入登录 shell 探测回的
+    /// agent 专属环境变量——`environment=None` 分支同样补；覆盖层已有值优先。
+    #[test]
+    fn sync_capture_injects_shell_probe_agent_env_without_explicit_map() {
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
+
+        let Some(free_var) = [
+            "PI_CODING_AGENT_DIR",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+        ]
+        .into_iter()
+        .find(|name| std::env::var_os(name).is_none())
+        else {
+            panic!("宿主 env 已含全部 agent 变量,无法验证补入分支(环境不满足)");
+        };
+        crate::cross_cutting::path_overlay::set_shell_probe_for_test(
+            None,
+            vec![(free_var.to_string(), "/probe/agent-dir".to_string())],
+        );
+        let script = format!("printf '%s' \"${free_var}\"");
+
+        // 补入分支:environment=None、宿主缺该变量 ⇒ 子进程读到探测值。
+        let output = run_command_capture_with_stream(
+            &sh_spec(&script),
+            None,
+            None,
+            None,
+            None,
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("sync capture with shell probe env");
+        assert_eq!(output.exit_code, Some(0), "stderr: {}", output.stderr);
+        assert_eq!(
+            output.stdout, "/probe/agent-dir",
+            "environment=None 分支也必须补入缺失的 agent 变量"
+        );
+
+        // 平台优先分支:显式覆盖层已有该变量 ⇒ 保留显式值。
+        let environment =
+            BTreeMap::from([(free_var.to_string(), "/explicit/agent-dir".to_string())]);
+        let output = run_command_capture_with_stream(
+            &sh_spec(&script),
+            None,
+            None,
+            Some(&environment),
+            None,
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("sync capture keeps explicit env");
+        assert_eq!(
+            output.stdout, "/explicit/agent-dir",
+            "覆盖层已有值不得被探测值覆盖"
+        );
+    }
 }
 
 /// PID 复用防护:超时/提前完成的组清理只在冻结的 (pid, starttime) 身份
