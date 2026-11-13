@@ -14,9 +14,12 @@ use crate::product::lifecycle_store::sc_failure_evidence::{
     sc_failure_chain_id, ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceEvent,
 };
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::work_item_plan_source_store::{
+    SourceRevisionRecord, SourceStoreScope, WorkItemPlanSourceStore,
+};
 use crate::web::workspace_ws_types::{
-    ScFailureChainIdentity, ScFailureScope, ScPromptDisposition, ScRoundIdentity,
-    ScTeachingPromptEvidence,
+    ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScFailureScope, ScPromptDisposition,
+    ScRoundIdentity, ScTeachingPromptEvidence,
 };
 
 /// 精确正文：JSON 转义/反斜杠/引号/换行转义/CJK 必须逐字往返（不重编码）。
@@ -384,4 +387,135 @@ fn sc_failure_boundary_round_bound_rejects_foreign_or_incomplete_round() {
         .append_sc_failure_evidence(&chain, &ScFailureEvidenceEvent::RoundBound { round: round.clone() })
         .expect("本会话 round 必须可写");
     assert!(log_path.exists());
+}
+
+/// 结构门失败（F5）：source 是失败自身的 canonical revision（不是本轮 split
+/// locator）——真实 put_source_revision 的 canonical ref + 本轮真实 split raw 必须
+/// 可写可读；跨 plan 的 revision、摘要/bytes 与真实 revision 不符的 source 必须拒。
+#[test]
+fn sc_failure_boundary_structure_gate_source_is_canonical_revision() {
+    let (_tmp, store) = setup();
+    let session_id = live_sc_session(&store);
+    let handle = begin(&store, &session_id);
+    complete_raw(&store, &handle, RAW1);
+    let (chain, round) = bound_round(&store, &session_id, &handle);
+    bind(&store, &chain, &round);
+    let source_store = WorkItemPlanSourceStore::new(store.app_paths());
+    let scope = SourceStoreScope {
+        project_id: PROJECT_ID.to_string(),
+        issue_id: ISSUE_ID.to_string(),
+        plan_id: PLAN_ID.to_string(),
+    };
+    // 本 plan scope 的真实 canonical source revision
+    let source_text = "计划正文第一版\n第二行";
+    let mut revision = SourceRevisionRecord {
+        id: "source-0001".to_string(),
+        source: source_text.to_string(),
+        source_revision_hash: sha256_hex(source_text.as_bytes()),
+        content_hash: String::new(),
+    };
+    revision.content_hash = revision.content_hash().expect("content hash");
+    let canonical_ref = source_store
+        .put_source_revision(PROJECT_ID, ISSUE_ID, PLAN_ID, &revision)
+        .expect("put source revision");
+    let stored = source_store
+        .get_source_revision(&scope, &canonical_ref)
+        .expect("get source revision");
+    // 结构门失败的 source 形状：canonical revision ref + 真实 revision 的 hash/bytes
+    let structure_event = |locator: &str, sha256: &str, bytes: u64| {
+        let mut event = observed(&round, RAW1, RAW1);
+        if let ScFailureEvidenceEvent::FailureObserved {
+            failure_class,
+            source,
+            ..
+        } = &mut event
+        {
+            *failure_class = Some(ScFailureClass::StructureGate);
+            *source = ScEvidenceRef::Available {
+                locator: locator.to_string(),
+                sha256: sha256.to_string(),
+                bytes,
+            };
+        }
+        event
+    };
+    // ① 跨 plan 的 canonical revision：scope 不符 → 必须拒
+    let foreign_text = "别的 plan 的正文";
+    let mut foreign = SourceRevisionRecord {
+        id: "source-foreign-0001".to_string(),
+        source: foreign_text.to_string(),
+        source_revision_hash: sha256_hex(foreign_text.as_bytes()),
+        content_hash: String::new(),
+    };
+    foreign.content_hash = foreign.content_hash().expect("content hash");
+    let foreign_ref = source_store
+        .put_source_revision(PROJECT_ID, ISSUE_ID, "entity_9999", &foreign)
+        .expect("put foreign source revision");
+    let err = store
+        .append_sc_failure_evidence(
+            &chain,
+            &structure_event(
+                &foreign_ref,
+                &foreign.source_revision_hash,
+                foreign.source.len() as u64,
+            ),
+        )
+        .expect_err("跨 plan 的 source revision 必须拒绝");
+    assert_eq!(err.code, "sc_failure_locator_invalid");
+    assert_eq!(err.step, "append_sc_failure_evidence");
+    assert_eq!(err.round_id.as_deref(), Some(round.round_id.as_str()));
+    // ② 摘要与真实 revision 不符 → 必须拒
+    let err = store
+        .append_sc_failure_evidence(
+            &chain,
+            &structure_event(&canonical_ref, &"0".repeat(64), stored.source.len() as u64),
+        )
+        .expect_err("摘要被篡改的 source 必须拒绝");
+    assert_eq!(err.code, "sc_failure_locator_invalid");
+    // ③ bytes 与真实 revision 不符 → 必须拒
+    let err = store
+        .append_sc_failure_evidence(
+            &chain,
+            &structure_event(
+                &canonical_ref,
+                &stored.source_revision_hash,
+                stored.source.len() as u64 + 1,
+            ),
+        )
+        .expect_err("bytes 被篡改的 source 必须拒绝");
+    assert_eq!(err.code, "sc_failure_locator_invalid");
+    // ④ 正例：真实 canonical revision + 本轮真实 split raw → 必须可写可读
+    store
+        .append_sc_failure_evidence(
+            &chain,
+            &structure_event(
+                &canonical_ref,
+                &stored.source_revision_hash,
+                stored.source.len() as u64,
+            ),
+        )
+        .expect("结构门 source 必须是真实 canonical revision");
+    let read = store.read_sc_failure_evidence(&chain).expect("read");
+    let recorded = read
+        .entries
+        .iter()
+        .find_map(|entry| match &entry.event {
+            ScFailureEvidenceEvent::FailureObserved { source, .. } => Some(source),
+            _ => None,
+        })
+        .expect("observed 条目必须可读回");
+    match recorded {
+        ScEvidenceRef::Available {
+            locator,
+            sha256,
+            bytes,
+        } => {
+            assert_eq!(locator, &canonical_ref);
+            assert_eq!(sha256, &stored.source_revision_hash);
+            assert_eq!(*bytes, stored.source.len() as u64);
+        }
+        ScEvidenceRef::Missing { .. } => {
+            panic!("结构门 source 必须是 Available canonical revision")
+        }
+    }
 }
