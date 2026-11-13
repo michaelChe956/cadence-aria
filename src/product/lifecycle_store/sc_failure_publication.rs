@@ -359,7 +359,7 @@ impl LifecycleStore {
             .join(SC_FAILURE_EVIDENCE_DIR)
             .join(chain_id)
             .join(SC_FAILURE_EVIDENCE_LOG);
-        let content = std::fs::read_to_string(&log).map_err(|error| {
+        let bytes = std::fs::read(&log).map_err(|error| {
             publication_error(
                 CODE_IO,
                 STEP,
@@ -367,18 +367,29 @@ impl LifecycleStore {
                 false,
             )
         })?;
-        let first = content
-            .lines()
-            .find(|line| !line.trim().is_empty())
-            .ok_or_else(|| publication_error(CODE_LOG_CORRUPT, STEP, "证据日志为空", false))?;
-        let entry: ScFailureEvidenceEntry = serde_json::from_str(first).map_err(|error| {
-            publication_error(
+        // 首物理行，不跳过空行：坏/空首行不得退到后续行伪造身份。
+        let first_line_end = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(bytes.len());
+        let first_line = &bytes[..first_line_end];
+        if first_line.iter().all(|byte| byte.is_ascii_whitespace()) {
+            return Err(publication_error(
                 CODE_LOG_CORRUPT,
                 STEP,
-                format!("首行无法解析: {error}"),
+                "证据日志首物理行为空",
                 false,
-            )
-        })?;
+            ));
+        }
+        let entry: ScFailureEvidenceEntry =
+            serde_json::from_slice(first_line).map_err(|error| {
+                publication_error(
+                    CODE_LOG_CORRUPT,
+                    STEP,
+                    format!("首行无法解析: {error}"),
+                    false,
+                )
+            })?;
         let identity = entry.chain.clone();
         if &identity.scope != scope {
             return Err(publication_error(
