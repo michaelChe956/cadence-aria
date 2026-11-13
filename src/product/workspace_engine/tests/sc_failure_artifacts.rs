@@ -11,6 +11,7 @@ use crate::product::lifecycle_store::sc_failure_evidence::{
     sc_failure_evidence_log_ref, ScFailureEvidenceEntry, ScFailureEvidenceEvent,
     ScFailureEvidenceRead,
 };
+use crate::product::lifecycle_store::sc_failure_publication::ScTerminalInput;
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::{
     ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScFailureScope, ScMissingEvidence,
@@ -135,7 +136,7 @@ fn complete_terminal_builds_ordered_rounds_and_last_physical_raw() {
         terminal(8, &chain, &r2, &r2, "ir_preflight", IR_REASON, vec![started(&r1), started(&r2)], ScPackageCompleteness::Complete, Vec::new()),
     ];
     let prefix = complete_prefix();
-    let package = build_sc_failure_repair_package(&chain, &read(entries, prefix.clone())).expect("complete terminal evidence must build a package");
+    let package = build_sc_failure_repair_package(&chain, &read(entries, prefix.clone()), ScTerminalInput::Durable).expect("complete terminal evidence must build a package");
 
     assert_eq!(package.schema_version, 1);
     assert_eq!((package.chain_id.as_str(), package.session_id.as_str(), package.project_id.as_str(), package.issue_id.as_str(), package.plan_id.as_str()), (CHAIN, SESSION, "proj-p11", "issue-p11", "plan-p11"));
@@ -188,7 +189,7 @@ fn interrupted_second_started_keeps_round_one_as_failure_source() {
         terminal(6, &chain, &r1, &r2, "teaching_interrupted", INTERRUPTED_REASON, vec![started(&r1), started(&r2)], ScPackageCompleteness::Incomplete, vec![gap.clone()]),
     ];
     let prefix = interrupted_prefix();
-    let package = build_sc_failure_repair_package(&chain, &read(entries, prefix.clone())).expect("interrupted chain with observed failure must build a package");
+    let package = build_sc_failure_repair_package(&chain, &read(entries, prefix.clone()), ScTerminalInput::Durable).expect("interrupted chain with observed failure must build a package");
 
     assert_eq!(package.terminal_class, "teaching_interrupted");
     assert_eq!(package.terminal_reason, INTERRUPTED_REASON);
@@ -224,18 +225,18 @@ fn interrupted_second_started_keeps_round_one_as_failure_source() {
 #[test]
 fn equal_terminal_content_replays_same_package_id_and_reason_change_flips_it() {
     let chain = chain();
-    let first = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: mismatched types", one_round_prefix())).expect("build");
-    let replay = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: mismatched types", one_round_prefix())).expect("replay from independently constructed equal evidence");
+    let first = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: mismatched types", one_round_prefix()), ScTerminalInput::Durable).expect("build");
+    let replay = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: mismatched types", one_round_prefix()), ScTerminalInput::Durable).expect("replay from independently constructed equal evidence");
     assert_eq!(first.package_id.len(), 64);
     assert!(first.package_id.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
     assert_eq!(first, replay, "same terminal content must replay an identical package");
 
-    let changed = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: different wording", one_round_prefix())).expect("changed reason");
+    let changed = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: different wording", one_round_prefix()), ScTerminalInput::Durable).expect("changed reason");
     assert_ne!(first.package_id, changed.package_id);
     assert_eq!(first.evidence_digest, changed.evidence_digest, "evidence digest covers the log prefix bytes, not event wording");
 
     let other_prefix = b"other rounds.jsonl prefix bytes".to_vec();
-    let rehashed = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: mismatched types", other_prefix.clone())).expect("other prefix");
+    let rehashed = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: mismatched types", other_prefix.clone()), ScTerminalInput::Durable).expect("other prefix");
     assert_eq!(rehashed.evidence_digest, sha_hex(&other_prefix));
     assert_ne!(first.package_id, rehashed.package_id);
 }
@@ -244,7 +245,7 @@ fn equal_terminal_content_replays_same_package_id_and_reason_change_flips_it() {
 fn non_terminal_read_is_rejected_instead_of_fabricating_terminal() {
     let mut evidence = one_round_read("E0308:3: mismatched types", one_round_prefix());
     evidence.entries.pop();
-    let error = build_sc_failure_repair_package(&chain(), &evidence).expect_err("non-terminal evidence must not build a terminal package");
+    let error = build_sc_failure_repair_package(&chain(), &evidence, ScTerminalInput::Durable).expect_err("non-terminal evidence must not build a terminal package");
     assert!(error.code.starts_with("sc_failure_"), "unexpected code: {}", error.code);
     assert!(!error.step.is_empty());
     assert!(!error.detail.is_empty());
@@ -254,7 +255,7 @@ fn non_terminal_read_is_rejected_instead_of_fabricating_terminal() {
 fn missing_teaching_decision_is_rejected_instead_of_defaulted() {
     let mut evidence = one_round_read("E0308:3: mismatched types", one_round_prefix());
     evidence.entries.retain(|item| !matches!(&item.event, ScFailureEvidenceEvent::TeachingDecision { .. }));
-    let error = build_sc_failure_repair_package(&chain(), &evidence).expect_err("missing decision on a failed round must not be defaulted");
+    let error = build_sc_failure_repair_package(&chain(), &evidence, ScTerminalInput::Durable).expect_err("missing decision on a failed round must not be defaulted");
     assert_eq!(error.code, "sc_failure_teaching_decision_missing");
     assert!(!error.step.is_empty());
 }
@@ -284,7 +285,7 @@ fn bound_but_not_started_round_keeps_raw_missing_instead_of_not_delivered() {
         terminal(5, &chain, &r1, &r1, "teaching_interrupted", INTERRUPTED_REASON, vec![started(&r1), (r2.round_id.clone(), ScRoundLaunchState::NotStarted)], ScPackageCompleteness::Incomplete, vec![gap.clone()]),
     ];
     let prefix = interrupted_prefix();
-    let package = build_sc_failure_repair_package(&chain, &read(entries, prefix.clone())).expect("a bound but never started round must still build an honest package");
+    let package = build_sc_failure_repair_package(&chain, &read(entries, prefix.clone()), ScTerminalInput::Durable).expect("a bound but never started round must still build an honest package");
 
     assert_eq!(package.rounds.len(), 2);
     assert_eq!(package.rounds[1].identity, r2);

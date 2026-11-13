@@ -20,6 +20,9 @@ use crate::product::lifecycle_store::sc_failure_evidence::{
     sc_failure_evidence_log_ref, ScFailureEvidenceError, ScFailureEvidenceEvent,
     ScFailureEvidenceRead,
 };
+use crate::product::lifecycle_store::sc_failure_publication::{
+    ScLocalTerminal, ScTerminalInput,
+};
 use crate::web::workspace_ws_types::{
     ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScFailureRepairPackage,
     ScFailureSourceEvidence, ScMissingEvidence, ScPackageCompleteness, ScRoundEvidence,
@@ -39,6 +42,7 @@ const CODE_PREFIX_MISSING: &str = "sc_failure_evidence_prefix_missing";
 const CODE_ROUND_ORDER_INVALID: &str = "sc_failure_round_order_invalid";
 const CODE_ROUND_NOT_BOUND: &str = "sc_failure_round_not_bound";
 const CODE_LAUNCH_STATE_UNKNOWN: &str = "sc_failure_launch_state_unknown";
+const CODE_LOCAL_TERMINAL_INVALID: &str = "sc_failure_local_terminal_invalid";
 const CODE_PACKAGE_INVALID: &str = "sc_failure_package_invalid";
 const CODE_PACKAGE_SERIALIZE: &str = "sc_failure_package_serialize";
 
@@ -53,16 +57,17 @@ struct FailureFacts<'a> {
     attempt_key: &'a Option<String>,
 }
 
-/// 终局事实的借用视图（取最近一条 `ChainTerminal`）。
-struct TerminalFacts<'a> {
-    entry_key: &'a String,
-    last_failure_round_id: &'a String,
-    last_physical_round_id: &'a Option<String>,
-    terminal_class: &'a String,
-    terminal_reason: &'a String,
-    launch_observations: &'a Vec<(String, ScRoundLaunchState)>,
-    completeness: &'a ScPackageCompleteness,
-    missing_evidence: &'a Vec<ScMissingEvidence>,
+/// 终局事实视图（owned）：`Durable` 来自日志里的真实 `ChainTerminal`，
+/// `Local` 来自调用方对真实已验证前缀的观察（local 绝不入日志、不计前缀字节）。
+struct TerminalFacts {
+    entry_key: String,
+    last_failure_round_id: String,
+    last_physical_round_id: Option<String>,
+    terminal_class: String,
+    terminal_reason: String,
+    launch_observations: Vec<(String, ScRoundLaunchState)>,
+    completeness: ScPackageCompleteness,
+    missing_evidence: Vec<ScMissingEvidence>,
 }
 
 /// 纯组包：确定性、无副作用。非终局读视图 / 缺已验证前缀 / 失败轮缺显式教学
@@ -71,6 +76,7 @@ struct TerminalFacts<'a> {
 pub(crate) fn build_sc_failure_repair_package(
     identity: &ScFailureChainIdentity,
     evidence: &ScFailureEvidenceRead,
+    terminal_input: ScTerminalInput<'_>,
 ) -> Result<ScFailureRepairPackage, ScFailureEvidenceError> {
     check_chain_scope(identity, evidence)?;
     if evidence.verified_prefix_bytes.is_empty() {
@@ -80,17 +86,26 @@ pub(crate) fn build_sc_failure_repair_package(
             "读视图没有已验证前缀字节，不能伪造 evidence_digest",
         ));
     }
-    let terminal = terminal_facts(evidence)?;
-    if terminal.entry_key.as_str() != evidence.evidence_through_entry_key.as_str() {
-        return Err(error(
-            CODE_THROUGH_MISMATCH,
-            None,
-            format!(
-                "读视图游标 {} 不是终局条目 {}，不能把非终局事实当包边界",
-                evidence.evidence_through_entry_key, terminal.entry_key
-            ),
-        ));
-    }
+    let terminal = match terminal_input {
+        // Durable：行为与今天逐字一致（无终局事实即 Err；游标必须是终局条目）。
+        ScTerminalInput::Durable => {
+            let facts = terminal_facts(evidence)?;
+            if facts.entry_key != evidence.evidence_through_entry_key {
+                return Err(error(
+                    CODE_THROUGH_MISMATCH,
+                    None,
+                    format!(
+                        "读视图游标 {} 不是终局条目 {}，不能把非终局事实当包边界",
+                        evidence.evidence_through_entry_key, facts.entry_key
+                    ),
+                ));
+            }
+            facts
+        }
+        // Local：日志只部分可读时的真实不完整包——through key 取已验证前缀末条真实
+        // key，终端字段取调用方观察；rounds/prompts 只来自真实条目，local 不入条目。
+        ScTerminalInput::Local(local) => local_terminal_facts(evidence, local)?,
+    };
     // Plan §2.3/§3.2：`Unknown` 只表达“观察到但状态未知”，不写 ChainTerminal
     // （等待／对账不伪造终局）。组包器兜底：终局观察里出现 `Unknown` 即拒绝，
     // 绝不让它进包，也不把它降级成 NotStarted/Started。
@@ -140,7 +155,7 @@ pub(crate) fn build_sc_failure_repair_package(
         }
         let launch_state = resolved_launch_state(
             evidence,
-            terminal.launch_observations,
+            &terminal.launch_observations,
             round.round_id.as_str(),
         )?;
         // 观察说“未启动”却又有真实 FailureObserved：证据自相矛盾，不掩盖。
@@ -165,7 +180,7 @@ pub(crate) fn build_sc_failure_repair_package(
             None => {
                 let undelivered = undelivered_ref(
                     &launch_state,
-                    terminal.terminal_reason,
+                    terminal.terminal_reason.as_str(),
                     round.round_id.as_str(),
                 );
                 (None, Vec::new(), Vec::new(), undelivered.clone(), undelivered)
@@ -232,7 +247,7 @@ pub(crate) fn build_sc_failure_repair_package(
         Some(round_id) => {
             let state = resolved_launch_state(
                 evidence,
-                terminal.launch_observations,
+                &terminal.launch_observations,
                 round_id.as_str(),
             )?;
             if state != ScRoundLaunchState::Started {
@@ -246,7 +261,7 @@ pub(crate) fn build_sc_failure_repair_package(
             }
             match failure_for(evidence, round_id.as_str()) {
                 Some(facts) => facts.raw.clone(),
-                None => undelivered_ref(&state, terminal.terminal_reason, round_id.as_str()),
+                None => undelivered_ref(&state, terminal.terminal_reason.as_str(), round_id.as_str()),
             }
         }
         None => ScEvidenceRef::Missing {
@@ -313,6 +328,38 @@ pub(crate) fn build_sc_failure_repair_package(
     Ok(package)
 }
 
+/// Local 终局：只能是真实不完整包（Incomplete + 结构化 missing）；through key 取
+/// 已验证前缀末条真实 key，不伪造 entry / digest / through key。
+fn local_terminal_facts(
+    evidence: &ScFailureEvidenceRead,
+    local: &ScLocalTerminal,
+) -> Result<TerminalFacts, ScFailureEvidenceError> {
+    if local.completeness != ScPackageCompleteness::Incomplete {
+        return Err(error(
+            CODE_LOCAL_TERMINAL_INVALID,
+            None,
+            "Local 终局只能是 Incomplete：真实缺证据不得包装成完整包",
+        ));
+    }
+    if local.missing_evidence.is_empty() {
+        return Err(error(
+            CODE_LOCAL_TERMINAL_INVALID,
+            None,
+            "Local 终局必须带结构化 missing_evidence，不得空手成包",
+        ));
+    }
+    Ok(TerminalFacts {
+        entry_key: evidence.evidence_through_entry_key.clone(),
+        last_failure_round_id: local.last_failure_round_id.clone(),
+        last_physical_round_id: local.last_physical_round_id.clone(),
+        terminal_class: local.terminal_class.clone(),
+        terminal_reason: local.terminal_reason.clone(),
+        launch_observations: local.launch_observations.clone(),
+        completeness: local.completeness.clone(),
+        missing_evidence: local.missing_evidence.clone(),
+    })
+}
+
 /// 读视图必须整体属于组包身份：任一条目的链/作用域不一致即拒绝。
 fn check_chain_scope(
     identity: &ScFailureChainIdentity,
@@ -330,7 +377,7 @@ fn check_chain_scope(
     Ok(())
 }
 
-fn terminal_facts(evidence: &ScFailureEvidenceRead) -> Result<TerminalFacts<'_>, ScFailureEvidenceError> {
+fn terminal_facts(evidence: &ScFailureEvidenceRead) -> Result<TerminalFacts, ScFailureEvidenceError> {
     evidence
         .entries
         .iter()
@@ -345,14 +392,14 @@ fn terminal_facts(evidence: &ScFailureEvidenceRead) -> Result<TerminalFacts<'_>,
                 completeness,
                 missing_evidence,
             } => Some(TerminalFacts {
-                entry_key: &entry.entry_key,
-                last_failure_round_id,
-                last_physical_round_id,
-                terminal_class,
-                terminal_reason,
-                launch_observations,
-                completeness,
-                missing_evidence,
+                entry_key: entry.entry_key.clone(),
+                last_failure_round_id: last_failure_round_id.clone(),
+                last_physical_round_id: last_physical_round_id.clone(),
+                terminal_class: terminal_class.clone(),
+                terminal_reason: terminal_reason.clone(),
+                launch_observations: launch_observations.clone(),
+                completeness: completeness.clone(),
+                missing_evidence: missing_evidence.clone(),
             }),
             _ => None,
         })

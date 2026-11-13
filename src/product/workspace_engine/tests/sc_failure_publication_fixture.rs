@@ -16,12 +16,14 @@ use crate::product::lifecycle_store::sc_failure_evidence::{
 use crate::product::lifecycle_store::{
     CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
 };
+use crate::product::lifecycle_store::sc_failure_publication::ScTerminalInput;
 use crate::product::models::{
-    ArtifactVersion, ProviderName, WorkspaceRolePermissionModes, WorkspaceType,
+    ProviderName, WorkspaceRolePermissionModes, WorkspaceType,
 };
 use crate::product::work_item_plan_policy::{RunPolicy, WorkItemPlanFlowKind};
 use crate::web::workspace_ws_types::{
-    ArtifactPayload, ProviderConfigSnapshot, ScArtifactPublishedReceipt, ScEvidenceRef,
+    ArtifactPayload, ArtifactVersion, ProviderConfigSnapshot, ScArtifactPublishedReceipt,
+    ScEvidenceRef,
     ScFailureChainIdentity, ScFailureClass, ScFailureScope, ScFailureRepairPackage,
     ScPackageCompleteness, ScRoundIdentity, ScRoundLaunchState, ScTeachingDecision, TimelineNode,
     TimelineNodeStatus, TimelineNodeType, WorkspaceStage,
@@ -183,7 +185,7 @@ pub(super) fn publication_fixture() -> PublicationFixture {
     let evidence = store
         .read_sc_failure_evidence(&chain)
         .expect("strict evidence read");
-    let package = build_sc_failure_repair_package(&chain, &evidence).expect("repair package");
+    let package = build_sc_failure_repair_package(&chain, &evidence, ScTerminalInput::Durable).expect("repair package");
 
     PublicationFixture {
         _tmp: tmp,
