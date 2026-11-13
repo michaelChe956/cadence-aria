@@ -198,13 +198,12 @@ pub(crate) fn build_sc_failure_repair_package(
                 )
             }
         };
-        if let ScEvidenceRef::Available { .. } = source {
-            if let Some((_, item)) = local_source_missing
+        if matches!(source, ScEvidenceRef::Available { .. })
+            && let Some((_, item)) = local_source_missing
                 .iter()
                 .find(|(round_id, _)| *round_id == round.round_id.as_str())
-            {
-                source = projected_source_ref(*item);
-            }
+        {
+            source = projected_source_ref(item);
         }
         let round_evidence = ScRoundEvidence {
             identity: round.clone(),
@@ -249,14 +248,14 @@ pub(crate) fn build_sc_failure_repair_package(
             ),
         ));
     }
-    if let Some(physical_round_id) = &terminal.last_physical_round_id {
-        if !bound_round_ids.contains(&physical_round_id.as_str()) {
-            return Err(error(
-                CODE_ROUND_NOT_BOUND,
-                Some(physical_round_id.clone()),
-                format!("终局声明的物理轮 {physical_round_id} 没有 RoundBound 事实"),
-            ));
-        }
+    if let Some(physical_round_id) = &terminal.last_physical_round_id
+        && !bound_round_ids.contains(&physical_round_id.as_str())
+    {
+        return Err(error(
+            CODE_ROUND_NOT_BOUND,
+            Some(physical_round_id.clone()),
+            format!("终局声明的物理轮 {physical_round_id} 没有 RoundBound 事实"),
+        ));
     }
 
     // last 物理轮 raw 与 last 失败轮 source 是两条不同来源：物理轮没有交付时留

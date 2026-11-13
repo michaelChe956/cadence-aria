@@ -69,7 +69,7 @@ pub(super) fn available(locator: &str, body: &str) -> ScEvidenceRef {
     ScEvidenceRef::Available {
         locator: locator.to_string(),
         sha256: sha_hex(body.as_bytes()),
-        bytes: body.as_bytes().len() as u64,
+        bytes: body.len() as u64,
     }
 }
 

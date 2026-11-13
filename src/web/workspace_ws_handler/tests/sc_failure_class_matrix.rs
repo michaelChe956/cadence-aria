@@ -9,7 +9,6 @@ use super::sc_failure_driver_fixture::{
     extract_source_body, failure_message, markdown_missing_five_sections,
     markdown_unknown_requirement_ref, only_chain_id, sha256_hex, start_run,
 };
-use super::single_candidate_provider_run::*;
 use super::single_candidate_provider_run::{
     ProviderRunFixture, single_candidate_markdown, wait_for_single_candidate_phase,
 };

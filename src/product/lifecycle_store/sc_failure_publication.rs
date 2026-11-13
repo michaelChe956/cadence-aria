@@ -124,73 +124,64 @@ impl LifecycleStore {
         let (_, scope) = self
             .resolve_session_scope(&identity.scope.session_id)
             .map_err(|error| publication_error(CODE_IO, STEP, format!("{error}"), true))?;
-        let outcome = self
-            .with_optional_entity_live_write(scope.as_ref(), || {
-                let inner = (|| -> Result<(), ScFailureEvidenceError> {
-                    let _lock = ExclusiveFileLock::acquire(&path).map_err(|error| {
-                        publication_error(CODE_IO, STEP, format!("lock: {error}"), true)
-                    })?;
-                    if path_exists(&path).map_err(|error| {
-                        publication_error(CODE_IO, STEP, format!("{error}"), true)
-                    })? {
-                        let existing = std::fs::read(&path).map_err(|error| {
-                            publication_error(
-                                CODE_IO,
-                                STEP,
-                                format!("read existing receipt: {error}"),
-                                true,
-                            )
-                        })?;
-                        if existing == bytes {
-                            return Ok(());
-                        }
-                        return Err(publication_error(
-                            CODE_RECEIPT_MISMATCH,
+        self.with_optional_entity_live_write(scope.as_ref(), || {
+            let inner = (|| -> Result<(), ScFailureEvidenceError> {
+                let _lock = ExclusiveFileLock::acquire(&path).map_err(|error| {
+                    publication_error(CODE_IO, STEP, format!("lock: {error}"), true)
+                })?;
+                if path_exists(&path)
+                    .map_err(|error| publication_error(CODE_IO, STEP, format!("{error}"), true))?
+                {
+                    let existing = std::fs::read(&path).map_err(|error| {
+                        publication_error(
+                            CODE_IO,
                             STEP,
-                            "receipt 不可变：同 package_id 已存在不同回执",
+                            format!("read existing receipt: {error}"),
                             true,
-                        ));
-                    }
-                    if let Some(parent) = path.parent() {
-                        std::fs::create_dir_all(parent).map_err(|error| {
-                            publication_error(CODE_IO, STEP, format!("mkdir: {error}"), true)
-                        })?;
-                    }
-                    {
-                        use std::io::Write;
-                        let mut file = std::fs::OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .open(&path)
-                            .map_err(|error| {
-                                publication_error(
-                                    CODE_IO,
-                                    STEP,
-                                    format!("create_new: {error}"),
-                                    true,
-                                )
-                            })?;
-                        file.write_all(&bytes).map_err(|error| {
-                            publication_error(CODE_IO, STEP, format!("write: {error}"), true)
-                        })?;
-                        file.sync_all().map_err(|error| {
-                            publication_error(CODE_IO, STEP, format!("sync: {error}"), true)
-                        })?;
-                    }
-                    let readback = std::fs::read(&path).map_err(|error| {
-                        publication_error(CODE_IO, STEP, format!("readback: {error}"), true)
+                        )
                     })?;
-                    if readback != bytes {
-                        return Err(publication_error(CODE_IO, STEP, "回读字节不一致", true));
+                    if existing == bytes {
+                        return Ok(());
                     }
-                    Ok(())
-                })();
-                Ok(inner)
-            })
-            .map_err(|error| {
-                publication_error(CODE_IO, STEP, format!("live_write: {error}"), true)
-            })?;
-        outcome
+                    return Err(publication_error(
+                        CODE_RECEIPT_MISMATCH,
+                        STEP,
+                        "receipt 不可变：同 package_id 已存在不同回执",
+                        true,
+                    ));
+                }
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|error| {
+                        publication_error(CODE_IO, STEP, format!("mkdir: {error}"), true)
+                    })?;
+                }
+                {
+                    use std::io::Write;
+                    let mut file = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                        .map_err(|error| {
+                            publication_error(CODE_IO, STEP, format!("create_new: {error}"), true)
+                        })?;
+                    file.write_all(&bytes).map_err(|error| {
+                        publication_error(CODE_IO, STEP, format!("write: {error}"), true)
+                    })?;
+                    file.sync_all().map_err(|error| {
+                        publication_error(CODE_IO, STEP, format!("sync: {error}"), true)
+                    })?;
+                }
+                let readback = std::fs::read(&path).map_err(|error| {
+                    publication_error(CODE_IO, STEP, format!("readback: {error}"), true)
+                })?;
+                if readback != bytes {
+                    return Err(publication_error(CODE_IO, STEP, "回读字节不一致", true));
+                }
+                Ok(())
+            })();
+            Ok(inner)
+        })
+        .map_err(|error| publication_error(CODE_IO, STEP, format!("live_write: {error}"), true))?
     }
 
     /// 公开视图屏障：普通版本原样放行；A4 仅在其 durable 回执 + 节点引用与

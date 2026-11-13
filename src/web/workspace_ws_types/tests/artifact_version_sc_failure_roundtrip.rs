@@ -199,7 +199,7 @@ fn sc_failure_repair_package_fixture() -> ScFailureRepairPackage {
         ScEvidenceRef::Available {
             locator: locator.to_string(),
             sha256: sha256_hex(content),
-            bytes: content.as_bytes().len() as u64,
+            bytes: content.len() as u64,
         }
     }
     fn round_identity(ordinal: u32) -> ScRoundIdentity {

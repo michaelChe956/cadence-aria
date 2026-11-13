@@ -266,6 +266,7 @@ fn project_sc_round_evidence(
 /// 处理器组包（失败源/预算/审计失败时判定与缺提示记录已 durable——不只丢
 /// 一条 Message 丢掉终局）。错误原因取既有 `Message` 载荷逐字（原始失败
 /// 原因不丢），其余变体按 Debug 呈现（该错误类型无 Display）。
+#[allow(clippy::result_large_err)] // 终局收口与既有别处同型：`Message` 载荷必须逐字保留。
 pub(super) async fn sc_teaching_terminal_grant<T>(
     engine: &mut WorkspaceEngine,
     lifecycle: &LifecycleStore,

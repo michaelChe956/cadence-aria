@@ -168,7 +168,7 @@ fn render_structure_failure(failure: &PlanningFailure) -> String {
 // 每失败轮恰一次的顺序契约：完整本轮事实 → FailureObserved 追加+严格读回 →
 // 既有资格/窗口（establish → 漂移核验 → claim，一字不改）→ 真实判定追加+
 // 严格读回 → 调用方在 grant 后启动重驱 provider。判定只形成一次：store
-/// 写读错误 ⇒ 不写任何 decision，fail-closed 上浮。
+// 写读错误 ⇒ 不写任何 decision，fail-closed 上浮。
 
 /// 已形成的重驱授予：返回时判定已 durable 记录（append + 严格读回）。
 ///
@@ -641,6 +641,7 @@ fn run_sc_teaching_chain(
 /// （真实未请求消费窗口——不是假 Denied），再把带稳定码的错误上浮；终局由
 /// 调用方的终局处理器组包（本函数不吞终局、不静默降级）。
 #[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同既有先例）。
+#[allow(clippy::too_many_arguments)] // 统一失败收口：每个参数都是必须原样上交的独立真实事实。
 fn fail_sc_teaching_chain(
     engine: &mut WorkspaceEngine,
     lifecycle: &LifecycleStore,

@@ -335,7 +335,7 @@ mod tests {
         ScEvidenceRef::Available {
             locator: locator.to_string(),
             sha256: sha256_hex(content),
-            bytes: content.as_bytes().len() as u64,
+            bytes: content.len() as u64,
         }
     }
 
@@ -644,7 +644,7 @@ mod tests {
         assert_eq!(raw_sha, sha256_hex(ROUND1_RAW));
         assert_eq!(source_sha, sha256_hex(ROUND1_SOURCE));
         assert_ne!(raw_sha, source_sha);
-        assert_eq!(raw_bytes, ROUND1_RAW.as_bytes().len() as u64);
+        assert_eq!(raw_bytes, ROUND1_RAW.len() as u64);
 
         // Duplicate blocking reasons keep both order and multiplicity.
         assert_eq!(

@@ -36,6 +36,9 @@ use crate::web::workspace_ws_types::{ReviewGate, ReviewVerdict, ReviewVerdictTyp
 ///   不开人工门；
 /// - [`Self::Routed`]：拒收且调用方判定不再重驱（`allow_structure_rerun=false`）
 ///   ——平台已在自动重写或人工门态，调用方**不得**再把它当硬失败。
+// 非热路径值语义（每轮构造一次），可读性优先：Rejected 载荷约 240 B，boxing
+// 会波及 100+ 处构造/解构点而不改变任何行为。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SingleCandidateAuthorCompletion {
     Candidate {

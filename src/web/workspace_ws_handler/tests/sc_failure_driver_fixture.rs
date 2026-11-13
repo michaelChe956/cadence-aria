@@ -127,21 +127,6 @@ pub(super) fn author_start_count(fixture: &ProviderRunFixture) -> usize {
         .count()
 }
 
-/// 会话 JSON 原文（durable 文件）。
-pub(super) fn session_json_bytes(fixture: &ProviderRunFixture) -> String {
-    let record = fixture
-        .lifecycle
-        .get_workspace_session(&fixture.record.id)
-        .expect("reload session");
-    let path = fixture
-        .lifecycle
-        .app_paths()
-        .issue_lifecycle_root(&record.project_id, &record.issue_id)
-        .join("workspace-sessions")
-        .join(format!("{}.json", record.id));
-    std::fs::read_to_string(&path).expect("read session json")
-}
-
 // ── 运行驱动 + 真实输入队列 spy ──────────────────────────────────────────
 
 /// 真实 provider 输入队列 spy：矩阵的「实际物理启动」以此为准。

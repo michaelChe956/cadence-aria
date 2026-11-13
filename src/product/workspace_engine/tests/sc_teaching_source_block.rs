@@ -80,7 +80,7 @@ fn assert_round_trip(source: &str, origin: ScTeachingSourceOrigin) -> String {
     let metadata = ScTeachingSourceMetadata {
         source_ref: SOURCE_REF,
         sha256: &hash,
-        bytes: source.as_bytes().len() as u64,
+        bytes: source.len() as u64,
         origin,
     };
     let rendered = render_sc_previous_source_block(source, &metadata)
@@ -162,7 +162,7 @@ fn empty_source_renders_an_empty_body() {
 fn tampered_hash_or_bytes_is_rejected_with_stable_evidence_code() {
     let source = "中文源码需要完整保留，不得截断。\n";
     let good_hash = sha256_hex(source.as_bytes());
-    let good_bytes = source.as_bytes().len() as u64;
+    let good_bytes = source.len() as u64;
     let tampered_hash = sha256_hex(b"tampered-source");
 
     let bad_hash = ScTeachingSourceMetadata {
