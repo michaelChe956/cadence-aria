@@ -16,8 +16,14 @@
 //! 全部是纯函数（无 IO 副作用之外的环境读取），便于单测。
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
+/// 可写探测临时文件名前缀（唯一命名：pid + 计数）。
+const WRITE_PROBE_PREFIX: &str = ".aria-write-probe";
+/// 可写探测的临时文件计数（进程内唯一）。
+static WRITE_PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// PATH 上第一个提供 `command` 的目录（PATH 顺序 = 生效顺序）。
 pub fn first_path_dir_with_command(command: &str, path_value: Option<&str>) -> Option<PathBuf> {
@@ -57,9 +63,17 @@ pub fn same_dir(left: &Path, right: &Path) -> bool {
     canonicalize_or_keep(left) == canonicalize_or_keep(right)
 }
 
-/// 目录可写吗（目录不存在时看最近的存在祖先）。
+/// 目录可写吗（**mode 预筛 + 真实写入探测**；目录不存在时看最近的存在祖先）。
+///
+/// ① mode 位 `& 0o222 == 0` ⇒ 直接 false（保留既有语义，避免 root 环境下
+///    既有测试反转）；
+/// ② 否则在目录里建一个**唯一命名**的临时文件（`create_new` 避碰）⇒ 成功
+///    即删（删除失败只记日志）、失败即不可写。
+///
+/// **该谓词有写副作用**（建/删临时文件），只允许用于「候选前缀探测」这类
+/// 一次性场景，不得用于高频路径。
 pub fn is_writable_dir(path: &Path) -> bool {
-    is_writable_dir_with(path, |_dir| true)
+    is_writable_dir_with(path, probe_dir_writable)
 }
 
 /// 可写判定（**测试可注入 seam**）：`probe` 收到实际存在的祖先目录，返回
@@ -69,13 +83,48 @@ pub fn is_writable_dir_with<F>(path: &Path, probe: F) -> bool
 where
     F: Fn(&Path) -> bool,
 {
-    let _ = probe;
     let mut candidate = Some(path);
     while let Some(dir) = candidate {
         match std::fs::metadata(dir) {
-            Ok(metadata) if metadata.is_dir() => return dir_is_writable(&metadata),
+            Ok(metadata) if metadata.is_dir() => {
+                if !dir_is_writable(&metadata) {
+                    return false;
+                }
+                return probe(dir);
+            }
             Ok(_) => return false,
             Err(_) => candidate = dir.parent(),
+        }
+    }
+    false
+}
+
+/// 真实写入探测：在 `dir` 里建一个唯一命名的临时文件 ⇒ 成功即删、失败即
+/// 不可写。文件名含 pid + 计数（`create_new` 避碰）。
+fn probe_dir_writable(dir: &Path) -> bool {
+    for _ in 0..8 {
+        let counter = WRITE_PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = format!("{WRITE_PROBE_PREFIX}-{}-{counter}", std::process::id());
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+        {
+            Ok(_) => {
+                // 删除失败只记日志（不影响「可写」判定本身）。
+                if let Err(error) = std::fs::remove_file(&path) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "npm 前缀可写探测的临时文件删除失败"
+                    );
+                }
+                return true;
+            }
+            // 同名撞车（几乎不可能）⇒ 换名重试。
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return false,
         }
     }
     false
