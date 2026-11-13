@@ -647,14 +647,33 @@ async fn sc_round_bound_is_durable_at_the_physical_start_edge() {
         "物理 start 回调内必须已能读到完整的 RoundBound 条目（先落盘，后启动）"
     );
     let durable = t17_latest_record(&fixture);
+    // SC 生成面的耐久物理启动口径 = durable `provider_start_ledger` 中
+    // `single_candidate_author:{id}:` 前缀条目数（Task 7 确立口径，权威实现见
+    // tests/single_candidate_teaching_window_fault_matrix.rs 的 prefix_count 与
+    // tests/single_candidate_teaching_window_baseline.rs 的
+    // author_ledger_prefix_count：教学重驱恰追加一条 ⇒ 原轮后为 1）。
+    //
+    // 口径说明（为何不是 `is_actual_launch_observation()`）：SC 原轮只落**预领**
+    // 条目——`reserve_single_candidate_provider_start`（lifecycle_store/
+    // workspace_single_candidate.rs）写入 `started=false / provider=None /
+    // started_at=None`（无 provider 回填面），故该条目按
+    // `ProviderStartLedgerEntry::is_actual_launch_observation` 口径不是
+    // 「实际启动观察」（既有同族断言见 tests/provider_run_events.rs:951-958
+    // 「预领占位非实际启动观察」）。
+    // 本臂的「实际启动一次」事实由 adapter start 回调计数（上方 `starts == 1`）
+    // 与 start 回调内的 RoundBound 严格读回共同承担。
     assert_eq!(
         durable
             .provider_start_ledger
             .iter()
-            .filter(|entry| entry.is_actual_launch_observation())
+            .filter(|entry| {
+                entry
+                    .provider_start_idempotency_key
+                    .starts_with(&format!("single_candidate_author:{}:", durable.id))
+            })
             .count(),
         1,
-        "耐久账本恰一条真实 start"
+        "耐久账本恰一条 SC author 启动键（原轮物理启动一次）"
     );
 }
 
@@ -708,6 +727,9 @@ async fn sc_bound_write_failure_blocks_physical_start_and_teaching_claim() {
         "provider 从未启动"
     );
     let durable = t17_latest_record(&fixture);
+    // 口径：此处数 `is_actual_launch_observation()`（provider+started_at 齐备的实际
+    // 启动观察）——SC 原轮的**预领**条目不计入（口径见上臂说明）；教学重驱回填
+    // 会写入这样的观察条目，故此断言守的是「故障后零实际启动观察（含教学面）」。
     assert_eq!(
         durable
             .provider_start_ledger
@@ -715,7 +737,7 @@ async fn sc_bound_write_failure_blocks_physical_start_and_teaching_claim() {
             .filter(|entry| entry.is_actual_launch_observation())
             .count(),
         0,
-        "耐久账本零真实 start"
+        "耐久账本零 actual-launch 观察（教学回填面同样为零）"
     );
     assert!(
         durable.sc_generation_teaching_windows.is_empty(),
