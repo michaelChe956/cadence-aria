@@ -19,7 +19,7 @@ fn compact_section_payload<'a>(prompt: &'a str, title: &str) -> (&'a str, serde_
         .unwrap_or_else(|| panic!("review prompt section `{title}` carries no JSON"))
         .unwrap_or_else(|error| panic!("section `{title}` JSON parse failed: {error}"));
     let consumed = stream.byte_offset();
-    (&rest[..consumed].trim_end(), value)
+    (rest[..consumed].trim_end(), value)
 }
 
 /// D1（REQ-WSC-06）单段验收三件事：解析对象与期望 deep-equal（键、值、

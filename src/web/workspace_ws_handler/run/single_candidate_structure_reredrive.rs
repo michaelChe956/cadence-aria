@@ -484,7 +484,7 @@ fn generate_segment_failure_stage(
 /// 引用恒 None + 行内带缺失原因（generate 段失败产物不落 durable source，
 /// 不提升 current refs）。幂等键由构造器按尝试身份派生；失败身份掺入世代
 /// 业务键，不同世代（re-arm）同内容失败不互吃幂等键。
-
+///
 /// A1（REQ-WSC-32）：parse 语法类诊断的完整五字段审计文本——**不进
 /// prompt、不拼入被哈希的 `detail`**（`failure_id`/attempt 身份逐字不变），
 /// 落流水行 `source_missing_reason` 的显式标记分区、原缺失说明保留在前。

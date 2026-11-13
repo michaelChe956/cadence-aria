@@ -240,7 +240,7 @@ async fn aggregate_plan_ir_targets_land_member_repositories() {
 /// C2（tasks 7.1）：从真实 provider 输入提取首轮 prompt 的 `structure:` 段
 /// （`[confirmed_context]` 内 `structure:` 起至 `baseline:`/`story_spec_ids:`
 /// 上一行止，段边界与 build_work_item_plan_markdown_prompt 模板一致）。
-fn sc_structure_section<'a>(prompt: &'a str) -> &'a str {
+fn sc_structure_section(prompt: &str) -> &str {
     let start = prompt
         .find("\nstructure:")
         .expect("first-round prompt must carry a structure: section")

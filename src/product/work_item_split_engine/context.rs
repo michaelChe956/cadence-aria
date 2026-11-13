@@ -317,10 +317,10 @@ pub(crate) fn summarize_repository_structure_sc_members(
             member_ids.push(physical.clone());
         }
     }
-    if let Some(fallback) = targets.fallback_physical_id.as_deref() {
-        if !member_ids.iter().any(|id| id == fallback) {
-            member_ids.push(fallback.to_string());
-        }
+    if let Some(fallback) = targets.fallback_physical_id.as_deref()
+        && !member_ids.iter().any(|id| id == fallback)
+    {
+        member_ids.push(fallback.to_string());
     }
     if member_ids.is_empty() {
         return summarize_repository_structure(aggregate_root, logical);
