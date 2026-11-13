@@ -1177,4 +1177,34 @@ mod tests {
             assert!(prompt.contains(&block), "{field} 逐条可区分: {prompt}");
         }
     }
+
+    /// A1：资格判定的 diagnostics→parse_reasons 投影必须逐字携带 field/repair_example。
+    #[test]
+    fn teaching_verdict_projects_parse_field_and_example_facts() {
+        use super::{TeachingVerdict, teaching_verdict};
+        use crate::product::work_item_plan_compiler::CompilerDiagnostic;
+        fn missing(field: &str) -> CompilerDiagnostic {
+            CompilerDiagnostic {
+                code: "missing_section".into(),
+                line: 5,
+                field: field.into(),
+                message: "结构化 section 缺少必需字段。".into(),
+                repair_example: format!("- {field}: value"),
+                kind: None,
+                lowering_fault: None,
+                ir_fault: None,
+            }
+        }
+        let TeachingVerdict::Eligible { payload } =
+            teaching_verdict(&[missing("Goal"), missing("role")], &[])
+        else {
+            panic!("载荷变化不得改教学资格");
+        };
+        for field in ["Goal", "role"] {
+            let block = format!(
+                "missing_section:5:结构化 section 缺少必需字段。\n  缺失字段: {field}\n  正确形状: - {field}: value"
+            );
+            assert!(payload.parse_reasons.contains(&block), "{field} 投影逐条可区分");
+        }
+    }
 }
