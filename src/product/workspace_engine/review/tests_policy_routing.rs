@@ -985,3 +985,216 @@ async fn auto_if_valid_batch_pass_skips_final_human_confirmation_and_completes()
         .expect("persisted auto-completed plan session");
     assert_eq!(persisted.status, WorkspaceSessionStatus::Confirmed);
 }
+
+// ---- B3 · 路由收口（REQ-WSC-12 窄例外；工作包 4.1/4.4）--------------------
+// F5-B 闸门两侧同用会话有效视图；建议级 revise 不驱动作者、不因重复或耗尽
+// 升级人工；真 must_fix 仍阻断；cycle 真耗尽后全 Advisory 也仍 HumanRequired。
+
+fn sc_routing_engine() -> (TempDir, LifecycleStore, WorkspaceEngine) {
+    let (tmp, lifecycle, _plan_id, mut engine) =
+        make_work_item_plan_engine_with_accepted_contract_drafts();
+    single_candidate::single_candidate_record(
+        &lifecycle,
+        &mut engine,
+        crate::product::models::SingleCandidatePhase::Evaluate,
+        RunPolicy::Interactive,
+    );
+    (tmp, lifecycle, engine)
+}
+
+fn sc_routing_finding(
+    severity: ReviewFindingSeverity,
+    message: &str,
+    category: Option<ReviewFindingCategory>,
+    class_hint: Option<crate::product::work_item_plan_policy::FindingClassHint>,
+) -> ReviewFinding {
+    ReviewFinding {
+        severity,
+        message: message.to_string(),
+        evidence: "SC review evidence".to_string(),
+        required_action: "SC review action".to_string(),
+        category,
+        class_hint,
+        contract_field: None,
+        machine_repair: None,
+        owner_question: None,
+        owner_options: None,
+        disposition: None,
+        target_work_item_id: None,
+        finding_key: None,
+    }
+}
+
+/// 命中窄例外全部条件（Suggestion + 显式非契约 category + Repairable hint）；
+/// contract_field 带稳定 ID ⇒ 指纹落 F-52 稳定域，才会真实进入重复闸门的
+/// 非 advisory 集合（纯措辞域 finding 本就被 unstable 过滤，构不成钉子）。
+fn sc_demotable_suggestion(message: &str) -> ReviewFinding {
+    let mut finding = sc_routing_finding(
+        ReviewFindingSeverity::Suggestion,
+        message,
+        Some(ReviewFindingCategory::Completeness),
+        Some(crate::product::work_item_plan_policy::FindingClassHint::Repairable),
+    );
+    finding.contract_field = Some("WI-001.acceptance_criteria[AC-002].rows".to_string());
+    finding
+}
+
+fn sc_out_of_scope_finding() -> ReviewFinding {
+    sc_routing_finding(
+        ReviewFindingSeverity::MustFix,
+        "范围外事实：文档缺登记行",
+        None,
+        None,
+    )
+}
+
+fn sc_revise_verdict(findings: Vec<ReviewFinding>) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "SC review comments".to_string(),
+        summary: "SC review summary".to_string(),
+        findings,
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+/// 真实 SC 会话 verdict 恒带 work_item_plan_review extension（Item scope）。
+fn sc_extension_revise_verdict(findings: Vec<ReviewFinding>) -> ReviewVerdict {
+    let mut verdict = sc_revise_verdict(findings);
+    verdict.work_item_plan_review = Some(WorkItemPlanReviewComplete {
+        verdict: WorkItemPlanReviewVerdict::Revise,
+        review_scope: WorkItemPlanReviewScope::Item,
+        target_outline_id: None,
+        generation_round_id: "round_0001".to_string(),
+        draft_id: None,
+        batch_id: None,
+        review_action: WorkItemPlanReviewAction::ReviseCurrentItem,
+        gates: vec![WorkItemPlanReviewGate::RequiresCurrentItemRevision],
+        affects_items: Vec::new(),
+        warnings: Vec::new(),
+    });
+    verdict
+}
+
+async fn complete_sc_routing_review(engine: &mut WorkspaceEngine, verdict: ReviewVerdict) {
+    engine
+        .complete_review(
+            crate::cross_cutting::streaming_provider::ProviderCompletion::plain(
+                "single candidate review".to_string(),
+                None,
+            ),
+            verdict,
+        )
+        .await;
+}
+
+/// 工作包 4.1（红测）：F5-B 闸门两侧必须同用会话有效视图——上一轮持久化的
+/// 是 provider 原始 verdict，窄例外建议不投影就会以 Repairable 指纹留在上一轮
+/// 非 advisory 集合，令同指纹防打转闸门漏触发（收敛延迟一轮）。
+#[tokio::test]
+async fn sc_repeated_fingerprint_gate_compares_both_rounds_in_the_session_effective_view() {
+    let (_tmp, _lifecycle, mut engine) = sc_routing_engine();
+    engine.start_review().await;
+    complete_sc_routing_review(
+        &mut engine,
+        sc_revise_verdict(vec![
+            sc_out_of_scope_finding(),
+            sc_demotable_suggestion("建议补完备度说明行"),
+        ]),
+    )
+    .await;
+    engine.start_review().await;
+    complete_sc_routing_review(&mut engine, sc_revise_verdict(vec![sc_out_of_scope_finding()]))
+        .await;
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    let gate_summary = engine
+        .timeline_nodes
+        .iter()
+        .rev()
+        .find(|node| node.node_type == TimelineNodeType::HumanConfirm)
+        .and_then(|node| node.summary.clone())
+        .unwrap_or_default();
+    assert!(
+        gate_summary.contains("repeated_findings"),
+        "两侧同视图后同指纹必须触发防打转闸门：{gate_summary}"
+    );
+}
+
+/// 工作包 4.1/4.4：建议级 revise 在 Initial 与 Verification 相位均不驱动作者
+/// 返修、不因重复或耗尽升级人工（有效视图全 Advisory ⇒ evaluate 判 Valid）；
+/// cycle 真耗尽（initial=1、verification=1）后的第三轮仍走原封耗尽停机——全
+/// Advisory 也仍 HumanRequired、非静默通过，三轮零作者轮。
+#[tokio::test]
+async fn sc_suggestion_only_revise_never_escalates_until_the_cycle_budget_really_exhausts() {
+    let (_tmp, _lifecycle, mut engine) = sc_routing_engine();
+    let suggestion_only = || sc_revise_verdict(vec![sc_demotable_suggestion("建议补完备度说明行")]);
+
+    engine.start_review().await;
+    complete_sc_routing_review(&mut engine, suggestion_only()).await;
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    assert_eq!(
+        engine.session.single_candidate_phase,
+        Some(crate::product::models::SingleCandidatePhase::Approval)
+    );
+    assert!(engine.session.human_gate_snapshot.is_none());
+
+    engine.start_review().await;
+    complete_sc_routing_review(&mut engine, suggestion_only()).await;
+    assert_eq!(engine.session().stage, WorkspaceStage::HumanConfirm);
+    assert!(engine.session.human_gate_snapshot.is_none());
+    assert_eq!(engine.session.run_history.verification_review_count, 1);
+
+    engine.start_review().await;
+    complete_sc_routing_review(&mut engine, suggestion_only()).await;
+    assert_eq!(
+        engine
+            .session
+            .human_gate_snapshot
+            .as_ref()
+            .map(|gate| gate.trigger),
+        Some(HumanReason::RepairBudgetExhausted)
+    );
+    assert_eq!(engine.session.run_history.verification_review_count, 1);
+    assert_eq!(engine.session.run_history.repairs_used, 0, "三轮均零作者返修");
+}
+
+/// controller 追加（B1 评审 Minor-2）：真实 SC 会话 verdict 恒带
+/// work_item_plan_review extension——窄投影生效后 extension 裁决面必须**重算**
+/// （verdict 归一 Pass、review_action/gates 按解析期同口径刷新，不是沿用投影
+/// 前的 Revise 面）；未命中窄例外的真 must_fix 契约缺口保持 Revise 裁决面
+/// ⇒ 本用例对「投影是否接上 extension 组合面」有区分力，不是恒真。
+#[test]
+fn sc_narrow_projection_renormalizes_the_extension_face_not_must_fix() {
+    let (_tmp, _lifecycle, engine) = sc_routing_engine();
+    let projected = engine.apply_sc_effective_review_verdict(sc_extension_revise_verdict(
+        vec![sc_demotable_suggestion("建议补完备度说明行")],
+    ));
+    assert_eq!(projected.verdict, ReviewVerdictType::Pass);
+    let extension = projected
+        .work_item_plan_review
+        .as_ref()
+        .expect("SC verdict keeps its work_item_plan_review extension");
+    assert_eq!(extension.verdict, WorkItemPlanReviewVerdict::Pass);
+    assert_eq!(extension.review_action, WorkItemPlanReviewAction::Continue);
+    assert!(extension.gates.is_empty());
+
+    let retained = engine.apply_sc_effective_review_verdict(sc_extension_revise_verdict(
+        vec![sc_routing_finding(
+            ReviewFindingSeverity::MustFix,
+            "契约缺口：CT-001 能力未覆盖",
+            Some(ReviewFindingCategory::ContractGap),
+            Some(crate::product::work_item_plan_policy::FindingClassHint::Repairable),
+        )],
+    ));
+    let retained_extension = retained
+        .work_item_plan_review
+        .as_ref()
+        .expect("extension survives the projection");
+    assert_eq!(retained_extension.verdict, WorkItemPlanReviewVerdict::Revise);
+    assert_eq!(
+        retained_extension.review_action,
+        WorkItemPlanReviewAction::ReviseCurrentItem
+    );
+}
