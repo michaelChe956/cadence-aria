@@ -541,14 +541,26 @@ pub(crate) async fn run_single_candidate_author(
         &design_context_blocks,
         &language_rules,
     );
-    let repository_structure =
-        crate::product::work_item_split_engine::context::summarize_repository_structure(
-            &repository.path,
-            // REQ-ROUTE-01：归属必填后「真多仓 LC」以非 legacy 别名判定（同
-            // issue_is_cross_repo_shape 口径）。
-            issue.logical_codebase_id
-                != crate::product::logical_codebase::legacy_logical_codebase_id(&issue.project_id),
-        );
+    // C2（REQ-WSC-06）：SC 首轮 `structure:` 段成员感知装配——聚合根取
+    // launch 的 working_dir（gateway 冻结 authority_root；focus 可能是成员
+    // checkout，不得用 repository.path）；成员缺席 ⇒ 逐字节退回旧单仓摘要。
+    use crate::product::work_item_split_engine::context as sc_structure;
+    let is_lc_issue = sc_structure::is_lc_issue(&issue);
+    let repository_structure = match (member_targets.as_ref(), lc_plan_launch.as_ref()) {
+        (Some(sc_members), Some(sc_launch)) => {
+            let sc_prefixes = member_checkout_prefixes::plan_member_checkout_prefixes(
+                &lifecycle,
+                &member_targets_plan,
+            );
+            sc_structure::summarize_repository_structure_sc_members(
+                &sc_launch.working_dir,
+                is_lc_issue,
+                Some(sc_members),
+                sc_prefixes.ok().flatten().as_ref(),
+            )
+        }
+        _ => sc_structure::summarize_repository_structure(&repository.path, is_lc_issue),
+    };
     let author_provider = engine.session().author_provider.clone();
     // B2b1(Task 5.2,REQ-PLN-08):envelope target 恒聚合根锚(E native
     // anchor 消费收敛进 `resolve_plan_author_launch`);r27 成员锚同源机制
@@ -632,6 +644,22 @@ pub(crate) async fn run_single_candidate_author(
     } else {
         None
     };
+    // C2（REQ-WSC-06）：三分支共享同一 author 上下文——三处逐字重复的字面量
+    // 收敛为单点纯移动（字段与取值逐字不变），为成员感知装配腾行守净零。
+    let routing_context = launch.routing_context();
+    let author_context =
+        crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
+            story_context: &story_context,
+            design_context: &design_context,
+            design_requirement_ids: &design_requirement_ids,
+            repository_structure: &repository_structure,
+            plan_options: &plan_options,
+            language_rules: &language_rules,
+            routing_context: &routing_context,
+            member_targets: member_targets.as_ref(),
+            change_order: &confirmed_change_order,
+            baseline_tree: baseline_tree_section.as_deref(),
+        };
     let full_prompt = match (revision_verdict.as_ref(), previous_source_for_fresh_revision.as_deref())
     {
         (Some(review), Some(previous_source)) => {
@@ -640,18 +668,7 @@ pub(crate) async fn run_single_candidate_author(
                     &request,
                     &issue,
                     &repository,
-                    crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
-                        story_context: &story_context,
-                        design_context: &design_context,
-                        design_requirement_ids: &design_requirement_ids,
-                        repository_structure: &repository_structure,
-                        plan_options: &plan_options,
-                        language_rules: &language_rules,
-                        routing_context: &launch.routing_context(),
-                        member_targets: member_targets.as_ref(),
-                        change_order: &confirmed_change_order,
-                        baseline_tree: baseline_tree_section.as_deref(),
-                    },
+                    author_context,
                     review,
                     previous_source,
                 )
@@ -662,18 +679,7 @@ pub(crate) async fn run_single_candidate_author(
                     &request,
                     &issue,
                     &repository,
-                    crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
-                        story_context: &story_context,
-                        design_context: &design_context,
-                        design_requirement_ids: &design_requirement_ids,
-                        repository_structure: &repository_structure,
-                        plan_options: &plan_options,
-                        language_rules: &language_rules,
-                        routing_context: &launch.routing_context(),
-                        member_targets: member_targets.as_ref(),
-                        change_order: &confirmed_change_order,
-                        baseline_tree: baseline_tree_section.as_deref(),
-                    },
+                    author_context,
                     review,
                 )
         }
@@ -681,18 +687,7 @@ pub(crate) async fn run_single_candidate_author(
             &request,
             &issue,
             &repository,
-            crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
-                story_context: &story_context,
-                design_context: &design_context,
-                design_requirement_ids: &design_requirement_ids,
-                repository_structure: &repository_structure,
-                plan_options: &plan_options,
-                language_rules: &language_rules,
-                routing_context: &launch.routing_context(),
-                member_targets: member_targets.as_ref(),
-                change_order: &confirmed_change_order,
-                baseline_tree: baseline_tree_section.as_deref(),
-            },
+            author_context,
         ),
     }
     .map_err(SingleCandidateProviderRunError::Message)?;

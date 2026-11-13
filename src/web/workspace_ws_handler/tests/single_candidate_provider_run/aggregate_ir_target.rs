@@ -236,3 +236,307 @@ async fn aggregate_plan_ir_targets_land_member_repositories() {
         Some(crate::product::models::SingleCandidatePhase::Completed)
     );
 }
+
+/// C2（tasks 7.1）：从真实 provider 输入提取首轮 prompt 的 `structure:` 段
+/// （`[confirmed_context]` 内 `structure:` 起至 `baseline:`/`story_spec_ids:`
+/// 上一行止，段边界与 build_work_item_plan_markdown_prompt 模板一致）。
+fn sc_structure_section<'a>(prompt: &'a str) -> &'a str {
+    let start = prompt
+        .find("\nstructure:")
+        .expect("first-round prompt must carry a structure: section")
+        + "\nstructure:".len();
+    let rest = &prompt[start..];
+    let end = ["\nbaseline:", "\nstory_spec_ids:"]
+        .iter()
+        .filter_map(|marker| rest.find(marker))
+        .min()
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// C2：真链启动并捕获首轮 provider 输入，等待收口（HumanConfirm）后确认
+/// 零额外 provider 启动——三个接线用例共用的驱动骨架。
+async fn sc_start_and_capture_first_input(
+    fixture: &ProviderRunFixture,
+    provider: Arc<dyn StreamingProviderAdapter>,
+    input_rx: &mut mpsc::UnboundedReceiver<StreamingProviderInput>,
+) -> StreamingProviderInput {
+    let (context, _outbound_rx) = single_candidate_context(fixture, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+    let first_input = next_provider_input(input_rx).await;
+    wait_for_stage(&fixture.engine, WorkspaceStage::HumanConfirm).await;
+    no_more_provider_inputs(input_rx).await;
+    first_input
+}
+
+/// C2（tasks 7.1，REQ-WSC-06「成员仓身份头在预算内全部在场」）：双成员
+/// 聚合根 + focus=FirstMember（session 仓解析到成员 checkout ⇒
+/// repository.path 是成员目录而非聚合根——聚合根必须取 launch 的
+/// working_dir）真链首轮 prompt：`structure:` 段必须含全部成员身份头、
+/// 子项按聚合根相对前缀呈现、整段 ≤3,200 B、无显式失败标记、除首轮外
+/// 零额外 provider 启动。改前单仓摘要只列成员 checkout 内部条目
+/// （`dir: .claude`），身份头完全缺席 ⇒ 本用例改前因断言缺失而红。
+#[tokio::test]
+async fn sc_first_round_structure_carries_all_member_headers_within_budget() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let output = Arc::new(std::sync::Mutex::new(String::new()));
+    let provider = Arc::new(AggregateAuthorProvider {
+        output: output.clone(),
+        inputs: input_tx,
+    });
+    let fixture = ProviderRunFixture::new_logical_multi(
+        vec![
+            MemberRuleMaterial::Present("## 语言规则\n\n- 聚合根成员 0 规则原文。\n".to_string()),
+            MemberRuleMaterial::Present("## 语言规则\n\n- 成员 1 规则原文。\n".to_string()),
+        ],
+        Some("## 语言规则\n\n- 聚合根规则（launch 材料锚）。\n".to_string()),
+        LogicalAliasFocus::FirstMember,
+        provider.clone(),
+    );
+    let manifest =
+        crate::product::logical_codebase::LogicalCodebaseStore::new(fixture.app_paths.clone())
+            .load_manifest("project_0001")
+            .expect("load alias lc manifest")
+            .expect("alias lc manifest exists");
+    let [member0, member1] = manifest.member_ids.as_slice() else {
+        panic!("fixture members");
+    };
+    let lc_id = crate::product::logical_codebase::store::legacy_logical_codebase_id("project_0001");
+    *output.lock().expect("set provider output") = aggregate_plan_markdown(
+        &fixture.design_id,
+        &lc_id,
+        &member0.0.to_string(),
+        &member1.0.to_string(),
+    );
+    let first_input =
+        sc_start_and_capture_first_input(&fixture, provider, &mut input_rx).await;
+
+    let member_store =
+        crate::product::logical_codebase::LogicalCodebaseStore::new(fixture.app_paths.clone());
+    let checkouts = member_store
+        .list_checkouts("project_0001")
+        .expect("list fixture checkouts");
+    let structure = sc_structure_section(&first_input.prompt);
+    let mut headers = Vec::new();
+    for member_id in [member0, member1] {
+        let physical = member_store
+            .load_member("project_0001", *member_id)
+            .expect("member record")
+            .expect("member exists")
+            .physical_repository_id;
+        let prefix = checkouts
+            .iter()
+            .find(|checkout| checkout.logical_repository_id == *member_id)
+            .expect("member checkout")
+            .canonical_path
+            .file_name()
+            .expect("checkout dir name")
+            .to_string_lossy()
+            .into_owned();
+        headers.push((format!("member {physical}: root {prefix}"), prefix));
+    }
+    assert!(
+        structure.len() <= 3_200,
+        "structure 段必须 ≤3,200 B（实测 {} B）: {structure}",
+        structure.len()
+    );
+    for (header, prefix) in &headers {
+        assert!(
+            structure.contains(header.as_str()),
+            "全部成员身份头必须在场（缺 {header}）: {structure}"
+        );
+        assert!(
+            structure.contains(&format!("  {prefix}/.claude/")),
+            "子项必须按聚合根相对前缀呈现（缺 {prefix}/.claude/）: {structure}"
+        );
+    }
+    assert_eq!(
+        structure
+            .lines()
+            .filter(|line| line.starts_with("member "))
+            .count(),
+        headers.len(),
+        "身份头行数必须恰等于成员数: {structure}"
+    );
+    assert!(
+        !structure.contains("member_inventory_budget_exceeded")
+            && !structure.contains("repository_structure_unavailable")
+            && !structure.contains("dir: .claude"),
+        "预算内不得出现显式失败标记，也不得退化为成员 checkout 内部清单: {structure}"
+    );
+}
+
+/// C2（tasks 7.1，REQ-WSC-06「单仓摘要逐字不变」）：成员集合缺席（无
+/// gateway launch 的 legacy 单仓）真链——`structure:` 段必须与改前单仓
+/// fixture 逐字节一致（与 `summarize_repository_structure(path, false)`
+/// 原实现直算值比对；该 fixture 的 LC 权威登记在但 launch 缺席 ⇒ 成员
+/// 缺席回退分支生效）。
+#[tokio::test]
+async fn sc_structure_section_byte_identical_when_members_absent() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let output = Arc::new(std::sync::Mutex::new(String::new()));
+    let provider = Arc::new(AggregateAuthorProvider {
+        output: output.clone(),
+        inputs: input_tx,
+    });
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    *output.lock().expect("set provider output") =
+        single_candidate_markdown(&fixture.story_id, &fixture.design_id);
+    let pre_change_summary =
+        crate::product::work_item_split_engine::context::summarize_repository_structure(
+            &fixture.member_checkout_root(),
+            false,
+        );
+    let first_input =
+        sc_start_and_capture_first_input(&fixture, provider, &mut input_rx).await;
+    assert_eq!(
+        sc_structure_section(&first_input.prompt),
+        pre_change_summary,
+        "成员缺席时 structure 段必须与改前单仓摘要逐字节一致"
+    );
+}
+
+/// C2（tasks 7.3，REQ-WSC-32「被省略条目的完整诊断可从审计面取回」——
+/// A1 单独交付时无法在真链上断言的那条）：40 个裸 Work Item 标题 ⇒ ~560
+/// 条 missing_section parse 诊断 ⇒ 教学事实块 ≫32,000 B 必有整条省略。
+/// 断言：重驱 prompt 显式记账（总数/呈现/省略）且审计分区不进 prompt；
+/// durable 流水（candidate-attempts）的 [sc_parse_fact_audit] 分区含全部
+/// 条目的完整五字段，呈现/省略计数与教学面逐条对得上；failure_id 仍等于
+/// sha256(series/stage/code/detail)（审计在 detail 之外 ⇒ 同诊断集失败
+/// 身份不变）；恰两次 provider 启动（首轮 + 恰一次教学重驱）。
+#[tokio::test]
+async fn omitted_parse_diagnostics_fully_retrievable_from_durable_audit() {
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel();
+    let output = Arc::new(std::sync::Mutex::new(String::new()));
+    let provider = Arc::new(AggregateAuthorProvider {
+        output: output.clone(),
+        inputs: input_tx,
+    });
+    let fixture = ProviderRunFixture::new(WorkItemPlanFlowKind::SingleCandidate);
+    let mut oversized_parse_failure = String::from("# Work Item Plan\n");
+    for index in 1..=40 {
+        oversized_parse_failure.push_str(&format!(
+            "\n## Work Item WI-{index:03}: Fact fixture {index}\n"
+        ));
+    }
+    *output.lock().expect("set provider output") = oversized_parse_failure;
+    let (context, mut outbound_rx) = single_candidate_context(&fixture, provider);
+    handle_workspace_inbound_message(
+        context,
+        WsInMessage::StartGeneration {
+            provider_config: provider_config(),
+            reviewer_enabled: false,
+            resume_recovery: None,
+        },
+    )
+    .await;
+    let _first_input = next_provider_input(&mut input_rx).await;
+    let reredrive_input = next_provider_input(&mut input_rx).await;
+    no_more_provider_inputs(&mut input_rx).await;
+    let _message = next_error_message(&mut outbound_rx).await;
+    wait_for_single_candidate_phase(
+        &fixture,
+        crate::product::models::SingleCandidatePhase::Failed,
+    )
+    .await;
+
+    let accounting = reredrive_input
+        .prompt
+        .lines()
+        .find(|line| line.contains("parse 事实块预算"))
+        .expect("reredrive prompt must carry the parse fact budget accounting")
+        .to_string();
+    let count_after = |label: &str| -> usize {
+        accounting
+            .split(&format!("{label} "))
+            .nth(1)
+            .and_then(|rest| rest.split(' ').next())
+            .and_then(|count| count.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("accounting count after {label}: {accounting}"))
+    };
+    let (total, shown, omitted) = (count_after("共"), count_after("呈现"), count_after("省略"));
+    assert!(omitted > 0, "事实块必须超预算产生省略: {accounting}");
+    assert_eq!(total, shown + omitted, "记账必须自洽: {accounting}");
+    assert!(
+        !reredrive_input.prompt.contains("[sc_parse_fact_audit"),
+        "审计分区绝不进 prompt"
+    );
+
+    let row = fixture
+        .lifecycle
+        .list_candidate_attempts(&fixture.record.id)
+        .expect("list candidate attempts")
+        .into_iter()
+        .find(|record| {
+            matches!(
+                record.stage,
+                crate::product::lifecycle_store::candidate_attempts::CandidateAttemptStage::Parse
+            )
+        })
+        .expect("parse stage attempt row");
+    let reason = row
+        .source_missing_reason
+        .as_deref()
+        .expect("source_missing_reason");
+    let (detail, audit) = reason
+        .split_once("\n[sc_parse_fact_audit")
+        .expect("audit partition must follow the unchanged detail");
+    let audit_entries: Vec<&str> = audit.lines().skip(1).filter(|line| !line.is_empty()).collect();
+    assert_eq!(
+        audit_entries.len(),
+        total,
+        "审计分区必须含全部 {total} 条（含被省略条目），实测 {} 条",
+        audit_entries.len()
+    );
+    let mut shown_in_prompt = 0;
+    for entry in &audit_entries {
+        let fields: Vec<&str> = entry.split('|').collect();
+        assert_eq!(
+            fields.len(),
+            5,
+            "审计条目必须含完整五字段 code|line|field|message|repair_example: {entry}"
+        );
+        assert!(
+            fields.iter().all(|field| !field.is_empty()) && fields[0] == "missing_section",
+            "五字段非空且码稳定: {entry}"
+        );
+        assert!(fields[1].parse::<usize>().is_ok(), "行号可解析: {entry}");
+        let prompt_block = format!(
+            "- {}:{}:{}\n  缺失字段: {}\n",
+            fields[0], fields[1], fields[3], fields[2]
+        );
+        if reredrive_input.prompt.contains(&prompt_block) {
+            shown_in_prompt += 1;
+        }
+    }
+    assert_eq!(
+        shown_in_prompt, shown,
+        "审计逐条对账：教学面呈现条数与审计在场条数必须一致"
+    );
+
+    let durable = fixture
+        .lifecycle
+        .get_workspace_session(&fixture.record.id)
+        .expect("durable session");
+    let series = crate::product::workspace_engine::current_sc_author_business_key(&durable)
+        .unwrap_or_else(|| "no-launch".to_string());
+    let failure = row.failure.as_ref().expect("failure");
+    let expected_failure_id = {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(
+            format!("{}/Parse/{}/{}", series, failure.code, detail).as_bytes(),
+        ))
+    };
+    assert_eq!(
+        failure.failure_id, expected_failure_id,
+        "审计接入不得改变 failure_id（被哈希 detail 逐字未动）"
+    );
+}
