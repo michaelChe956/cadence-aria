@@ -17,6 +17,9 @@ use super::single_candidate_compile_preflight::{
 };
 use super::*;
 use crate::product::lifecycle_store::LifecycleStore;
+use crate::product::lifecycle_store::sc_failure_evidence::{
+    ScFailureEvidenceError, ScFailureEvidenceEvent,
+};
 use crate::product::models::{
     LcFreshOperationState, LcRecoveryRunContext, LcResumeRecoveryState, ProviderName,
 };
@@ -141,7 +144,7 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
         .entries
         .iter()
         .filter_map(|entry| match &entry.event {
-            super::sc_failure_evidence::ScFailureEvidenceEvent::RoundBound { round } => {
+            ScFailureEvidenceEvent::RoundBound { round } => {
                 Some(round.clone())
             }
             _ => None,

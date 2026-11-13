@@ -258,14 +258,11 @@ fn classify_sc_round_launch(
         .iter()
         .any(|line| line.event_type() == "provider_start")
     {
-        return Ok(sc_waiting_round(
-            bound,
-            SC_ROUND_LAUNCH_UNKNOWN,
-            format!(
-                "同一 role_run_seq 已有真实 provider 启动且无严格 completed 交付（轮 {}）",
-                bound.round.round_id
-            ),
-        ));
+        let detail = format!(
+            "同一 role_run_seq 已有真实 provider 启动且无严格 completed 交付（轮 {}）",
+            bound.round.round_id
+        );
+        return Ok(sc_waiting_round(bound, SC_ROUND_LAUNCH_UNKNOWN, detail));
     }
     // ④ 只有「running 且分区为空」可证明本轮未启动且 start 仍可安全发生。
     if status == "running" && read.events.is_empty() {
