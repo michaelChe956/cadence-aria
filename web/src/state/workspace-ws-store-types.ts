@@ -15,6 +15,7 @@ import type {
   PlanProjectionBundle,
   PlanRepairSessionSnapshot,
   ProjectionValidationReport,
+  ScFailureRepairPackage,
   StructuredOutputDiagnostic,
   WorkItemPlanArtifactPayload,
   WorkItemPlanArtifactVersion,
@@ -231,6 +232,7 @@ export interface ArtifactVersion extends ArtifactVersionSummary {
   work_item_projection?: WorkItemProjectionBundle;
   work_item_revision_history?: WorkItemRevisionHistoryDto;
   projection_validation?: ProjectionValidationReport;
+  sc_failure_repair_package?: ScFailureRepairPackage;
 }
 
 /**
