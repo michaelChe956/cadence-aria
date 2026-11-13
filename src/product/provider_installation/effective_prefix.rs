@@ -59,6 +59,17 @@ pub fn same_dir(left: &Path, right: &Path) -> bool {
 
 /// 目录可写吗（目录不存在时看最近的存在祖先）。
 pub fn is_writable_dir(path: &Path) -> bool {
+    is_writable_dir_with(path, |_dir| true)
+}
+
+/// 可写判定（**测试可注入 seam**）：`probe` 收到实际存在的祖先目录，返回
+/// 它是否真的可写。生产实现是「mode 预筛 + 真实写入探测」，单测可注入
+/// 确定性探针（模拟「mode 说可写但实际写失败」），不依赖运行身份。
+pub fn is_writable_dir_with<F>(path: &Path, probe: F) -> bool
+where
+    F: Fn(&Path) -> bool,
+{
+    let _ = probe;
     let mut candidate = Some(path);
     while let Some(dir) = candidate {
         match std::fs::metadata(dir) {
@@ -202,6 +213,30 @@ mod tests {
             choose_effective_prefix(Some(&readonly), Some(&writable), &fallback),
             writable,
             "不可写前缀必须跳过"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// mode 说可写但真实写入失败 ⇒ 必须判不可写（注入式 seam，确定性，
+    /// 不依赖运行身份；只看权限位的旧实现会误判为可写）。
+    #[test]
+    fn is_writable_dir_rejects_writable_mode_but_failed_probe() {
+        let root =
+            std::env::temp_dir().join(format!("effective-prefix-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dir");
+        let metadata = std::fs::metadata(&root).expect("metadata");
+        assert!(
+            dir_is_writable(&metadata),
+            "前提：mode 预筛必须放行，否则测不到 probe 分支"
+        );
+
+        assert!(
+            !is_writable_dir_with(&root, |_dir| false),
+            "mode 说可写但真实写入失败 ⇒ 必须判不可写"
+        );
+        assert!(
+            is_writable_dir_with(&root, |_dir| true),
+            "真实写入成功 ⇒ 判可写"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
