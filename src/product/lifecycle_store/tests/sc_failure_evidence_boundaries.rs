@@ -332,7 +332,7 @@ fn sc_failure_boundary_late_write_blocked_by_delete_lease_on_same_scope() {
         .expect_err("delete lease 在位时迟到写必须被拒");
     assert_eq!(err.code, "sc_failure_session_not_live");
     assert_eq!(err.step, "append_sc_failure_evidence");
-    assert!(!err.publication_incomplete);
+    assert!(err.publication_incomplete);
     assert!(!log_path.exists(), "被拒写不得复活证据分区");
     // prompt 写受同一 lease 约束
     let err = put(&store, &chain, &round.round_id, 2, PROMPT_TEXT, ScPromptDisposition::Prepared)
