@@ -25,6 +25,7 @@ pub mod kimi_code_provider;
 pub mod local_usage;
 pub mod manual_intervention;
 pub mod openspec_constraints;
+pub mod path_overlay;
 pub mod pi_provider;
 pub mod policy_mode;
 pub mod process_manager;
