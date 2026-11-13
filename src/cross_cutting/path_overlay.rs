@@ -378,7 +378,9 @@ pub(crate) fn overlay_test_lock() -> &'static Mutex<()> {
 
 /// 持全局锁 + 进入时清空 + 退出（含 panic 展开）时清空的 RAII 守卫。
 #[cfg(test)]
-pub(crate) struct OverlayStateGuard(MutexGuard<'static, ()>);
+pub(crate) struct OverlayStateGuard {
+    _guard: MutexGuard<'static, ()>,
+}
 
 #[cfg(test)]
 impl OverlayStateGuard {
@@ -387,7 +389,7 @@ impl OverlayStateGuard {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         clear();
-        Self(guard)
+        Self { _guard: guard }
     }
 }
 
@@ -643,6 +645,44 @@ mod tests {
         assert!(
             shell_env_overrides_with(Some(&environment), platform_env).is_empty(),
             "覆盖层已有的变量不得被探测值覆盖"
+        );
+    }
+
+    /// 竞态修复（全量 lib 暴露：4 条 F10 provider environ 逐字断言被并行
+    /// overlay 用例的登记窗口打穿）：overlay 用例与 F10 同位用例**不共享
+    /// 锁** ⇒ 注册表在测试构建里必须按线程隔离——他线程登记的目录只对
+    /// 登记线程可见，不得泄漏进本线程的合并结果/快照；登记线程自身必须
+    /// 照常看到合并。生产构建仍走进程级全局注册表。
+    #[test]
+    fn overlay_registrations_from_other_threads_do_not_leak_into_this_thread() {
+        let _state = OverlayStateGuard::acquire();
+
+        let holder = tempfile::tempdir().expect("tempdir");
+        let registered = holder.path().join("bin");
+        std::fs::create_dir_all(&registered).expect("mkdir");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker_registered = registered.clone();
+        let worker = std::thread::spawn(move || {
+            // 模拟并行 overlay 用例：在别的线程登记并在该线程内断言可见。
+            register(&worker_registered, OverlayPosition::Prepend);
+            let merged = effective_path(Some("/usr/bin"));
+            sender.send(merged).expect("send merged");
+        });
+        let other_thread_merged = receiver.recv().expect("recv merged");
+        worker.join().expect("join worker");
+
+        assert!(
+            std::env::split_paths(&other_thread_merged).any(|dir| dir == registered),
+            "登记线程自身必须看到合并结果: {other_thread_merged}"
+        );
+        assert_eq!(
+            effective_path(Some("/usr/bin")),
+            "/usr/bin",
+            "他线程的 overlay 登记不得泄漏进本线程的合并结果(F10 同位)"
+        );
+        assert!(
+            !snapshot().contains(&registered),
+            "他线程的登记不得出现在本线程快照"
         );
     }
 }
