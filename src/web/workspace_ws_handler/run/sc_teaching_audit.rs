@@ -281,17 +281,16 @@ pub(super) async fn sc_teaching_terminal_grant<T>(
                 SingleCandidateProviderRunError::Message(message) => message.clone(),
                 other => format!("{other:?}"),
             };
-            Err(
-                super::sc_failure_evidence::sc_failure_terminal::terminal_exit_error(
-                    engine,
-                    lifecycle,
-                    chain,
-                    terminal_class,
-                    Vec::new(),
-                    reason,
-                )
-                .await,
+            let terminal = super::sc_failure_evidence::sc_failure_terminal::terminal_exit_error(
+                engine,
+                lifecycle,
+                chain,
+                terminal_class,
+                Vec::new(),
+                reason,
             )
+            .await;
+            Err(terminal)
         }
     }
 }

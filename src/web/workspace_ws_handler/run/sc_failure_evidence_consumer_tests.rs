@@ -235,7 +235,7 @@ fn evidence_write_failure_leaves_no_failure_observed_rows() {
 /// 不是编译误差：每个用例都从真实 RoundBound + 生产 producer 的 FailureObserved 出发。
 mod terminal {
     use super::super::super::sc_failure_transport::{ScBoundProviderRound, begin_sc_failure_round};
-    use super::super::sc_failure_evidence::sc_failure_terminal::{
+    use super::super::sc_failure_terminal::{
         SC_TERMINAL_CLASS_COMPILE, SC_TERMINAL_CLASS_IR_PREFLIGHT, SC_TERMINAL_CLASS_STRUCTURE_GATE,
         SC_TERMINAL_CLASS_TEACHING_INTERRUPTED, ScFailureTerminalOutcome, finalize_sc_failure_chain,
     };
