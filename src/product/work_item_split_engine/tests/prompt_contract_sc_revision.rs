@@ -1,7 +1,11 @@
 // F5 组1（A findings 回灌）：SC author 修订轮 prompt 必须回灌 reviewer findings
 // 与硬性修复指令；首轮（无 verdict）prompt 逐字节不变。契约测试风格对齐
 // tests/prompt_contract.rs（include 进 prompt_contract_sc_revision 模块）。
+// B4（REQ-WSC-12 窄例外·五入口之五）：作者只消费会话有效 structured
+// findings——[review_findings] 的 actionable 条目是唯一执行清单；raw
+// comments/summary 散文只留审计面，不进作者 prompt。
 
+use crate::product::work_item_plan_policy::{FindingClassHint, ReviewFindingCategory};
 use crate::web::workspace_ws_types::{
     ReviewFinding, ReviewFindingDisposition, ReviewFindingSeverity, ReviewGate, ReviewVerdict,
     ReviewVerdictType,
@@ -77,6 +81,29 @@ fn advisory_must_fix_finding(message: &str, required_action: &str) -> ReviewFind
     }
 }
 
+/// B4（REQ-WSC-12 窄例外·五入口之五）：SC 会话内被平台降级为 advisory 的
+/// 建议级非契约 finding——severity=Suggestion + class_hint=Repairable +
+/// category=Completeness，B1 投影后的会话有效视图（disposition=advisory）。
+/// 生产链路：`finalize_review_verdict` / `latest_review_verdict_for_session`
+/// 投影 → `single_candidate_pending_revision_verdict` 传入本 builder。
+fn narrow_exception_demoted_suggestion(message: &str, required_action: &str) -> ReviewFinding {
+    ReviewFinding {
+        severity: ReviewFindingSeverity::Suggestion,
+        message: message.to_string(),
+        evidence: "WI-003 Traceability 登记块".to_string(),
+        required_action: required_action.to_string(),
+        category: Some(ReviewFindingCategory::Completeness),
+        class_hint: Some(FindingClassHint::Repairable),
+        contract_field: None,
+        machine_repair: None,
+        owner_question: None,
+        owner_options: None,
+        disposition: Some(ReviewFindingDisposition::Advisory),
+        target_work_item_id: None,
+        finding_key: None,
+    }
+}
+
 fn author_context()
 -> crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext<'static> {
     crate::product::work_item_split_engine::prompts::WorkItemPlanMarkdownAuthorContext {
@@ -134,13 +161,10 @@ fn sc_revision_prompt_injects_findings_and_directives_on_top_of_byte_identical_b
     assert_eq!(revision.matches(SC_REVISION_OUTPUT_DIRECTIVE).count(), 1);
     assert!(revision.len() > base.len());
 
-    // findings 文本回灌：comments/summary（对齐 legacy revision.rs 的拼装）与逐条 findings。
+    // findings 文本回灌：结构化 actionable 清单逐条在场（B4 新契约：raw
+    // comments/summary 散文不进作者面，见下方 forbidden 断言）。
     for required in [
         "[review_revision]",
-        "Reviewer 审核意见:",
-        "CT-001 与 WI-002 的 input contract 能力供需不一致，需返修。",
-        "Reviewer 摘要:",
-        "契约缺口需返修",
         "[review_findings]",
         "1. severity: must_fix",
         "message: WI-002 required_capabilities 缺 capability.field-constraints",
@@ -154,6 +178,18 @@ fn sc_revision_prompt_injects_findings_and_directives_on_top_of_byte_identical_b
             "revision prompt must inject review feedback {required}: {revision}"
         );
     }
+    // B4（REQ-WSC-12 窄例外·五入口之五）：raw comments/summary 散文只留审计面。
+    for forbidden_prose in [
+        "Reviewer 审核意见:",
+        "Reviewer 摘要:",
+        "CT-001 与 WI-002 的 input contract 能力供需不一致",
+        "契约缺口需返修",
+    ] {
+        assert!(
+            !revision.contains(forbidden_prose),
+            "raw 散文 {forbidden_prose} 不得进入作者返修 prompt: {revision}"
+        );
+    }
 
     // 硬性修复指令。
     for required in [
@@ -163,6 +199,7 @@ fn sc_revision_prompt_injects_findings_and_directives_on_top_of_byte_identical_b
         "必须在本轮内逐条修复全部 must_fix/blocking findings",
         "逐条对齐其 required_action",
         "不得只修复其中部分",
+        "唯一执行清单",
         "不得新增与上述 findings 无关的其他变更",
     ] {
         assert!(
@@ -233,8 +270,119 @@ fn sc_revision_prompt_excludes_owner_downgraded_findings_from_repair_surface() {
     );
 }
 
+/// B4（REQ-WSC-12 窄例外·五入口之五「作者返修」，tasks 5.1）：作者返修轮只
+/// 消费会话有效 structured findings——`[review_findings]` 的 actionable 条目
+/// 是本轮唯一执行清单。被窄例外降级的建议（severity=Suggestion +
+/// class_hint=Repairable + category=Completeness，B1 投影后 disposition=
+/// advisory）不得以任何形态进入作者 prompt；raw comments/summary 散文只留
+/// 审计面，不得把降级建议复活成「全部要改」；真必修的 required_action/
+/// evidence 不丢。resume 与 fresh 两个 builder 同源走
+/// `render_review_revision_block`，两侧契约一致。
 #[test]
-fn sc_revision_prompt_without_findings_still_carries_comments_and_directives() {
+fn sc_revision_prompt_consumes_effective_findings_only_and_keeps_raw_prose_out() {
+    let (request, issue, repository) = split_prompt_fixture();
+    let verdict = revise_verdict_fixture(
+        "「建议为 WI-003 补验收基线引用」等全部 8 条问题（含建议项）本轮都必须修复。",
+        "全部 8 条（含建议项）必须修复",
+        vec![
+            must_fix_finding(
+                "WI-002 required_capabilities 缺 capability.field-constraints",
+                "在 CT-001 显式声明 capability.field-constraints。",
+            ),
+            narrow_exception_demoted_suggestion(
+                "建议为 WI-003 补验收基线引用",
+                "补 Traceability 登记行（仅建议）",
+            ),
+        ],
+    );
+    let revision =
+        crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_revision_prompt(
+            &request, &issue, &repository, author_context(), &verdict,
+        )
+        .expect("revision markdown author prompt with narrow-exception finding");
+    let fresh = crate::product::work_item_split_engine::prompts::
+        build_work_item_plan_markdown_fresh_revision_prompt(
+            &request,
+            &issue,
+            &repository,
+            author_context(),
+            &verdict,
+            "# Work Item Plan\n## Work Item WI-001: x\n（上一版 source 全文）\n",
+        )
+        .expect("fresh revision markdown author prompt with narrow-exception finding");
+
+    for prompt in [&revision, &fresh] {
+        // raw 散文不进作者面：comments/summary 留在审计面（durable verdict 与
+        // review message），作者侧只见结构化清单与非执行计数说明。
+        for forbidden_prose in [
+            "Reviewer 审核意见:",
+            "Reviewer 摘要:",
+            "全部 8 条",
+            "（含建议项）本轮都必须修复",
+        ] {
+            assert!(
+                !prompt.contains(forbidden_prose),
+                "raw 散文 {forbidden_prose} 不得进入作者返修 prompt: {prompt}"
+            );
+        }
+        // 被窄例外降级的建议：message/evidence/required_action 不得经任何通道
+        // （结构化清单或散文）复活为执行项。
+        for forbidden_finding in [
+            "建议为 WI-003 补验收基线引用",
+            "WI-003 Traceability 登记块",
+            "补 Traceability 登记行（仅建议）",
+            "2. severity:",
+        ] {
+            assert!(
+                !prompt.contains(forbidden_finding),
+                "被窄例外降级的建议 {forbidden_finding} 不得出现在作者返修 prompt: {prompt}"
+            );
+        }
+        // 唯一执行清单 + 真必修 required_action/evidence 不丢。
+        for required in [
+            "[review_revision]",
+            "[review_findings]",
+            "1. severity: must_fix",
+            "message: WI-002 required_capabilities 缺 capability.field-constraints",
+            "evidence: work-item-plan.md WI-002 Inputs",
+            "required_action: 在 CT-001 显式声明 capability.field-constraints。",
+            "唯一执行清单",
+            "必须在本轮内逐条修复全部 must_fix/blocking findings（仅限 [review_findings] 列出的 actionable 条目）",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "作者返修 prompt 必须携带唯一执行清单与真必修事实 {required}: {prompt}"
+            );
+        }
+        // 降级项只以非执行计数说明出现：1 条 advisory，不带原文。
+        let advisory_at = prompt
+            .find("[review_advisory_findings]")
+            .expect("advisory findings 必须单列计数提示段");
+        let directives_at = prompt
+            .find("[revision_directives]")
+            .expect("revision directives section");
+        assert!(advisory_at < directives_at);
+        let advisory_section = &prompt[advisory_at..directives_at];
+        assert!(
+            advisory_section.contains("本轮另有 1 条 finding 已被平台判定为 advisory"),
+            "advisory 段必须只给非执行计数说明: {advisory_section}"
+        );
+        assert!(
+            advisory_section.contains("仅供提示，本轮不要修改"),
+            "advisory 段必须写明仅供提示、本轮不要修改: {advisory_section}"
+        );
+        assert!(
+            !advisory_section.contains("WI-003"),
+            "advisory 计数段不得携带降级项原文: {advisory_section}"
+        );
+    }
+}
+
+/// B4（REQ-WSC-12 窄例外·五入口之五）：无 findings 的返修轮仍携带返修框与
+/// 修复指令，但 raw comments/summary 散文不进作者面（只留审计面）——散文
+/// 不得在无结构化执行清单时凭空制造「必须修改」的指令。
+#[test]
+fn sc_revision_prompt_without_findings_carries_directives_without_raw_prose() {
     let (request, issue, repository) = split_prompt_fixture();
     let verdict = revise_verdict_fixture("整体结构需按 reviewer 意见调整。", "返修", Vec::new());
     let revision =
@@ -243,10 +391,20 @@ fn sc_revision_prompt_without_findings_still_carries_comments_and_directives() {
         )
         .expect("revision markdown author prompt without findings");
     assert!(revision.contains("[review_revision]"));
-    assert!(revision.contains("整体结构需按 reviewer 意见调整。"));
-    assert!(revision.contains("Reviewer 摘要:"));
+    assert!(revision.contains("[review_findings]"));
+    assert!(revision.contains("无必须修复项"));
     assert!(revision.contains("[revision_directives]"));
     assert!(revision.contains("必须在本轮内逐条修复"));
+    for forbidden_prose in [
+        "Reviewer 审核意见:",
+        "Reviewer 摘要:",
+        "整体结构需按 reviewer 意见调整。",
+    ] {
+        assert!(
+            !revision.contains(forbidden_prose),
+            "raw 散文 {forbidden_prose} 不得进入作者返修 prompt: {revision}"
+        );
+    }
 }
 
 #[test]
@@ -659,8 +817,14 @@ fn sc_revision_prompt_accepts_seventy_kilobyte_budget_and_still_caps_at_256kib()
     );
 
     // 把修订 prompt 总量校准到 ~70 KB（旧 64 KiB 兜底之上、新 256 KiB 兜底之下）。
+    // B4 后 raw comments 不再进作者 prompt，校准改走结构化 actionable finding
+    // 的 message 回灌通道（[review_findings] 仍是修订块的可增长面）。
     let padding = "x".repeat(70_000usize.saturating_sub(base.len()));
-    let verdict = revise_verdict_fixture(&padding, "返修", Vec::new());
+    let verdict = revise_verdict_fixture(
+        "评论散文不进作者 prompt",
+        "返修",
+        vec![must_fix_finding(&padding, "逐字应用该补丁行。")],
+    );
     let revision =
         crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_revision_prompt(
             &request,
@@ -682,7 +846,11 @@ fn sc_revision_prompt_accepts_seventy_kilobyte_budget_and_still_caps_at_256kib()
     );
 
     // 病态回归拦截能力不丢：超过 256 KiB 的仍 fail closed，并报告新上限。
-    let oversized = revise_verdict_fixture(&"x".repeat(300_000), "返修", Vec::new());
+    let oversized = revise_verdict_fixture(
+        "评论散文不进作者 prompt",
+        "返修",
+        vec![must_fix_finding(&"x".repeat(300_000), "逐字应用该补丁行。")],
+    );
     let error =
         crate::product::work_item_split_engine::prompts::build_work_item_plan_markdown_revision_prompt(
             &request,
