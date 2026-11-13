@@ -38,6 +38,9 @@ pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_failure_t
 // P09：SC 失败证据 blocking reasons 的 run 级路径登记。实现文件为
 // `run/sc_failure_evidence.rs`；模块本体声明在 single_candidate.rs 内。
 pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_failure_evidence;
+// P20：SC 失败 source resolver 的 run 级路径登记。实现文件为
+// `run/sc_teaching_source.rs`；模块本体声明在 single_candidate.rs 内。
+pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_teaching_source;
 #[path = "run/single_candidate_structure_reredrive.rs"]
 mod single_candidate_structure_reredrive;
 pub(crate) use provider_run::{

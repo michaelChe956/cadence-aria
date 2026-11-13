@@ -83,6 +83,12 @@ pub(super) mod sc_failure_transport;
 #[path = "sc_failure_evidence.rs"]
 pub(super) mod sc_failure_evidence;
 
+/// P20：受控完整失败 source resolver（compile/IR/structure 三通道共用的真实
+/// source 归一化读回）。模块本体声明在 single_candidate.rs 内——它复用既有
+/// 生产归一化 helper，不另立 normalizer。
+#[path = "sc_teaching_source.rs"]
+pub(super) mod sc_teaching_source;
+
 /// 公共 admission 预检「成员语言规则缺失」等待项的判别码（路 C，Task 4）：
 /// SC 消费链对成员文件的必需性判定收敛到实际消费点——该等待项在 SC 侧不
 /// 直接阻断（其他 active 成员缺失不阻断 SC），由消费点对已解析
