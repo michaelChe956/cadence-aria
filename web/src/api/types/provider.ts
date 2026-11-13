@@ -56,6 +56,9 @@ export type InstallTargetView = {
   latest_checked_at: string | null;
   install_source: string;
   action: InstallTargetStatus;
+  /** 已安装但所在目录不在登录 shell PATH 上（REQ-PCI-08，仅提示；行动走
+   *  既有「暴露到终端 PATH」入口，未安装恒 false）。 */
+  off_path: boolean;
 };
 
 export type InstallTargetsResponse = { targets: InstallTargetView[] };

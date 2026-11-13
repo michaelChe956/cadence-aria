@@ -398,6 +398,16 @@ export function ProviderCapabilityCard() {
                       版本落后{latestVersion === null ? "" : ` → ${latestVersion}`}
                     </span>
                   ) : null}
+                  {/* 已安装但不在登录 shell PATH（REQ-PCI-08）：仅提示徽标，
+                      行动入口是既有「暴露到终端 PATH」按钮（不重复实现）。 */}
+                  {installView?.off_path ? (
+                    <span
+                      data-testid={`provider-capability-off-path-${providerType}`}
+                      className={`${CHIP_CLASS} border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] text-[var(--aria-warning)]`}
+                    >
+                      已安装，但不在你的终端 PATH 上
+                    </span>
+                  ) : null}
                 </div>
                 {/* 行3：左 = 三个能力维度胶囊；右 = 操作按钮（右对齐）。
                     空间不够时操作区整体换行（flex-wrap + gap），维度胶囊仍保持
