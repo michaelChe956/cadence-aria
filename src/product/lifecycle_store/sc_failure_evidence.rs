@@ -607,65 +607,6 @@ impl LifecycleStore {
         Ok(())
     }
 
-    /// 事件准入：round 必须先 RoundBound；raw/source locator 必须绑定该 round。
-    fn sc_failure_validate_event(
-        &self,
-        chain: &ScFailureChainIdentity,
-        read: &ScFailureEvidenceRead,
-        event: &ScFailureEvidenceEvent,
-        step: &str,
-    ) -> Result<(), ScFailureEvidenceError> {
-        match event {
-            ScFailureEvidenceEvent::RoundBound { round } => {
-                if round.chain_id != chain.chain_id {
-                    return Err(scope_mismatch_error(step, Some(round.round_id.clone()), "round 的 chain_id 与 chain 不一致"));
-                }
-                if round.workspace_session_id != chain.scope.session_id {
-                    return Err(scope_mismatch_error(step, Some(round.round_id.clone()), "round 的 workspace_session_id 与 chain scope 不一致"));
-                }
-                if round.round_id.is_empty() || round.run_ref.is_empty() {
-                    return Err(locator_invalid_error(step, Some(round.round_id.clone()), "round 身份不完整（round_id / run_ref）"));
-                }
-                Ok(())
-            }
-            ScFailureEvidenceEvent::FailureObserved {
-                round_id, raw, source, ..
-            } => {
-                let bound = sc_failure_bound_round(read, round_id).ok_or_else(|| {
-                    round_not_bound_error(step, Some(round_id.clone()), "该 round 尚未 RoundBound")
-                })?;
-                let expected = sc_failure_split_locator(
-                    &bound.workspace_session_id,
-                    bound.role_run_seq,
-                );
-                for (label, reference) in [("raw", raw), ("source", source)] {
-                    if let ScEvidenceRef::Available { locator, .. } = reference
-                        && locator != &expected
-                    {
-                        return Err(locator_invalid_error(step, Some(round_id.clone()), format!("{label} locator 与 round 绑定不符")));
-                    }
-                }
-                Ok(())
-            }
-            ScFailureEvidenceEvent::PromptPrepared { evidence } => {
-                sc_failure_prompt_round_bound(read, evidence, step)?;
-                Ok(())
-            }
-            ScFailureEvidenceEvent::PromptUnavailable { evidence } => {
-                sc_failure_prompt_round_bound(read, evidence, step)?;
-                if matches!(evidence.prompt, ScEvidenceRef::Available { .. }) {
-                    return Err(prompt_disposition_invalid_error(
-                        step,
-                        Some(evidence.failed_round_id.clone()),
-                        "Unavailable 的教学提示必须带 Missing 真实原因，不得带 Available 正文",
-                    ));
-                }
-                Ok(())
-            }
-            ScFailureEvidenceEvent::ChainTerminal { .. } => Ok(()),
-        }
-    }
-
     /// 事实日志的排它锁（创建证据分区目录亦在此处发生，准入已先通过）。
     fn sc_failure_log_lock(
         &self,
@@ -732,22 +673,6 @@ fn sc_failure_disposition_key(disposition: &ScPromptDisposition) -> &'static str
         ScPromptDisposition::RejectedBudget => "rejected_budget",
         ScPromptDisposition::Unavailable => "unavailable",
     }
-}
-
-/// 教学提示的失败 round 必须已绑定（PromptPrepared / PromptUnavailable 共用）。
-fn sc_failure_prompt_round_bound(
-    read: &ScFailureEvidenceRead,
-    evidence: &ScTeachingPromptEvidence,
-    step: &str,
-) -> Result<(), ScFailureEvidenceError> {
-    if sc_failure_bound_round(read, &evidence.failed_round_id).is_none() {
-        return Err(round_not_bound_error(
-            step,
-            Some(evidence.failed_round_id.clone()),
-            "教学提示的失败 round 尚未 RoundBound",
-        ));
-    }
-    Ok(())
 }
 
 fn sc_failure_bound_round<'a>(
@@ -960,36 +885,6 @@ fn write_sc_failure_prompt_file(
     Ok(())
 }
 
-/// 日志类错误的统一形状：带上已验证前缀（坏行/断号之后的行不被跳行吞下）与具体
-/// missing 项——round 不可知时不伪 round（"unknown"），locator 只给受控的内部
-/// 相对 ref（本 chain 的日志），code/detail 沿用原故障。
-fn sc_failure_log_failure(
-    code: &str,
-    step: &str,
-    chain: &ScFailureChainIdentity,
-    entries: &[ScFailureEvidenceEntry],
-    verified_bytes: &[u8],
-    detail: String,
-) -> ScFailureEvidenceError {
-    let mut failure = error(code, step, None, detail.clone(), true);
-    failure.verified_prefix = Some(Box::new(ScFailureEvidenceRead {
-        evidence_through_entry_key: entries
-            .last()
-            .map(|entry| entry.entry_key.clone())
-            .unwrap_or_default(),
-        entries: entries.to_vec(),
-        verified_prefix_bytes: verified_bytes.to_vec(),
-        missing_evidence: vec![ScMissingEvidence {
-            round_id: "unknown".to_string(),
-            kind: "evidence_log".to_string(),
-            code: code.to_string(),
-            detail,
-            locator: sc_failure_evidence_log_ref(chain).ok(),
-        }],
-    }));
-    failure
-}
-
 /// 证据日志的受控内部相对 ref（Plan 冻结名 `sc_failure_evidence_log_ref`）：
 /// `sc-failure-evidence/v1/{session_id}/{chain_id}/rounds.jsonl`——相对 workspace
 /// timelines 根，不是绝对路径；纯函数、无 I/O、不扩 DTO。下一 schema 片复用同一
@@ -1125,6 +1020,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
+
+#[path = "sc_failure_evidence_parts.rs"]
+mod parts;
+use parts::sc_failure_log_failure;
 
 #[cfg(test)]
 #[path = "tests/sc_failure_evidence_fixture.rs"]
