@@ -865,6 +865,8 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "中文仅出现在值的自由文本中",
         "任务拆分与验证设计遵循测试先行纪律",
         "大范围定位优先检索工具",
+        "已给事实不重复全仓探测",
+        "缺事实才针对性查证",
     ] {
         assert!(
             prompt.contains(required),
