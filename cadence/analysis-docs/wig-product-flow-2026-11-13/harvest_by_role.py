@@ -440,11 +440,11 @@ def main():
                   % (lab, fmt_med(b, key), fmt_med(a, key), "n/a(缺值)"))
             continue
         p, total = exact_perm_split(vb, va)
-        print("  %-24s %13.1f %13.1f %9s"
-              % (lab, st.median(vb), st.median(va), "1/%d≈%.4f" % (total, p)))
-    print("  n=%d/臂 ⇒ 精确 p 分辨率下限 = 1/C(%d,%d)=1/%d；任何 p 都不足以"
-          "支撑显著性强弱结论，只用于方向性记录。"
-          % (len(b), len(b) + len(a), len(b), total))
+        print("  %-24s %13.1f %13.1f   p=%.4f（%d/%d 分组 ≥ 观测）"
+              % (lab, st.median(vb), st.median(va), p, round(p * total), total))
+    print("  n=%d/臂 ⇒ 精确枚举 C(%d,%d)=%d 个分组，分辨率 1/%d≈%.4f；离散小样本"
+          "检验功效有限，只作方向性记录，不做显著性强弱判定、不做因果推断。"
+          % (len(b), len(b) + len(a), len(b), total, total, 1.0 / total))
 
 
 if __name__ == "__main__":
