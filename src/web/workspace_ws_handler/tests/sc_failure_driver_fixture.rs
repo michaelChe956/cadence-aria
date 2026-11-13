@@ -96,13 +96,15 @@ pub(super) fn durable_artifact_versions(fixture: &ProviderRunFixture) -> Vec<ser
         .collect()
 }
 
-/// durable 版本表里的 A4 失败包版本（`payload.sc_failure_repair_package`）。
+/// durable 版本表里的 A4 失败包版本。`ArtifactVersion` 的载荷是**扁平**序列化
+/// （`ArtifactPayload` 为 untagged，A4 变体直接是 `sc_failure_repair_package` 顶层键；
+/// 与磁盘 `artifact_versions.json` 真实形状一致，无 `payload` 包装层）。
 pub(super) fn durable_sc_package_versions(
     fixture: &ProviderRunFixture,
 ) -> Vec<serde_json::Value> {
     durable_artifact_versions(fixture)
         .into_iter()
-        .filter(|version| version["payload"]["sc_failure_repair_package"].is_object())
+        .filter(|version| version["sc_failure_repair_package"].is_object())
         .collect()
 }
 

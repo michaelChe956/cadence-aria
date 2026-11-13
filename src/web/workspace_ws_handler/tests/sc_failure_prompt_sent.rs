@@ -169,7 +169,7 @@ async fn sc_failure_package_teaching_started_without_delivery_records_sent_promp
     // 失败源仍指上一轮（compile 轮）。
     let packages = durable_sc_package_versions(&run.fixture);
     assert_eq!(packages.len(), 1, "durable 版本表恰有一个 A4 失败包版本");
-    let package = &packages[0]["payload"]["sc_failure_repair_package"];
+    let package = &packages[0]["sc_failure_repair_package"];
     assert_eq!(
         package["completeness"], "incomplete",
         "末物理轮未交付 ⇒ 包必须诚实不完整"
