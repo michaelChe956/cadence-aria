@@ -13,10 +13,38 @@
 //! - `put_sc_artifact_published_receipt` performs real SC admission via
 //!   `read_sc_failure_evidence(identity)?` before any write.
 
+use crate::web::workspace_ws_types::{
+    ScMissingEvidence, ScPackageCompleteness, ScRoundLaunchState,
+};
+
+/// Local (non-durable) terminal projection used when the strict evidence log is
+/// only partially readable: the publisher builds from the real verified prefix
+/// (never a fabricated append entry / raw digest).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ScLocalTerminal {
+    pub(crate) last_failure_round_id: String,
+    pub(crate) last_physical_round_id: Option<String>,
+    pub(crate) terminal_class: String,
+    pub(crate) terminal_reason: String,
+    pub(crate) launch_observations: Vec<(String, ScRoundLaunchState)>,
+    pub(crate) completeness: ScPackageCompleteness,
+    pub(crate) missing_evidence: Vec<ScMissingEvidence>,
+}
+
+/// Builder terminal input: `Durable` keeps the original strict fold; `Local`
+/// carries only real verified-prefix facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScTerminalInput<'a> {
+    Durable,
+    Local(&'a ScLocalTerminal),
+}
+
 #[cfg(test)]
 mod tests {
     use crate::product::app_paths::ProductAppPaths;
-    use crate::product::lifecycle_store::sc_failure_evidence::sc_failure_chain_id;
+    use crate::product::lifecycle_store::sc_failure_evidence::{
+        sc_failure_chain_id, ScFailureEvidenceEvent,
+    };
     use crate::product::lifecycle_store::{
         CreateWorkspaceSessionInput, LifecycleStore, WorkItemPlanSessionOptions,
     };
@@ -27,7 +55,7 @@ mod tests {
     use crate::web::workspace_ws_types::{
         ArtifactPayload, ArtifactVersion, ScArtifactPublishedReceipt, ScEvidenceRef,
         ScFailureChainIdentity, ScFailureRepairPackage, ScFailureScope, ScFailureSourceEvidence,
-        ScPackageCompleteness, TimelineNodeStatus, TimelineNodeType,
+        ScPackageCompleteness, ScRoundIdentity, TimelineNodeStatus, TimelineNodeType,
     };
     use tempfile::TempDir;
 
@@ -443,6 +471,7 @@ mod tests {
             &package.package_id,
         ))
         .unwrap();
+
         let dropped = store
             .filter_sc_published_artifact_versions(&sc, raw)
             .unwrap();
@@ -453,5 +482,125 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1]
         );
+    }
+
+    fn evidence_log_path(
+        store: &LifecycleStore,
+        session_id: &str,
+        chain_id: &str,
+    ) -> std::path::PathBuf {
+        store
+            .app_paths()
+            .issue_lifecycle_root(PROJECT, ISSUE)
+            .join("workspace-timelines")
+            .join(session_id)
+            .join("sc-failure-evidence")
+            .join(chain_id)
+            .join("rounds.jsonl")
+    }
+
+    fn receipt_for(
+        identity: &ScFailureChainIdentity,
+        package: &ScFailureRepairPackage,
+    ) -> ScArtifactPublishedReceipt {
+        ScArtifactPublishedReceipt {
+            schema_version: 1,
+            package_id: package.package_id.clone(),
+            chain_id: identity.chain_id.clone(),
+            node_id: NODE.to_string(),
+            package_digest: package_digest(package),
+            version: 2,
+        }
+    }
+
+    fn round_bound(identity: &ScFailureChainIdentity, session_id: &str) -> ScFailureEvidenceEvent {
+        ScFailureEvidenceEvent::RoundBound {
+            round: ScRoundIdentity {
+                chain_id: identity.chain_id.clone(),
+                round_id: "round_1".to_string(),
+                node_id: NODE.to_string(),
+                round_ordinal: 1,
+                provider: ProviderName::Codex,
+                workspace_session_id: session_id.to_string(),
+                role_run_seq: 7,
+                run_ref: "run_1".to_string(),
+            },
+        }
+    }
+
+    // Regression 3: a bad tail must return Err while preserving the real verified
+    // prefix (never a fabricated prefix); a non-SC session is rejected outright.
+    #[test]
+    fn p14_read_chain_preserves_verified_prefix_on_bad_log_and_rejects_non_sc() {
+        let (_tmp, store, session) = fixture_sc();
+        let sid = session.id.clone();
+        let sc = scope(&sid);
+        let id = identity(&sc);
+        store
+            .append_sc_failure_evidence(&id, &round_bound(&id, &sid))
+            .unwrap();
+        let log = evidence_log_path(&store, &sid, &id.chain_id);
+        let mut bytes = std::fs::read(&log).unwrap();
+        bytes.extend_from_slice(b"{\"corrupt\":\n");
+        std::fs::write(&log, &bytes).unwrap();
+
+        let err = store
+            .read_sc_failure_chain_for_publication(&sc, &id.chain_id)
+            .expect_err("corrupt tail must fail the strict read");
+        let prefix = err
+            .verified_prefix
+            .expect("real verified prefix must be retained");
+        assert!(!prefix.entries.is_empty(), "prefix keeps validated entries");
+
+        // Non-SC identity is rejected even though the chain id recomputes.
+        let (_tmp2, store2, session2) = fixture();
+        let sid2 = session2.id.clone();
+        let sc2 = scope(&sid2);
+        let id2 = identity(&sc2);
+        let err2 = store2
+            .read_sc_failure_chain_for_publication(&sc2, &id2.chain_id)
+            .expect_err("non-SC session must be rejected");
+        assert_eq!(err2.code, "sc_failure_session_not_sc");
+    }
+
+    // Regression 4: receipt write admits a real verified-prefix SC identity on a
+    // bad log, refuses when no verified prefix is known, and never fabricates one.
+    #[test]
+    fn p14_put_receipt_admits_verified_prefix_on_bad_log_and_refuses_unknown_prefix() {
+        // Unknown prefix: corrupt-only log => Err, zero receipt bytes.
+        let (_tmp, store, session) = fixture_sc();
+        let sid = session.id.clone();
+        let sc = scope(&sid);
+        let id = identity(&sc);
+        let pkg = package(&id);
+        let receipt = receipt_for(&id, &pkg);
+        let log = evidence_log_path(&store, &sid, &id.chain_id);
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, b"{\"corrupt\":\n").unwrap();
+        let err = store
+            .put_sc_artifact_published_receipt(&id, &receipt)
+            .expect_err("no verified prefix must refuse the receipt");
+        assert!(err.publication_incomplete);
+        assert!(!receipt_path(&store, &sid, &id.chain_id, &pkg.package_id).exists());
+
+        // Real verified prefix + corrupt tail => admitted; the receipt proves the
+        // artifact publication only, never that the log is healthy.
+        let (_tmp2, store2, session2) = fixture_sc();
+        let sid2 = session2.id.clone();
+        let _sc2 = scope(&sid2);
+        let id2 = identity(&_sc2);
+        let pkg2 = package(&id2);
+        let receipt2 = receipt_for(&id2, &pkg2);
+        store2
+            .append_sc_failure_evidence(&id2, &round_bound(&id2, &sid2))
+            .unwrap();
+        let log2 = evidence_log_path(&store2, &sid2, &id2.chain_id);
+        let mut bytes = std::fs::read(&log2).unwrap();
+        bytes.extend_from_slice(b"{\"corrupt\":\n");
+        std::fs::write(&log2, &bytes).unwrap();
+        store2
+            .put_sc_artifact_published_receipt(&id2, &receipt2)
+            .unwrap();
+        assert!(receipt_path(&store2, &sid2, &id2.chain_id, &pkg2.package_id).exists());
     }
 }
