@@ -520,11 +520,13 @@ mod tests {
         let login_bin = make_dir(root.path(), "login-bin");
         let home = root.path().join("home");
 
+        let service_path = install_dir.display().to_string();
+        let login_path = login_bin.display().to_string();
         let query = production_query_with(
             "claude",
-            &install_dir.display().to_string(),
-            Some(&login_bin.display().to_string()),
-            Some(&home),
+            &service_path,
+            Some(login_path.as_str()),
+            Some(home.as_path()),
         );
         assert_eq!(
             query.install_search_dirs.first(),

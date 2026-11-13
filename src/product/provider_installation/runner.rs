@@ -632,6 +632,15 @@ pub struct InstallJobExecution {
     pub clock: Arc<dyn InstallClock>,
 }
 
+/// 重试与失败分类所需的静态上下文（行 / 落点 / 产物目录 / 宿主 PATH），
+/// 打包传入以避免参数膨胀。
+struct RetryContext<'a> {
+    row: &'a InstallSourceRow,
+    prefix: &'a Path,
+    bin_dir: Option<&'a Path>,
+    path_value: Option<&'a str>,
+}
+
 impl InstallJobExecution {
     /// 生产装配：镜像/前缀取环境解析值，时钟取系统时钟。
     pub fn production(
@@ -785,12 +794,15 @@ impl InstallJobExecution {
         &self,
         job_id: &str,
         target: InstallTarget,
-        row: &InstallSourceRow,
-        prefix: &Path,
-        bin_dir: Option<&Path>,
-        path_value: Option<&str>,
+        context: RetryContext<'_>,
         real_command_ok_before_retry: bool,
     ) {
+        let RetryContext {
+            row,
+            prefix,
+            bin_dir,
+            path_value,
+        } = context;
         let mut real_command_ok = real_command_ok_before_retry;
         if let Some(retry) = npm_retry_plan(row, None, &self.registry, prefix)
             && let Ok(result) = self.runner.execute(&retry).await
@@ -799,11 +811,10 @@ impl InstallJobExecution {
             && !result.cancelled
         {
             register_install_bin_dir(bin_dir, row.command);
-            if let Some(outcome) = self
+            if let Ok(outcome) = self
                 .prober
                 .refresh_after_install(target.clone(), bin_dir)
                 .await
-                .ok()
             {
                 real_command_ok = outcome.real_command_ok;
                 // 成功判定 = 版本可读 **且** 真实命令可跑（2.8②）。
@@ -947,10 +958,12 @@ impl InstallJobExecution {
                         self.retry_with_optional_dependencies(
                             job_id,
                             target,
-                            row,
-                            &prefix,
-                            bin_dir.as_deref(),
-                            path_value.as_deref(),
+                            RetryContext {
+                                row,
+                                prefix: &prefix,
+                                bin_dir: bin_dir.as_deref(),
+                                path_value: path_value.as_deref(),
+                            },
                             real_command_ok,
                         )
                         .await;

@@ -412,13 +412,12 @@
         std::fs::create_dir_all(&login_bin).expect("login bin");
         let home = root.path().join("home");
 
+        let service_path = service_bin.display().to_string();
+        let login_path = login_bin.display().to_string();
+
         // ① 服务进程 PATH 有、登录 shell PATH 没有 ⇒ 平台能找到但不在终端
         //    PATH 上 ⇒ true。
-        let query = off_path_query_with(
-            &service_bin.display().to_string(),
-            Some(&login_bin.display().to_string()),
-            Some(&home),
-        );
+        let query = off_path_query_with(&service_path, Some(login_path.as_str()), Some(home.as_path()));
         assert_eq!(
             query.install_search_dirs.first(),
             Some(&service_bin),
@@ -431,11 +430,7 @@
         );
 
         // ② 登录 shell PATH 也有（同一个目录）⇒ false。
-        let query = off_path_query_with(
-            &service_bin.display().to_string(),
-            Some(&service_bin.display().to_string()),
-            Some(&home),
-        );
+        let query = off_path_query_with(&service_path, Some(service_path.as_str()), Some(home.as_path()));
         assert!(
             !resolve_off_path(CLI, &query),
             "登录 shell PATH 也有 ⇒ off_path 必须为 false"
@@ -443,11 +438,8 @@
 
         // ③ 两处都没有 ⇒ 未安装 ⇒ false。
         let empty_bin = root.path().join("empty-bin");
-        let query = off_path_query_with(
-            &empty_bin.display().to_string(),
-            Some(&login_bin.display().to_string()),
-            Some(&home),
-        );
+        let empty_path = empty_bin.display().to_string();
+        let query = off_path_query_with(&empty_path, Some(login_path.as_str()), Some(home.as_path()));
         assert!(
             !resolve_off_path(CLI, &query),
             "两处都没有 ⇒ 未安装 ⇒ off_path 必须为 false"

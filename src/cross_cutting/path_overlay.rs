@@ -83,7 +83,7 @@ fn register_in(storage: OverlayStorage, dir: &Path, position: OverlayPosition) {
     if !dir.is_dir() {
         return;
     }
-    let mut add = |entries: &mut Vec<OverlayEntry>| {
+    let add = |entries: &mut Vec<OverlayEntry>| {
         if !entries.iter().any(|entry| entry.dir == dir) {
             entries.push(OverlayEntry {
                 dir: dir.to_path_buf(),
