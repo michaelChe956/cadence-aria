@@ -25,8 +25,8 @@ use crate::cross_cutting::provider_health::ProviderHealthService;
 
 use super::InstallTarget;
 use super::effective_prefix::{
-    choose_effective_prefix, first_path_dir_with_command, is_writable_dir, same_dir,
-    visible_cli_prefix,
+    choose_effective_prefix, first_path_dir_with_command, is_writable_dir, prefix_bin_is_on_path,
+    same_dir, visible_cli_prefix,
 };
 use super::failure_classify::{
     InstallFailureKind, InstallFailureSignals, InstallJobFailure, classify_install_failure,
@@ -392,23 +392,27 @@ impl InstallJobExecution {
 
     /// 解析生效的 npm 前缀（安装 / 更新落到这里才真的生效）。
     ///
-    /// 顺序：PATH 上当前生效的 CLI 所在前缀 → `npm prefix -g` →
-    /// 兜底 `NPM_PREFIX` / `$HOME/.npm-global`。只取可写者。
+    /// 判定链（写死）：
+    /// ① **visible** —— PATH 上当前生效的 CLI 所在前缀，且**真实可写**；
+    /// ② **`npm prefix -g`** —— **真实可写** 且 **`<prefix>/bin ∈ PATH`**
+    ///    （装到 PATH 之外 ⇒ 装完探测仍失败 ⇒ 等于没装）；
+    /// ③ **fallback** —— `NPM_PREFIX` / `$HOME/.npm-global`。
     pub async fn resolve_effective_prefix(
         &self,
         row: &InstallSourceRow,
         path_value: Option<&str>,
     ) -> PathBuf {
         let visible = visible_cli_prefix(row.command, path_value);
-        if let Some(prefix) = visible.as_deref().filter(|prefix| is_writable_dir(prefix)) {
-            return prefix.to_path_buf();
-        }
-        // PATH 上没有该命令（或那个前缀不可写）⇒ 退到 npm 自己的全局前缀。
+        // ② `npm prefix -g`：真实可写 **且** `<prefix>/bin ∈ PATH`。
         let npm_global = match self.npm_prefix_probe.as_ref() {
             Some(probe) => probe.npm_global_prefix().await,
             None => None,
         };
-        choose_effective_prefix(None, npm_global.as_deref(), &self.npm_prefix)
+        let npm_global = npm_global.filter(|prefix| {
+            is_writable_dir(prefix) && prefix_bin_is_on_path(prefix, path_value)
+        });
+        // ① visible（真实可写）→ ② npm 全局前缀 → ③ 兜底。
+        choose_effective_prefix(visible.as_deref(), npm_global.as_deref(), &self.npm_prefix)
     }
 
     /// 单个目标的安装作业主流程（无批量入口）：执行安装 → 成功重探 +

@@ -50,6 +50,23 @@ pub fn visible_cli_prefix(command: &str, path_value: Option<&str>) -> Option<Pat
     Some(canonicalize_or_keep(&prefix))
 }
 
+/// `<prefix>/bin` 这个目录是否出现在 PATH 中（**目录成员**语义）。
+///
+/// **不得**用「命令文件是否存在」判定：`first_path_dir_with_command` 只在
+/// 命令存在时返回 `Some`，而本函数的判定场景恰恰发生在 **CLI 未装**时 ⇒
+/// 会成死代码（永远判 false ⇒ npm 全局前缀永远选不中）。
+pub fn prefix_bin_is_on_path(prefix: &Path, path_value: Option<&str>) -> bool {
+    let Some(path_value) = path_value else {
+        return false;
+    };
+    let bin = prefix.join("bin");
+    path_value
+        .split(PATH_SEPARATOR)
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .any(|dir| same_dir(&dir, &bin))
+}
+
 /// 规范化路径（软链解析）；失败时保留原路径。
 pub fn canonicalize_or_keep(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -264,6 +281,23 @@ mod tests {
             "不可写前缀必须跳过"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `<prefix>/bin` 是否在 PATH 上：**目录成员**语义（与命令文件是否
+    /// 存在无关 —— CLI 未装时正是靠它判定 npm 全局前缀能不能用）。
+    #[test]
+    fn prefix_bin_is_on_path_uses_directory_membership() {
+        let prefix = Path::new("/opt/node");
+        assert!(prefix_bin_is_on_path(
+            prefix,
+            Some("/shim:/opt/node/bin:/usr/bin")
+        ));
+        assert!(!prefix_bin_is_on_path(prefix, Some("/shim:/usr/bin")));
+        assert!(!prefix_bin_is_on_path(prefix, None));
+        assert!(
+            prefix_bin_is_on_path(prefix, Some("/opt/node/bin")),
+            "命令文件不存在也照样命中（CLI 未装时的判定场景）"
+        );
     }
 
     /// mode 说可写但真实写入失败 ⇒ 必须判不可写（注入式 seam，确定性，

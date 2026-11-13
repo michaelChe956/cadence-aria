@@ -388,7 +388,7 @@ async fn runner_installs_into_the_prefix_of_the_cli_on_path() {
 }
 
 /// 2026-11-09 bug 修复：CLI 未安装（PATH 上没有）⇒ 落到 npm 自己的
-/// 全局前缀（可写时）——那是 npm 默认会装的地方。
+/// 全局前缀（可写 **且** 其 `bin` 在 PATH 上）——那是 npm 默认会装的地方。
 #[tokio::test]
 async fn runner_falls_back_to_npm_global_prefix_when_cli_absent() {
     struct StubProbe {
@@ -404,15 +404,20 @@ async fn runner_falls_back_to_npm_global_prefix_when_cli_absent() {
 
     let root = tempdir().expect("root");
     let npm_global = root.path().join("npm-global");
-    std::fs::create_dir_all(&npm_global).expect("npm global dir");
+    std::fs::create_dir_all(npm_global.join("bin")).expect("npm global dir");
     let install_runner = ScriptedRunner::new(vec![success("added 1 package")], Duration::ZERO);
     let mut execution = execution(
         root.path(),
         install_runner.clone(),
         SpyProber::new(Some("1.0.5")),
     );
-    // PATH 上没有 codex（未安装）。
-    execution.path_value = Some(root.path().join("empty-bin").to_string_lossy().into_owned());
+    // PATH 上没有 codex（未安装），但 npm 全局前缀的 bin **在** PATH 上 ⇒
+    // 判定链 ② 命中（装到 PATH 上才算真装上）。
+    execution.path_value = Some(format!(
+        "{}:{}",
+        root.path().join("empty-bin").display(),
+        npm_global.join("bin").display()
+    ));
     execution.npm_prefix = root.path().join("fallback");
     std::fs::create_dir_all(&execution.npm_prefix).expect("fallback dir");
     execution.npm_prefix_probe = Some(Arc::new(StubProbe {
