@@ -106,6 +106,10 @@ pub struct CoveragePaths {
     pub bundled_nodes: Vec<PathBuf>,
     /// node 候选2：PATH 上的 node 可执行（需版本 ≥ 22.5 才采用）。
     pub path_node: Option<PathBuf>,
+    /// node 候选3 的来源：宿主 HOME（`~/.codegraph/bundles/<target>-<ver>/` 是
+    /// codegraph 的**自愈缓存**布局）。`None` ⇒ 不扫缓存（测试默认关闭，
+    /// 否则会读到开发机真实缓存）。
+    pub home_dir: Option<PathBuf>,
 }
 
 impl CoveragePaths {
@@ -125,6 +129,9 @@ impl CoveragePaths {
             codegraph_executable: find_executable_in_path("codegraph"),
             bundled_nodes: Vec::new(),
             path_node: find_executable_in_path("node"),
+            home_dir: std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
         }
     }
 }
@@ -225,7 +232,25 @@ impl AggregateCoverageProbe for CodeGraphCoverage {
                  命中）；可手动安装：npm install -g {CODEGRAPH_NPM_PACKAGE}"
             ),
         })?;
-        let node = resolve_node_executable(&paths, &sdk_path, &self.runner)?;
+        // 方案 §五 包 4「回退保底」：**Node 不可用不得阻断聚合验收** ——
+        // 归入 operation 既有的「SDK 覆盖验收不可用 ⇒ 回退 CLI files」分支
+        // （保留 64 MiB 上限与专用截断码），而不是直接失败。
+        let node =
+            resolve_node_executable(&paths, &sdk_path, &self.runner).map_err(
+                |error| match error {
+                    AggregateIndexError::Failed { code, message }
+                        if code == "codegraph_node_unavailable" =>
+                    {
+                        AggregateIndexError::Failed {
+                            code: "codegraph_sdk_incompatible",
+                            message: format!(
+                                "{message}（SDK 覆盖验收不可用，已回退 CLI files 验收路径）"
+                            ),
+                        }
+                    }
+                    other => other,
+                },
+            )?;
         let helper_path = write_helper_file(&self.helper_source, self.scratch_dir.as_deref())?;
         let result = self.run_helper(&node, &helper_path, &sdk_path, root, member_names);
         let _ = std::fs::remove_file(&helper_path);
@@ -351,7 +376,7 @@ pub fn resolve_node_executable(
 ) -> Result<PathBuf, AggregateIndexError> {
     let mut bundled = paths.bundled_nodes.clone();
     if bundled.is_empty() {
-        bundled = bundled_node_candidates(sdk_path);
+        bundled = bundled_node_candidates(sdk_path, paths.home_dir.as_deref());
     }
     for candidate in &bundled {
         if is_executable_file(candidate) {
@@ -375,26 +400,117 @@ pub fn resolve_node_executable(
     })
 }
 
-/// SDK 包根下自带 node 候选：`node_modules/@colbymchenry/codegraph-*/node`
-/// （目录名按平台包命名通配，排序保证确定性）。
-fn bundled_node_candidates(sdk_path: &Path) -> Vec<PathBuf> {
+/// `@colbymchenry` 作用域目录名。
+const CODEGRAPH_NPM_SCOPE: &str = "@colbymchenry";
+
+/// 平台包目录名的后缀 `<platform>-<arch>`（npm `os`/`cpu` 口径：`linux-x64`
+/// / `darwin-arm64` / `win32-x64`；`std::env::consts` 的 `macos`/`x86_64`
+/// 与 npm 拼写不同 ⇒ 显式映射）。
+fn codegraph_platform_target() -> String {
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    format!("{platform}-{arch}")
+}
+
+/// codegraph 自带 node 的全部候选（按采纳优先级）：
+/// ① **nested** —— `<主包>/node_modules/@colbymchenry/codegraph-<target>/node`；
+/// ② **hoisted** —— 与主包**同级**的 `<node_modules>/@colbymchenry/codegraph-<target>/node`
+///    （实测 1.6.2 真实布局：`libtest/node_modules/@colbymchenry/` 下
+///    `codegraph` 与 `codegraph-linux-x64` 并列，且 node 在平台包里）；
+/// ③ **自愈缓存** —— `~/.codegraph/bundles/<target>-<version>/node`
+///    （`npm-shim.js` 下载缓存，同平台多版本时版本高者优先）。
+///
+/// 目录名按**当前平台** `<platform>-<arch>` 匹配（不得硬编码单一平台）。
+fn bundled_node_candidates(sdk_path: &Path, home_dir: Option<&Path>) -> Vec<PathBuf> {
     let Some(package_root) = sdk_path.parent() else {
         return Vec::new();
     };
-    let scoped = package_root.join("node_modules").join("@colbymchenry");
-    let Ok(entries) = std::fs::read_dir(&scoped) else {
+    let target = codegraph_platform_target();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    // ① 主包内 node_modules（nested 布局）。
+    candidates.extend(platform_package_nodes(
+        &package_root.join("node_modules").join(CODEGRAPH_NPM_SCOPE),
+        &target,
+    ));
+    // ② 每一层上层 `node_modules/@colbymchenry`（hoisted 布局 —— 真实资产）。
+    for ancestor in package_root.ancestors().skip(1) {
+        if ancestor
+            .file_name()
+            .is_some_and(|name| name == "node_modules")
+        {
+            candidates.extend(platform_package_nodes(
+                &ancestor.join(CODEGRAPH_NPM_SCOPE),
+                &target,
+            ));
+        }
+    }
+    // ③ 自愈缓存。
+    if let Some(home) = home_dir {
+        candidates.extend(cached_bundle_nodes(home, &target));
+    }
+    candidates
+}
+
+/// 作用域目录里与主包同级的平台包自带 node：**当前平台优先**，其余
+/// `codegraph-*` 兜底（排序保证确定性）。
+fn platform_package_nodes(scoped: &Path, target: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(scoped) else {
         return Vec::new();
     };
-    let mut candidates: Vec<(String, PathBuf)> = entries
+    let exact = format!("codegraph-{target}");
+    let mut names: Vec<String> = entries
         .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().into_string().ok()?;
-            name.starts_with("codegraph-")
-                .then(|| (name, entry.path().join(node_executable_name())))
-        })
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with("codegraph-"))
         .collect();
-    candidates.sort();
-    candidates.into_iter().map(|(_, node)| node).collect()
+    names.sort();
+    names.sort_by_key(|name| *name != exact);
+    names
+        .into_iter()
+        .map(|name| scoped.join(name).join(node_executable_name()))
+        .collect()
+}
+
+/// 自愈缓存里的自带 node：`<home>/.codegraph/bundles/<target>-<version>/node`
+/// （同平台多版本 ⇒ 版本高者优先）。
+fn cached_bundle_nodes(home: &Path, target: &str) -> Vec<PathBuf> {
+    let bundles = home.join(".codegraph").join("bundles");
+    let Ok(entries) = std::fs::read_dir(&bundles) else {
+        return Vec::new();
+    };
+    let prefix = format!("{target}-");
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.starts_with(&prefix))
+        .collect();
+    names.sort_by(|left, right| {
+        version_key(right)
+            .cmp(&version_key(left))
+            .then_with(|| right.cmp(left))
+    });
+    names
+        .into_iter()
+        .map(|name| bundles.join(name).join(node_executable_name()))
+        .collect()
+}
+
+/// 目录名 `<target>-<version>` ⇒ 版本数字段（不可解析段记 0）。
+fn version_key(name: &str) -> Vec<u64> {
+    name.rsplit('-')
+        .next()
+        .unwrap_or_default()
+        .split('.')
+        .map(|part| part.parse::<u64>().unwrap_or(0))
+        .collect()
 }
 
 fn node_executable_name() -> &'static str {
@@ -677,6 +793,7 @@ mod tests {
                 codegraph_executable: None,
                 bundled_nodes: vec![self.node.clone()],
                 path_node: None,
+                home_dir: None,
             }
         }
 
@@ -952,6 +1069,152 @@ mod tests {
         assert_eq!(
             resolve_sdk_path(&paths).as_deref(),
             Some(expected.as_path())
+        );
+    }
+
+    // ---- F6：自带 node 的三种受支持布局（实测 codegraph 1.6.2 真实资产） ----
+
+    /// 造一份 SDK 包根（`<root>/lib/node_modules/@colbymchenry/codegraph`）
+    /// 并返回（包根, `npm-sdk.js`）。
+    fn sdk_package_dir(root: &Path) -> (PathBuf, PathBuf) {
+        let package_root = root
+            .join("lib")
+            .join("node_modules")
+            .join("@colbymchenry")
+            .join("codegraph");
+        std::fs::create_dir_all(&package_root).unwrap();
+        let sdk = package_root.join("npm-sdk.js");
+        std::fs::write(&sdk, "module.exports = {};").unwrap();
+        (package_root, sdk)
+    }
+
+    fn platform_dir_name() -> String {
+        format!("codegraph-{}", codegraph_platform_target())
+    }
+
+    fn executable_under(dir: &Path, name: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        executable_file(&dir.join(name))
+    }
+
+    /// ① nested：`<主包>/node_modules/@colbymchenry/codegraph-<target>/node`。
+    #[test]
+    fn bundled_node_resolves_nested_platform_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let (package_root, sdk) = sdk_package_dir(temp.path());
+        let nested = executable_under(
+            &package_root
+                .join("node_modules")
+                .join("@colbymchenry")
+                .join(platform_dir_name()),
+            &node_executable_name(),
+        );
+
+        let candidates = bundled_node_candidates(&sdk, None);
+
+        assert!(
+            candidates.contains(&nested),
+            "nested 布局必须命中：{candidates:?}"
+        );
+    }
+
+    /// ② hoisted：平台包与主包**同级**（真实 1.6.2 布局，
+    /// `/tmp/codegraph-ref/libtest/node_modules/@colbymchenry/{codegraph,codegraph-linux-x64}`）。
+    #[test]
+    fn bundled_node_resolves_hoisted_platform_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let (package_root, sdk) = sdk_package_dir(temp.path());
+        let scope = package_root.parent().expect("scope dir");
+        let hoisted = executable_under(&scope.join(platform_dir_name()), &node_executable_name());
+
+        let candidates = bundled_node_candidates(&sdk, None);
+
+        assert!(
+            candidates.contains(&hoisted),
+            "hoisted（与主包同级）布局必须命中：{candidates:?}"
+        );
+    }
+
+    /// ③ 自愈缓存：`~/.codegraph/bundles/<target>-<version>/node`。
+    #[test]
+    fn bundled_node_resolves_self_heal_cache_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let (_, sdk) = sdk_package_dir(&temp.path().join("prefix"));
+        let home = temp.path().join("home");
+        let cached = executable_under(
+            &home
+                .join(".codegraph")
+                .join("bundles")
+                .join(format!("{}-1.6.2", codegraph_platform_target())),
+            &node_executable_name(),
+        );
+
+        let candidates = bundled_node_candidates(&sdk, Some(&home));
+
+        assert!(
+            candidates.contains(&cached),
+            "自愈缓存布局必须命中：{candidates:?}"
+        );
+    }
+
+    /// PATH 上有旧 node（< 22.5）但**自带 node 可用** ⇒ 必须用自带 node，
+    /// 不得因 PATH node 太旧而判 node 不可用。
+    #[test]
+    fn coverage_prefers_bundled_node_over_outdated_path_node() {
+        let fixture = coverage_fixture();
+        let (package_root, sdk) = sdk_package_dir(&fixture._temp.path().join("prefix"));
+        let scope = package_root.parent().expect("scope dir");
+        let bundled = executable_under(&scope.join(platform_dir_name()), &node_executable_name());
+        let path_node = executable_file(&fixture._temp.path().join("path-node"));
+        let paths = CoveragePaths {
+            install_prefix_sdk: Some(sdk.clone()),
+            bundled_nodes: Vec::new(),
+            path_node: Some(path_node),
+            ..CoveragePaths::default()
+        };
+        fixture.runner.node_version("v18.20.0");
+
+        let resolved = resolve_node_executable(&paths, &sdk, &fixture.runner_handle()).unwrap();
+
+        assert_eq!(
+            resolved, bundled,
+            "自带 node 可用时不得回落（更不得因 PATH node 太旧而判不可用）"
+        );
+        assert!(
+            fixture.runner.requests().is_empty(),
+            "自带 node 命中时不得探测 PATH node"
+        );
+    }
+
+    /// `node_unavailable` **不得阻断聚合验收**：按方案 §五 包 4「回退保底」，
+    /// SDK/Node 不可用必须回退既有 CLI files 验收（保留 64 MiB 上限与专用
+    /// 截断码），而不是直接失败。
+    #[test]
+    fn coverage_falls_back_to_cli_when_node_is_unavailable() {
+        let fixture = coverage_fixture();
+        let coverage = CodeGraphCoverage::with_paths(
+            fixture.runner.clone(),
+            CoveragePaths {
+                install_prefix_sdk: Some(fixture.sdk.clone()),
+                bundled_nodes: Vec::new(),
+                path_node: None,
+                ..CoveragePaths::default()
+            },
+            Some(fixture.scratch.clone()),
+        );
+
+        let error = coverage
+            .coverage(&fixture.root, &fixture.members())
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, AggregateIndexError::Failed { code, .. }
+                if *code == "codegraph_sdk_incompatible"),
+            "node 不可用必须回退既有 CLI 验收（不得阻断），got: {error}"
+        );
+        assert!(
+            error.to_string().contains("22.5"),
+            "回退痕迹必须保留 Node.js ≥ 22.5 的诊断，got: {error}"
         );
     }
 }
