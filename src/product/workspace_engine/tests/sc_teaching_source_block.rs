@@ -11,7 +11,7 @@
 
 use sha2::Digest as _;
 
-use super::{render_sc_previous_source_block, ScTeachingSourceMetadata};
+use super::{ScTeachingSourceMetadata, render_sc_previous_source_block};
 use crate::web::workspace_ws_types::ScTeachingSourceOrigin;
 
 const INVALID_EVIDENCE_CODE: &str = "sc_failure_evidence_invalid";
@@ -188,15 +188,24 @@ fn tampered_hash_or_bytes_is_rejected_with_stable_evidence_code() {
 fn renders_for_all_three_source_origins_with_frozen_wire_names() {
     let source = "结构修订来源的中文源码。\n";
     let cases = [
-        (ScTeachingSourceOrigin::CompileSplitOutput, "compile_split_output"),
+        (
+            ScTeachingSourceOrigin::CompileSplitOutput,
+            "compile_split_output",
+        ),
         (
             ScTeachingSourceOrigin::IrPreflightSplitOutput,
             "ir_preflight_split_output",
         ),
-        (ScTeachingSourceOrigin::StructureRevision, "structure_revision"),
+        (
+            ScTeachingSourceOrigin::StructureRevision,
+            "structure_revision",
+        ),
     ];
     for (origin, wire) in cases {
-        assert_eq!(serde_json::to_string(&origin).unwrap(), format!("\"{wire}\""));
+        assert_eq!(
+            serde_json::to_string(&origin).unwrap(),
+            format!("\"{wire}\"")
+        );
         assert_round_trip(source, origin);
     }
 }

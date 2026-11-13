@@ -212,6 +212,9 @@ pub(crate) use plan_repair_validation::*;
 pub(crate) use prompts::*;
 #[cfg(test)]
 pub(crate) use review::{ReviewCompletionError, fallback_review_verdict};
+pub(crate) use sc_teaching_source_block::{
+    ScTeachingPromptError, ScTeachingSourceMetadata, render_sc_previous_source_block,
+};
 pub(crate) use session_state::*;
 pub(crate) use single_candidate::{
     SingleCandidateAuthorCompletion, SingleCandidateGenerationDecisionInput,
