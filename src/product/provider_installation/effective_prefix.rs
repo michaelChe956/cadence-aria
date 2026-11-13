@@ -67,6 +67,33 @@ pub fn prefix_bin_is_on_path(prefix: &Path, path_value: Option<&str>) -> bool {
         .any(|dir| same_dir(&dir, &bin))
 }
 
+/// npm 全局包里**已安装包**的目录（`<prefix>/lib/node_modules/<pkg>`）。
+pub fn npm_package_dir(prefix: &Path, package: &str) -> PathBuf {
+    prefix.join("lib").join("node_modules").join(package)
+}
+
+/// 从**包 / 二进制的真实路径**反推 npm 前缀（magpie `fromNodeModules`：
+/// `/node_modules/<pkg>/` ⇒ 其 `lib` 目录的父目录即 prefix；
+/// `internal/agent/cliupdate.go` #L400-L466）。
+///
+/// 更新语义（2.10②）：对象已安装但**不在 PATH 上**时，更新必须装回它所在
+/// 的前缀，不得改装到别处（否则「更新装到 A、用户跑的还是 B」）。
+pub fn npm_prefix_from_real_path(path: &Path) -> Option<PathBuf> {
+    let mut current = Some(path);
+    while let Some(dir) = current {
+        if dir.file_name().is_some_and(|name| name == "node_modules") {
+            let owner = dir.parent()?;
+            return if owner.file_name().is_some_and(|name| name == "lib") {
+                owner.parent().map(Path::to_path_buf)
+            } else {
+                Some(owner.to_path_buf())
+            };
+        }
+        current = dir.parent();
+    }
+    None
+}
+
 /// 规范化路径（软链解析）；失败时保留原路径。
 pub fn canonicalize_or_keep(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())

@@ -26,8 +26,8 @@ use crate::cross_cutting::provider_health::ProviderHealthService;
 
 use super::InstallTarget;
 use super::effective_prefix::{
-    choose_effective_prefix, first_path_dir_with_command, is_writable_dir, prefix_bin_is_on_path,
-    same_dir, visible_cli_prefix,
+    choose_effective_prefix, first_path_dir_with_command, is_writable_dir, npm_package_dir,
+    npm_prefix_from_real_path, prefix_bin_is_on_path, same_dir, visible_cli_prefix,
 };
 use super::failure_classify::{
     InstallFailureKind, InstallFailureSignals, InstallJobFailure, classify_install_failure,
@@ -643,6 +643,29 @@ impl InstallJobExecution {
         }
     }
 
+    /// 已安装（但**不在 PATH 上**）的对象所在前缀：从
+    /// `<prefix>/lib/node_modules/<pkg>` 的真实路径反推（magpie
+    /// `fromNodeModules`）。更新必须装回这里，不得改装到别的前缀（2.10②）。
+    fn installed_prefix(
+        &self,
+        row: &InstallSourceRow,
+        npm_global: Option<&Path>,
+    ) -> Option<PathBuf> {
+        let package = row.npm_package?;
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Some(prefix) = npm_global {
+            candidates.push(prefix.to_path_buf());
+        }
+        candidates.push(self.npm_prefix.clone());
+        for candidate in candidates {
+            let package_dir = npm_package_dir(&candidate, package);
+            if package_dir.exists() {
+                return npm_prefix_from_real_path(&package_dir);
+            }
+        }
+        None
+    }
+
     /// 宿主 HOME（脚本类安装源落点；测试可注入）。
     fn home_dir(&self) -> Option<PathBuf> {
         self.home_dir
@@ -677,7 +700,12 @@ impl InstallJobExecution {
         };
         let npm_global = npm_global
             .filter(|prefix| is_writable_dir(prefix) && prefix_bin_is_on_path(prefix, path_value));
-        // ① visible（真实可写）→ ② npm 全局前缀 → ③ 兜底。
+        // ② 已安装但**不在 PATH 上** ⇒ 从已安装包的真实路径反推前缀
+        // （2.10：更新必须装回被更新对象所在的前缀，不得改装到别处）。
+        if let Some(prefix) = self.installed_prefix(row, npm_global.as_deref()) {
+            return prefix;
+        }
+        // ① visible（真实可写）→ ② 已安装位置 → ③ npm 全局前缀 → ④ 兜底。
         choose_effective_prefix(visible.as_deref(), npm_global.as_deref(), &self.npm_prefix)
     }
 
@@ -782,6 +810,13 @@ impl InstallJobExecution {
             // row_for_wire 已放行 ⇒ 这里必然可达，防御性兜底。
             return;
         };
+        // 更新语义（2.10③）：对象**已存在**（package.json 在 ⇒ 已装）⇒ 本次
+        // 是「更新」⇒ 先取当前版本（读 package.json，不执行进程）；更新后
+        // 版本未变要**明确报**「命令仍是旧版」，不得静默成功。
+        let before_version = match row.npm_package {
+            Some(package) => npm_package_json_version(&prefix, package),
+            None => None,
+        };
         match self.runner.execute(&plan).await {
             Ok(result) if result.exit_code == Some(0) && !result.timed_out && !result.cancelled => {
                 // 装后登记 overlay（**仅当**目录里确实有刚装好的可执行文件）
@@ -802,6 +837,22 @@ impl InstallJobExecution {
                 let detected = probe
                     .as_ref()
                     .and_then(|outcome| outcome.installed_version.clone());
+                // ③ 更新后版本未变 ⇒ 明确报「命令仍是旧版」（不得静默成功）。
+                if let (Some(before), Some(after)) =
+                    (before_version.as_deref(), detected.as_deref())
+                    && before == after
+                {
+                    let repair = install_repair_command(row, &self.registry, &prefix);
+                    let failure = InstallJobFailure {
+                        kind: InstallFailureKind::Other,
+                        message: format!(
+                            "命令仍是旧版（{after}）：更新没有生效。若该版本已是最新可忽略；否则请手动运行：{repair}"
+                        ),
+                        manual_command: repair,
+                    };
+                    let _ = self.store.fail(job_id, failure, self.clock.now());
+                    return;
+                }
                 let path_hint = self.path_hint_for(
                     row,
                     &prefix,

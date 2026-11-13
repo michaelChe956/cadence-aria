@@ -140,7 +140,9 @@ fn execution(
         prober,
         registry: REGISTRY.to_string(),
         npm_prefix: PathBuf::from("/home/dev/.npm-global"),
-        path_value: None,
+        // 默认隔离：不让宿主 PATH 上的**真实** CLI 参与前缀判定（否则用例
+        // 结果随开发机装了什么而变，且会往 overlay 登记真实目录）。
+        path_value: Some(root.join("empty-bin").to_string_lossy().into_owned()),
         npm_prefix_probe: None,
         home_dir: None,
         clock: Arc::new(FixedClock),
@@ -294,7 +296,7 @@ async fn runner_install_job_completes_with_refresh_and_path_hint() {
     // `<prefix>/bin` 的那一支由下方 `npm_path_hint` 单测（受控
     // PATH）确定性覆盖。
     let command_on_path =
-        first_path_dir_with_command("codex", std::env::var("PATH").ok().as_deref()).is_some();
+        first_path_dir_with_command("codex", execution.path_value.as_deref()).is_some();
     if command_on_path {
         assert!(
             outcome.path_hint.is_none(),
