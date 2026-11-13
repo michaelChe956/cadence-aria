@@ -2,7 +2,7 @@
 
 > 依据：`cadence/plans/2026-11-13_计划文档_修复Provider安装无效果与聚合索引截断_v1.0.md`（`c2929b02` / `d06c1d16` / `8b9012c9`）；owner 决策见 `.openspec.yaml` 的 `x-owner-decisions`（D1/D2/D4 + magpie 澄清）。
 > 本文件是 OpenSpec 层的**架构边界与权衡记录**：决策 / 理由 / 代价。契约文本见 `specs/**/spec.md`，工作包见 `tasks.md`。
-> **本 change 只立项契约，不实施** —— 记录的是**待批准的设计决策**，不是已完成实现。
+> **实施状态（2026-11-13）**：契约已获批并**已实施**；本文件记录的是**已落地的决策与取舍**，各决策的「实现落点」给出仓库内位置（未闭环项见 `tasks.md` 的实施状态对照）。
 
 ## 0. 分层边界（先划清谁负责什么）
 
@@ -22,12 +22,14 @@
 | capability | delta 条目 | 性质 |
 |---|---|---|
 | `provider-cli-installation` | MODIFIED REQ-PCI-02 | 「探针结果」口径由「宿主 PATH」扩展为「宿主 PATH ∪ 平台登记目录（平台自身命令可见 PATH）」；既有正文与既有场景逐字保留，只补两条场景 |
-| `provider-cli-installation` | MODIFIED REQ-PCI-03 | 「可写前缀」的「可写」由权限位判定改为**真实写入探测**；既有正文与既有场景逐字保留，只补三条场景 |
-| `provider-cli-installation` | MODIFIED REQ-PCI-05 | 装后重新探测的判定口径（平台可见即判成功）、安装提示句原样呈现、Kimi 安装目录可被平台识别；既有正文与既有场景逐字保留，只补三条场景 |
+| `provider-cli-installation` | MODIFIED REQ-PCI-03 | 「可写前缀」的「可写」由权限位判定改为**真实写入探测**；既有正文与既有场景逐字保留，只补三条场景（安装参数形态按实施口径补 `--allow-scripts=<pkg>` 与 `--include=optional` 重试） |
+| `provider-cli-installation` | MODIFIED REQ-PCI-05 | 装后重新探测的判定口径（平台可见即判成功）、安装提示句原样呈现、Kimi 安装目录可被平台识别；装后验证补「三重验证 + 绝对路径兜底探测」；既有正文与既有场景逐字保留，其余只做增补 |
 | `provider-cli-installation` | ADDED REQ-PCI-08 | **新增**：「装了但不在终端 PATH 上」的显式状态（编号延续既有序列，既有为 REQ-PCI-01 … REQ-PCI-07） |
-| `provider-cli-installation` | ADDED REQ-PCI-09 | **新增**：更新落点必须与被更新对象当前所在的前缀一致（已在 PATH 上 ⇒ 装回同一前缀；已安装但不在 PATH 上 ⇒ 从二进制真实路径反推 npm 前缀，不得改装到别的前缀） |
+| `provider-cli-installation` | ADDED REQ-PCI-09 | **新增**：更新落点必须与被更新对象当前所在的前缀一致（已在 PATH 上 ⇒ 装回同一前缀；已安装但不在 PATH 上 ⇒ 从已安装包真实路径反推 npm 前缀，不得改装到别的前缀） |
 | `provider-cli-installation` | ADDED REQ-PCI-10 | **新增**：更新后版本未变须明确报告「命令仍是旧版」（不得静默成功）；Kimi 更新沿用官方脚本原地替换并经装后验证 |
-| `logical-codebase-aggregate-index` | MODIFIED REQ-IND-01 | 专用抓取配额（64 MiB）+ 专用截断码 `codegraph_files_output_truncated`；既有正文与既有场景逐字保留，只补「专用配额 / 专用截断码 / 截断判定先于解析 / 配额不扩散 / 文件清单调用不带额外旗标」相关场景 |
+| `provider-cli-installation` | ADDED REQ-PCI-11 | **新增**：**用户显式触发**的「暴露到终端 PATH」动作 —— 不改 shell 配置文件，只在「已存在 + 真实可写 + 确实在终端 PATH 上」的目录里建单个软链，失败如实报告 |
+| `logical-codebase-aggregate-index` | MODIFIED REQ-IND-01 | 专用抓取配额（64 MiB）+ 专用截断码 `codegraph_files_output_truncated`；**成员覆盖验收改走 codegraph 库 API**（逐成员目录级查询，不依赖全量文件清单）；既有正文与既有场景逐字保留（成员覆盖条款按实施口径更新），只做增补 |
+| `logical-codebase-aggregate-index` | MODIFIED REQ-IND-01（场景） | 新增「库 API 逐成员查询 / 目录边界 / 排除性查询不动 / 回退留痕 / 回退非常规 / 健康闸只告警 / 回退路径仍受专用配额与专用截断码」相关场景 |
 | `logical-codebase-aggregate-index` | MODIFIED REQ-IND-04 | 截断属构建失败路径 ⇒ 保留 last-known-good 并标 degraded、不伪造 active；既有正文与既有场景逐字保留，只补两条场景 |
 | `logical-codebase-aggregate-index` | MODIFIED REQ-IND-05 | **正文语义不改**（致命 / 降级分界不动），只补一条场景把既有分界钉死：截断码不是工具缺失码、不进入致命匹配集 |
 
@@ -170,12 +172,12 @@
 
 **决定**：
 1. `path_hint` **原样渲染**（整句逐字呈现，不二次包裹）；后端文案缺失时不渲染该节点；前端类型注释随包 2 的后端文案一并更正（`path_hint` 是完整句子，不是「提示目录」）。
-2. 新增**显式状态**：安装目标视图增加 `off_path` 标志 —— 「平台能找到该 CLI，但它的 bin 目录不在登录 shell PATH 上」时为真，界面显式呈现该状态。
-3. **本轮只加状态与文案，不自动改用户 shell profile**（不创建 symlink、不写 `.bashrc` / `.zshrc`）。
+2. 新增**显式状态**：安装目标视图增加 `off_path` 标志 —— 「平台能找到该 CLI，但它的 bin 目录不在登录 shell PATH 上」时为真，界面显式呈现该状态。（**实施状态**：后端安装目标视图尚未落地该字段，待办见 `tasks.md` 实施状态对照；用户终端 PATH 快照与「暴露到终端 PATH」动作已就位。）
+3. **本轮只加状态与文案，不自动改用户 shell profile**（不自动创建 symlink、不写 `.bashrc` / `.zshrc`）；用户**显式触发**的「暴露到终端 PATH」动作见决策 12。
 
 **理由**：显式状态让「平台可用 / 终端不可见」这件事在产品里说清楚，替代「一句提示」；自动改 shell profile 属于越界副作用（且用户未必想要）。
 
-**代价**：用户仍需自行把目录加入终端 PATH（文案给出可复制内容）。
+**代价**：用户仍需自行把目录加入终端 PATH（文案给出可复制内容），或显式点【暴露到终端 PATH】让平台建单个软链（决策 12）。
 
 ## 决策 10：更新语义 —— **落点必须与被更新对象一致**，更新后版本未变必须显式报告
 
@@ -194,6 +196,73 @@
 
 **代价**：反推前缀需要从已解析出的二进制真实路径推导包前缀（新增一处推导逻辑，且推导失败时必须显式报错而不是回退到「随便选个前缀」）；版本未变的判定需要保留更新前的版本快照用于比对。
 
+### 实现边界（决策 10）
+
+| 边界 | 口径 |
+|---|---|
+| 落点反推 | 「已安装但不在 PATH 上」的反推口径 = 从**已安装包的真实路径**反推（`<prefix>/lib/node_modules/<pkg>` ⇒ 其 `lib` 目录的父目录即该前缀）；候选来自 npm 全局前缀与平台自身前缀，MUST NOT 靠「命令是否在 PATH 上」猜 |
+| 反推失败 | MUST 显式报错并给出可行动诊断，MUST NOT 静默改装到别的前缀 |
+| 版本比对 | 更新**前**先读该前缀下包的 `package.json` 取版本快照（不执行进程），更新**后**再取一次；两次相同 ⇒ 报「命令仍是旧版」并给可复制的修复命令，作业判失败（不得静默成功） |
+| Kimi 更新 | 走官方脚本原地替换，不进 npm 路径；更新后同样经装后三重验证 |
+| 实现落点 | `src/product/provider_installation/effective_prefix.rs`（`npm_prefix_from_real_path` / `prefix_bin_is_on_path` / `is_writable_dir`）、`src/product/provider_installation/runner.rs`（`resolve_effective_prefix` / `installed_prefix` / 版本快照与「仍是旧版」判定） |
+
+## 决策 11：聚合索引成员覆盖验收改走 **codegraph 库 API（SDK）**
+
+**背景**：成员覆盖验收要回答的是「每个登记成员目录**有没有**被索引的文件」，而原做法是让 codegraph 吐出**整个仓库的文件清单**（`codegraph files --json`）再全量读进内存。载荷与仓库规模**线性相关**（每文件约 110~200 B；`codegraph.db` : JSON ≈ **13 : 1**）⇒ 用户现场 **3.1 GB 索引 ⇒ 清单约 230 MB**，抓取上限（1 MiB / 64 MiB）**无论如何都装不下** ⇒ 验收必失败（现场报 `codegraph_files_invalid_json`）。**索引本身是好的，只是平台读不出来、因此不承认它。**
+
+**决定**：
+
+1. **逐成员目录级查询**：成员覆盖判定改走 codegraph **库 API** —— `CodeGraph.open(root)` 后逐成员 `hasFilesUnder(member)`，直接回答是/否，载荷是**成员级布尔事实**（几百字节量级）。
+2. **目录边界精确**：`hasFilesUnder` 是**目录语义**（`member-al` 对 `member-alpha` 返回 false），优于 CLI 清单路径的裸前缀匹配。
+3. **Node helper + codegraph 自带 Node**：库 API 是 npm 包的 CJS 入口（`npm-sdk.js`），普通脚本无法直接 import ⇒ helper 按**绝对路径** `import(<npm-sdk.js>)` 并做 CJS interop（`mod.default ?? mod` 取 `CodeGraph`）。helper 源码以 `include_str!` 内嵌随源码走，运行时落唯一临时文件、执行后清理（超时 60s；stdout 上限 1 MiB / stderr 上限 64 KiB）。
+   - **Node 解析顺序**：codegraph **平台包自带的 node** 优先（⇒ 不要求用户装 Node）→ 回退 PATH 上的 node，且实测版本 ≥ **22.5** 才采用。
+   - **SDK 路径解析顺序**：① 平台自身安装前缀（npm 标准布局）→ ② `npm root -g` 探针（10s / 4096 B）→ ③ 从 `codegraph` 可执行真实路径反推包根。
+4. **回退保底**：SDK 找不到（`codegraph_sdk_not_found`）或与受支持版本不兼容（`codegraph_sdk_incompatible`）⇒ 回退既有 CLI 文件清单路径（**保留** 64 MiB 专用配额与 `codegraph_files_output_truncated` 专用截断码），并在索引激活记录上留**可审计 warning**。回退**不是**常规路径。
+5. **健康闸只告警不阻断**：`index.stale` / `index.pending > 0` / `index.state` 异常 / `stats.fileCount == 0` ⇒ 记 warning（随激活记录留存），MUST NOT 单独阻断激活（保持既有「不因健康问题阻断」的语义）；未知 state 值也计入信号 —— 宁可多一条可审计告警也不静默。
+6. **排除性查询不动**：非成员目录 / `.worktrees` / `.aria` / 构建产物未被索引的负查询**保持既有 CLI `query --json` 路径**（载荷小，MUST NOT 一并改走库 API）。
+
+**取舍**：
+
+| 维度 | 取舍 |
+|---|---|
+| 依赖 SDK 的**目录级查询**能力 | SDK 不含 `hasFilesUnder` ⇒ 直接判不兼容并回退，MUST NOT 自己做「拼路径前缀」的猜测式降级 |
+| **版本区间锁定** | 库 API 的可用性绑定 codegraph 受支持区间（`>=1.6.0, <2.0.0`，语义 `^1.6`）；区间外由既有版本门先行判 `codegraph_version_mismatch`，不进入本路径 |
+| **回退保底** | SDK 路径失败不拖垮索引构建 —— 退回旧路径（小仓照常工作）；代价是大仓仍会撞 64 MiB 截断，以**专用码**如实报告，MUST NOT 伪装成协议不符 |
+| 代价 | 新增一条 Node 子进程通道（helper）+ 临时文件生命周期管理；helper 失败事实以专用码区分（`codegraph_sdk_not_found` / `codegraph_node_unavailable` / `codegraph_coverage_failed` / `codegraph_sdk_incompatible`） |
+
+**实现落点**：
+
+| 位置 | 内容 |
+|---|---|
+| `src/product/logical_codebase/aggregate_index/codegraph_coverage.rs` | 覆盖探针 trait / 生产实现、SDK 与 node 解析、helper 落盘与清理、输出解析 |
+| `src/product/logical_codebase/aggregate_index/codegraph_coverage_helper.mjs` | Node helper（`CodeGraph.open` + 逐成员 `hasFilesUnder` + 健康字段） |
+| `src/product/logical_codebase/aggregate_index/operation.rs` | 验收编排：库 API 优先 → 回退 CLI 清单 → 健康闸 warning → 排除性查询（保持 CLI） |
+| `src/product/logical_codebase/failure_copy_table.inc.rs` | 四个新失败码的用户文案 |
+
+## 决策 12：「暴露到终端 PATH」是**用户显式触发**的单个软链，不是自动改 shell
+
+**背景**：PATH overlay 只让**平台自己**看见新装的 CLI；用户的终端（Terminal / VS Code 终端）有自己那套 PATH（由 `.zshrc` 等决定）⇒ 用户在自己终端里敲 `claude` 仍可能 `command not found` ⇒ 依然会觉得「装了没用」。
+
+**决定**（契约见 REQ-PCI-11）：
+
+1. **只做显式动作**：用户点击【暴露到终端 PATH】才动作；平台 MUST NOT 自动创建软链、MUST NOT 写 `.bashrc` / `.zshrc` / 等价文件、MUST NOT 改写 PATH 环境变量。
+2. **候选目录准入三条件**：① 该目录**确实在登录 shell PATH 上**（目录成员语义）；② 目录存在且**真实可写**（复用决策 4 的「mode 预筛 + 写入探测」）；③ 目录内无同名残留（同名且已指向同一目标 ⇒ 视为已暴露、直接成功；同名但指向别处 ⇒ 跳过该目录，**不覆盖用户文件**）。
+3. **动作 = 建单个软链** `<dir>/<command>` → 已安装二进制；只建这一个。
+4. **事后重验**：软链建好后重验「目录仍在登录 shell PATH 上」且「软链可解析到目标」；失败 ⇒ 只清理**本次新建**的软链（不动用户其它文件）并如实报错。
+5. **失败如实报告**：全部候选不合格 ⇒ 汇总各候选的不合格原因；未安装对象 ⇒ 明确拒绝；Windows 本轮不支持 ⇒ 明确报错，不静默降级。
+
+**理由**：自动改用户 shell profile 属越界副作用；「显式动作 + 严格准入 + 事后重验」把「用户终端能不能直接跑」从一句提示变成**可验证的事实**。
+
+**代价**：用户仍需点一次按钮；用户终端 PATH 取不到（服务启动 ≤2s 内或探测失败）时无法证明任何目录「在终端 PATH 上」⇒ 明确让用户稍后重试，不瞎猜。
+
+**实现落点**：
+
+| 位置 | 内容 |
+|---|---|
+| `src/product/provider_installation/expose.rs` | seam 核心（候选准入 / 建软链 / 事后重验）+ 生产入口 |
+| `src/web/handlers/provider_installation.rs` | `POST /api/providers/{target}/expose` 端点与错误码 |
+| `web/src/api/provider-install.ts` + `web/src/components/lifecycle/ProviderInstallActionButton.tsx` | 前端按钮与结果 / 失败文案呈现 |
+
 ## 权衡汇总
 
 | 备选 | 结论 | 理由 |
@@ -205,7 +274,10 @@
 | 装后验证：只 `--version` vs 三重验证 | **三重** | `--version` 在 bundle 缺失时假绿 |
 | 截断：报 `codegraph_files_invalid_json` vs 专用码 | **专用码** | 截断是平台侧抓取预算事实，不是上游协议异常 |
 | 文件清单调用：带额外旗标 vs 只带 `--json` | **只带 `--json`**（owner 2026-11-13 裁决去掉额外旗标） | 实测该旗标在 `--json` 模式下载荷逐字节不变（零收益）；保留它只会引入「未来 CLI 移除该旗标 ⇒ 文件清单全线失败」的风险，得不偿失 |
-| 终端可见性：自动 symlink 暴露 vs 只加显式状态 | **只加显式状态** | 自动改用户 shell profile 属越界副作用；暴露动作是待裁决议题 |
+| 终端可见性：自动 symlink 暴露 vs 显式触发的单个软链 | **显式触发的单个软链**（决策 12） | 自动改用户 shell profile 属越界副作用；显式动作 + 严格准入 + 事后重验，把「终端能不能直接跑」变成可验证事实 |
+| 成员覆盖验收：全量 CLI 文件清单 vs 逐成员库 API 查询 | **库 API 查询**（决策 11） | 载荷几百字节 vs 现场约 230 MB；后者任何抓取上限都装不下 ⇒ 验收必失败 |
+| 库 API 不可用：直接失败 vs 回退 CLI 清单 | **回退 CLI 清单 + 可审计痕迹** | 小仓照常工作；大仓仍撞 64 MiB 截断（专用码如实报告，不伪装成协议不符） |
+| 索引健康异常：阻断激活 vs 只告警 | **只告警** | 保持既有「不因健康问题阻断」语义；未知 state 值宁可多一条可审计告警 |
 | magpie 的「不代跑安装」 | **不采纳**（owner 澄清） | 目标不变：产品内一键安装必须真的装上并能用 |
 
 ## 明确不改的部分
@@ -217,5 +289,5 @@
 | codegraph 版本门（`>=1.6.0, <2.0.0`） | 主规格 REQ-IND-01「exact version 钉定 v1.5.0」与实现的既有漂移本轮不修，归档同步时双审对齐 |
 | 致命 / 降级分界（`codegraph_missing` / `codegraph_version_mismatch`） | 不动；截断码不进入致命匹配集 |
 | git / ast-grep 的裸命令通道 | 与 provider CLI 安装无关，不扩大范围 |
-| 用户 shell profile | 本轮不自动改；「装好后暴露到终端 PATH」是待裁决议题 |
+| 用户 shell profile | 本轮不自动改；用户**显式触发**的暴露动作只建单个软链（决策 12），仍不写 `.bashrc` / `.zshrc` |
 | agent 专属环境变量注入 | 另立议题 |

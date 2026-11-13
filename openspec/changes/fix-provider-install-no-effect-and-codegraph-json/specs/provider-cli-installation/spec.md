@@ -51,7 +51,9 @@
 
 npm 安装 SHALL 默认使用阿里镜像 `https://registry.npmmirror.com`，并 SHALL 支持通过环境变量 `NPM_REGISTRY` 覆盖（供海外用户切换到官方 registry）。
 
-npm 安装命令 SHALL 采用已验证形态：全局安装、`--prefix <可写前缀>`（避开 sudo）、`--omit=optional`、`--no-audit --no-fund`。
+npm 安装命令 SHALL 采用已验证形态：全局安装、`--prefix <可写前缀>`（避开 sudo）、`--omit=optional`、`--no-audit --no-fund`、`--allow-scripts=<pkg>`（让目标包的安装脚本在受支持的 npm 版本下真正执行）。
+
+装后探测失败（装上但真实命令跑不起来）时，平台 MAY 以 `--include=optional` **重试一次**；`--include=optional` 与 `--omit=optional` 互斥，MUST NOT 在同一次调用里同时出现。
 
 **一次安装 MUST 只包含一个包**：MUST NOT 把多个包合并进同一次 `npm install -g` 调用。
 
@@ -65,7 +67,12 @@ npm 安装命令 SHALL 采用已验证形态：全局安装、`--prefix <可写�
 #### Scenario: 安装参数形态固定
 
 - **WHEN** 平台执行 npm 安装
-- **THEN** 命令 SHALL 含全局安装、`--prefix <可写前缀>`、`--omit=optional`、`--no-audit --no-fund`；MUST NOT 使用需要提权的默认全局前缀
+- **THEN** 命令 SHALL 含全局安装、`--prefix <可写前缀>`、`--omit=optional`、`--no-audit --no-fund`、`--allow-scripts=<pkg>`；MUST NOT 使用需要提权的默认全局前缀
+
+#### Scenario: 探测失败时以可选依赖重试一次
+
+- **WHEN** 首次安装完成、但装后探测失败（装上但真实命令跑不起来）
+- **THEN** 平台 MAY 以 `--include=optional` 重试一次；该次调用 MUST NOT 同时带 `--omit=optional`；重试仍失败 SHALL 给出可复制的修复命令
 
 #### Scenario: 一个包一次安装
 
@@ -102,6 +109,10 @@ npm 安装命令 SHALL 采用已验证形态：全局安装、`--prefix <可写�
 装后重新探测的判定口径 SHALL 为**平台可见即判成功**：装后探测的命令查找范围为宿主 PATH ∪ 平台登记目录；装完的 CLI 只要在平台登记目录内，SHALL 判为安装成功并刷新其版本与可用性，MUST NOT 在装完后仍显示「未安装」。
 
 安装提示（`path_hint`）SHALL 以**完整句子**原样呈现：前端 MUST NOT 对后端已给出的提示句做二次包裹或改写；后端未给出提示时 MUST NOT 渲染提示节点。
+
+装后验证 SHALL 为**三重验证**：① 版本读取**优先读 npm 包的 `package.json`**（读不到才执行 `--version`）；② MUST 跑一个**真实命令**证明可执行（`--version` 在平台包缺失时仍可能成功，MUST NOT 作为唯一依据）；③ 失败时 SHALL 区分「没装上 / 装上但缺平台包 / 装上但不在 PATH」三种语义并给出可复制的修复命令。
+
+宿主 PATH 上找不到该命令时，平台 SHALL 以**绝对路径**（`<bin>/<command>`）做一次兜底探测；该探测 MUST 经平台的命令执行通道（否则平台登记目录不生效），且其结果**只填已安装版本**，MUST NOT 绕过 REQ-PCI-02「已装但探针未过」的语义（能力核验仍走既有通道）。
 
 Kimi Code 的官方脚本安装目录 SHALL 可被平台识别：平台 SHALL 能在装后把该安装目录纳入平台命令可见范围（平台登记目录），并 SHALL 用它做装后探测、给出安装提示；MUST NOT 因该对象不是 npm 包就既不给提示也不做装后探测。
 
@@ -150,15 +161,30 @@ Kimi Code 的官方脚本安装目录 SHALL 可被平台识别：平台 SHALL �
 - **WHEN** Kimi Code 经官方脚本安装完成、安装目录落在平台可识别位置
 - **THEN** 平台 SHALL 把该安装目录纳入平台命令可见范围并用它完成装后探测；SHALL 给出指向该安装目录的安装提示；MUST NOT 因该对象不是 npm 包就既不给提示也不做装后探测
 
+#### Scenario: 装后验证是三重验证
+
+- **WHEN** 某对象安装完成
+- **THEN** 平台 SHALL 优先读 npm 包 `package.json` 取版本（读不到才执行 `--version`），并跑一个真实命令证明可执行；MUST NOT 只以 `--version` 成功作为「装上可用」的依据
+
+#### Scenario: 装后失败区分三种语义
+
+- **WHEN** 装后验证失败
+- **THEN** 平台 SHALL 区分「没装上 / 装上但缺平台包 / 装上但不在 PATH」三种语义并给出可复制的修复命令；MUST NOT 用同一条含糊文案覆盖三种原因
+
+#### Scenario: PATH 找不到时用绝对路径兜底探测
+
+- **WHEN** 宿主 PATH 上找不到该对象的命令、但平台登记目录内有其可执行文件
+- **THEN** 平台 SHALL 以绝对路径做一次兜底探测并把探测到的版本填入已安装版本；MUST NOT 因此把该对象判为能力已核验
+
 ## ADDED Requirements
 
 ### Requirement: 「装了但不在终端 PATH 上」的显式状态（REQ-PCI-08）
 
-平台 SHALL 为每个安装目标暴露一个显式的「不在终端 PATH 上」状态：该状态为真，当且仅当**平台能找到**该对象的 CLI（宿主 PATH ∪ 平台登记目录），而**该 CLI 所在 bin 目录不在用户终端（登录 shell）PATH 上**。该状态下界面 SHALL 显式呈现「平台可用、但用户终端 PATH 上没有」这一事实，MUST NOT 仅给一句自由文本让用户自行推断，也 MUST NOT 把它呈现成「未安装」。
+平台 SHALL 为每个安装目标暴露一个显式的「不在终端 PATH 上」状态：当且仅当**平台能找到**该对象的 CLI（宿主 PATH ∪ 平台登记目录），而**该 CLI 所在 bin 目录不在用户终端（登录 shell）PATH 上**时为真。界面 SHALL 显式呈现该事实，MUST NOT 呈现成「未安装」。
 
-平台取得用户终端 PATH 的事实取自对用户登录 shell PATH 的探测；该事实取不到时，MUST NOT 判该状态为真（不得给出无法证实的断言）。
+平台取得用户终端 PATH 的事实取自对用户登录 shell PATH 的探测；该事实取不到时，MUST NOT 判该状态为真。
 
-平台 MUST NOT 为让 CLI 在用户终端可见而自动改写用户的 shell profile（MUST NOT 写 `.bashrc` / `.zshrc` / 等价文件，MUST NOT 创建 symlink）；处置内容 SHALL 以可复制的形式给出。该状态 MUST NOT 阻断该对象的安装、探测或使用。
+平台 MUST NOT 为让 CLI 在用户终端可见而**自动**改写用户的 shell profile（MUST NOT 写 `.bashrc` / `.zshrc` / 等价文件，MUST NOT 自动创建 symlink）；处置内容 SHALL 以可复制的形式给出。该状态 MUST NOT 阻断该对象的安装、探测或使用。用户**显式触发**的暴露动作按 REQ-PCI-11 执行。
 
 #### Scenario: 平台可见但终端 PATH 没有时状态为真
 
@@ -173,23 +199,28 @@ Kimi Code 的官方脚本安装目录 SHALL 可被平台识别：平台 SHALL �
 #### Scenario: 平台不自动改用户 shell
 
 - **WHEN** 平台判定某对象处于「不在终端 PATH 上」状态
-- **THEN** 平台 MUST NOT 自动改写用户的 shell profile、MUST NOT 创建 symlink；MUST NOT 因此阻断该对象的安装或使用
+- **THEN** 平台 MUST NOT 自动改写用户的 shell profile、MUST NOT 自动创建 symlink；MUST NOT 因此阻断该对象的安装或使用
+
+#### Scenario: 显式暴露动作受 REQ-PCI-11 约束
+
+- **WHEN** 用户显式触发「暴露到终端 PATH」动作
+- **THEN** 该动作 SHALL 按 REQ-PCI-11 的边界执行；MUST NOT 改写用户的 shell 配置文件
 
 ### Requirement: 更新落点与被更新对象一致（REQ-PCI-09）
 
 更新 SHALL 复用与安装同一条异步作业链（作业标识、轮询、durable 状态的语义见 REQ-PCI-05），但**落点**必须与被更新对象当前所在的位置一致。
 
-更新 SHALL 把 CLI 装到**被更新对象当前所在的前缀**：已安装且其命令在宿主 PATH 上时，更新 SHALL 装回**同一个前缀**；已安装但其命令不在宿主 PATH 上时，平台 SHOULD 从**二进制的真实路径反推 npm 前缀**（形如 `.../node_modules/<pkg>/...` ⇒ 其 `lib` 目录的父目录即该前缀），MUST NOT 把更新改装到别的前缀（MUST NOT 造成「更新装到 A、用户跑的还是 B」）。前缀候选与可写性的判定口径见 REQ-PCI-03。
+更新 SHALL 把 CLI 装到**被更新对象当前所在的前缀**：已安装且其命令在宿主 PATH 上时，更新 SHALL 装回**同一个前缀**；已安装但其命令不在宿主 PATH 上时，平台 SHOULD 从**已安装包的真实路径反推 npm 前缀**（形如 `<prefix>/lib/node_modules/<pkg>` ⇒ 其 `lib` 目录的父目录即该前缀），MUST NOT 把更新改装到别的前缀（MUST NOT 造成「更新装到 A、用户跑的还是 B」）。前缀候选与可写性的判定口径见 REQ-PCI-03。
 
 #### Scenario: 已安装且在 PATH 上时更新装回同一前缀
 
 - **WHEN** 用户对某对象触发更新、且该对象的命令当前在宿主 PATH 上
 - **THEN** 平台 SHALL 把该对象更新到**它当前所在的前缀**；MUST NOT 改装到另一个前缀
 
-#### Scenario: 已安装但不在 PATH 上时从二进制真实路径反推前缀
+#### Scenario: 已安装但不在 PATH 上时从已安装包真实路径反推前缀
 
 - **WHEN** 用户对某对象触发更新、且该对象已安装但其命令不在宿主 PATH 上
-- **THEN** 平台 SHOULD 从该二进制的真实路径反推其 npm 前缀并把更新装到该前缀；MUST NOT 因为「PATH 上找不到该命令」就改装到别的前缀
+- **THEN** 平台 SHOULD 从该对象已安装包的真实路径反推其 npm 前缀并把更新装到该前缀；MUST NOT 因为「PATH 上找不到该命令」就改装到别的前缀
 
 #### Scenario: 更新不得改装到别的前缀
 
@@ -211,4 +242,42 @@ Kimi Code 的更新 SHALL 沿用官方安装脚本的**原地替换**通道（�
 
 - **WHEN** 用户对已安装的 Kimi Code 触发更新
 - **THEN** 平台 SHALL 重新执行官方安装脚本完成原地替换，MUST NOT 走 npm 安装路径；SHALL 经装后验证确认更新后的命令真实可用；MUST NOT 在用户未确认来源时执行远程脚本
+
+### Requirement: 显式把已装 CLI 暴露到用户终端 PATH（REQ-PCI-11）
+
+平台 SHALL 提供一个**由用户显式触发**的动作，把已安装的 CLI 暴露到用户终端（登录 shell）的 PATH 上，使新开的终端里该命令可直接运行。该动作 MUST 仅在用户明确触发时执行，MUST NOT 自动发生；MUST NOT 修改用户的 shell 配置文件（MUST NOT 写 `.bashrc` / `.zshrc` / 等价文件，MUST NOT 改写 PATH 环境变量）。
+
+该动作 MUST 只在**已存在、真实可写、且确实在用户终端 PATH 上**的目录里创建**单个**软链（指向已安装二进制）；MUST NOT 在用户终端 PATH 之外的目录创建软链；目录内已有**同名但指向别处**的残留时 MUST 跳过该目录，MUST NOT 覆盖用户已有文件。
+
+创建软链后 SHALL **重验**该命令是否真的落在用户终端 PATH 上且软链可解析到目标；重验失败 MUST 清理本次新建的软链并**如实报告**失败原因。未安装的对象 MUST 被明确拒绝；全部候选目录不合格时 MUST 报错并给出各候选目录的不合格原因，MUST NOT 静默成功。
+
+#### Scenario: 显式触发才动作
+
+- **WHEN** 用户触发「暴露到终端 PATH」动作
+- **THEN** 平台 SHALL 执行暴露动作并如实呈现结果；MUST NOT 在用户未触发时自动创建软链或改写任何用户文件
+
+#### Scenario: 不改用户 shell 配置文件
+
+- **WHEN** 平台执行暴露动作
+- **THEN** 平台 MUST NOT 写 `.bashrc` / `.zshrc` / 等价文件，MUST NOT 改写 PATH 环境变量；只 MAY 在合格候选目录里创建单个软链
+
+#### Scenario: 只在终端 PATH 上的可写目录建软链
+
+- **WHEN** 某候选目录不存在、真实不可写、或不在用户终端 PATH 上
+- **THEN** 平台 MUST 跳过该目录并考察下一个候选；MUST NOT 在用户终端 PATH 之外的目录创建软链；全部候选不合格时 MUST 报错并给出各候选的不合格原因
+
+#### Scenario: 同名残留不覆盖
+
+- **WHEN** 候选目录内已有同名文件 / 软链、但它不指向本次安装目标
+- **THEN** 平台 MUST 跳过该目录并说明原因；MUST NOT 覆盖用户已有文件
+
+#### Scenario: 暴露后重验
+
+- **WHEN** 软链已创建
+- **THEN** 平台 SHALL 重验该命令是否真的落在用户终端 PATH 上且软链可解析到目标；重验失败 MUST 清理本次新建的软链并报错；MUST NOT 在重验失败时报成功
+
+#### Scenario: 未安装对象不可暴露
+
+- **WHEN** 用户对未安装的对象触发暴露动作
+- **THEN** 平台 MUST 明确拒绝并说明先安装再暴露；MUST NOT 创建任何软链
 
