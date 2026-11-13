@@ -116,6 +116,16 @@ pub(crate) fn build_sc_failure_repair_package(
         ));
     }
 
+    // P19d：Local 终局可以携带“该轮 source 现在真实不可读”的 trusted-caller 观察
+    // （`kind == "source"`）。日志里的 `Available` 只证明历史前缀里有可读 body，
+    // 不能冒充当前仍可读；组包时把该轮 source（以及同一轮的 last_failure_source）
+    // 投影成显式 Missing，raw / prompts / digest / through key 一概不动。Durable
+    // 输入不认这类事实，行为保持不变。
+    let local_source_missing = match terminal_input {
+        ScTerminalInput::Local(local) => local_source_missing_by_round(evidence, local)?,
+        ScTerminalInput::Durable => Vec::new(),
+    };
+
     let mut rounds: Vec<ScRoundEvidence> = Vec::new();
     let mut teaching_prompts: Vec<ScTeachingPromptEvidence> = Vec::new();
     for entry in &evidence.entries {
@@ -164,7 +174,7 @@ pub(crate) fn build_sc_failure_repair_package(
                 ),
             ));
         }
-        let (failure_class, blocking_reasons, repair_instructions, raw, source) = match &failure {
+        let (failure_class, blocking_reasons, repair_instructions, raw, mut source) = match &failure {
             Some(facts) => (
                 facts.failure_class.clone(),
                 facts.blocking_reasons.clone(),
@@ -181,6 +191,14 @@ pub(crate) fn build_sc_failure_repair_package(
                 (None, Vec::new(), Vec::new(), undelivered.clone(), undelivered)
             }
         };
+        if let ScEvidenceRef::Available { .. } = source {
+            if let Some((_, item)) = local_source_missing
+                .iter()
+                .find(|(round_id, _)| *round_id == round.round_id.as_str())
+            {
+                source = projected_source_ref(*item);
+            }
+        }
         let round_evidence = ScRoundEvidence {
             identity: round.clone(),
             launch_state,
@@ -269,16 +287,33 @@ pub(crate) fn build_sc_failure_repair_package(
         },
     };
 
-    let last_fact = failure_for(evidence, terminal.last_failure_round_id.as_str()).ok_or_else(|| {
-        error(
+    if failure_for(evidence, terminal.last_failure_round_id.as_str()).is_none() {
+        return Err(error(
             CODE_FAILURE_ROUND_MISSING,
             Some(terminal.last_failure_round_id.clone()),
             format!(
                 "终局声明的失败轮 {} 没有任何 FailureObserved 事实，不能伪造失败源",
                 terminal.last_failure_round_id
             ),
-        )
-    })?;
+        ));
+    }
+    // last_failure_source 取折叠后该轮的真实 source：Local 的 source 读失败投影
+    // 必须同时反映到这里（同一份事实不出现两套结论）；Durable 下该值仍等于日志
+    // 里该轮 `FailureObserved.source`。
+    let last_failure_source_ref = rounds
+        .iter()
+        .find(|round| round.identity.round_id == terminal.last_failure_round_id)
+        .map(|round| round.source.clone())
+        .ok_or_else(|| {
+            error(
+                CODE_ROUND_NOT_BOUND,
+                Some(terminal.last_failure_round_id.clone()),
+                format!(
+                    "终局声明的失败轮 {} 没有 RoundBound 事实",
+                    terminal.last_failure_round_id
+                ),
+            )
+        })?;
 
     let mut package = ScFailureRepairPackage {
         schema_version: 1,
@@ -295,7 +330,7 @@ pub(crate) fn build_sc_failure_repair_package(
         last_provider_output,
         last_failure_source: ScFailureSourceEvidence {
             source_round_id: terminal.last_failure_round_id.clone(),
-            source: last_fact.source.clone(),
+            source: last_failure_source_ref,
         },
         teaching_prompts,
         evidence_log_ref: sc_failure_evidence_log_ref(identity)?,
@@ -525,6 +560,67 @@ fn undelivered_ref(
         code: code.into(),
         detail: wording,
         round_id: round_id.into(),
+    }
+}
+
+/// 只认 Local 终局里 `kind == "source"` 的真实 source 读失败事实：每轮至多一条
+/// 有效投影；指向未绑定轮、或同一轮出现互相矛盾的 code/detail，都属证据自相矛盾，
+/// 拒绝而不是任选其一或静默丢弃。
+fn local_source_missing_by_round<'a>(
+    evidence: &ScFailureEvidenceRead,
+    local: &'a ScLocalTerminal,
+) -> Result<Vec<(&'a str, &'a ScMissingEvidence)>, ScFailureEvidenceError> {
+    let mut projected: Vec<(&'a str, &'a ScMissingEvidence)> = Vec::new();
+    for item in local
+        .missing_evidence
+        .iter()
+        .filter(|item| item.kind == "source")
+    {
+        let is_bound = evidence.entries.iter().any(|entry| {
+            matches!(
+                &entry.event,
+                ScFailureEvidenceEvent::RoundBound { round } if round.round_id == item.round_id
+            )
+        });
+        if !is_bound {
+            return Err(error(
+                CODE_ROUND_EVIDENCE_INCONSISTENT,
+                Some(item.round_id.clone()),
+                format!(
+                    "Local source missing 事实指向没有 RoundBound 的轮 {}，不能投影",
+                    item.round_id
+                ),
+            ));
+        }
+        let existing = projected
+            .iter()
+            .find(|(round_id, _)| *round_id == item.round_id.as_str())
+            .map(|(_, existing)| *existing);
+        match existing {
+            Some(existing) if existing.code != item.code || existing.detail != item.detail => {
+                return Err(error(
+                    CODE_ROUND_EVIDENCE_INCONSISTENT,
+                    Some(item.round_id.clone()),
+                    format!(
+                        "轮 {} 出现互相矛盾的 Local source missing 事实（{} / {}），不能任选其一",
+                        item.round_id, existing.code, item.code
+                    ),
+                ));
+            }
+            Some(_) => {}
+            None => projected.push((item.round_id.as_str(), item)),
+        }
+    }
+    Ok(projected)
+}
+
+/// Local source 读失败投影出的显式引用：code/detail/round_id 全取真实观察，不伪造
+/// locator / digest / 字节数。
+fn projected_source_ref(item: &ScMissingEvidence) -> ScEvidenceRef {
+    ScEvidenceRef::Missing {
+        code: item.code.clone(),
+        detail: item.detail.clone(),
+        round_id: item.round_id.clone(),
     }
 }
 
