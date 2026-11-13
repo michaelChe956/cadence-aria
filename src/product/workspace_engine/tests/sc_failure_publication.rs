@@ -25,7 +25,7 @@ mod fixture;
 use crate::product::checkpoint_store::CheckpointStore;
 use crate::product::models::ArtifactRef;
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
-use crate::web::workspace_ws_types::ArtifactPayload;
+use crate::web::workspace_ws_types::{ArtifactPayload, ScFailureRepairPackage};
 use fixture::{
     NODE_ID, ordinary_version, publication_fixture, receipt_files, receipt_from_disk,
     seed_timeline_node,
@@ -35,6 +35,11 @@ use tokio::sync::mpsc;
 
 fn payload_json(payload: &ArtifactPayload) -> serde_json::Value {
     serde_json::to_value(payload).expect("payload json")
+}
+
+/// 落盘载荷的 wire 形状：带 wrapper 的对象 `{"sc_failure_repair_package": {...}}`。
+fn package_payload_json(package: &ScFailureRepairPackage) -> serde_json::Value {
+    serde_json::json!({ "sc_failure_repair_package": package })
 }
 
 /// 真实 engine：持久 store + 事件通道（回执落盘后才广播 ArtifactUpdate）。
@@ -106,8 +111,8 @@ async fn publish_writes_version_ref_and_receipt_and_replay_reuses_same_version()
     assert!(!package_version.is_current, "A4 包版本不得抢占 current");
     assert_eq!(
         payload_json(&package_version.payload),
-        serde_json::to_value(&fixture.package).expect("package json"),
-        "落盘载荷必须就是包本体"
+        package_payload_json(&fixture.package),
+        "落盘载荷必须就是带 wrapper 的包本体"
     );
     let ordinary = versions
         .iter()
@@ -215,10 +220,7 @@ async fn node_detail_filesystem_fault_keeps_package_pending_without_artifact_upd
         .expect("artifact versions");
     let package_row = versions
         .iter()
-        .find(|version| {
-            payload_json(&version.payload)
-                == serde_json::to_value(&fixture.package).expect("package json")
-        })
+        .find(|version| payload_json(&version.payload) == package_payload_json(&fixture.package))
         .expect("package version stays pending in the raw table");
     assert!(!package_row.is_current);
     assert!(

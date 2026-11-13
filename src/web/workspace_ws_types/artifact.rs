@@ -60,6 +60,11 @@ pub enum ArtifactPayload {
         #[serde(rename = "plan_amendment_manifest")]
         manifest: Box<PlanAmendmentManifestDto>,
     },
+    /// SC 失败修复包（A4 载荷）。wire 形状是带 wrapper 的对象
+    /// `{"sc_failure_repair_package": {...}}`，载荷装箱避免枚举分配/复制。
+    ScFailureRepairPackage {
+        sc_failure_repair_package: Box<crate::web::workspace_ws_types::ScFailureRepairPackage>,
+    },
 }
 
 impl ArtifactPayload {
@@ -77,6 +82,7 @@ impl ArtifactPayload {
             Self::WorkItemRevisionHistory { .. } => None,
             Self::ProjectionValidation { .. } => None,
             Self::PlanAmendmentManifest { .. } => None,
+            Self::ScFailureRepairPackage { .. } => None,
         }
     }
 
@@ -98,6 +104,7 @@ impl ArtifactPayload {
             Self::WorkItemRevisionHistory { .. } => None,
             Self::ProjectionValidation { .. } => None,
             Self::PlanAmendmentManifest { .. } => None,
+            Self::ScFailureRepairPackage { .. } => None,
         }
     }
 }
