@@ -27,7 +27,7 @@ use crate::product::models::ArtifactRef;
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
 use crate::web::workspace_ws_types::ArtifactPayload;
 use fixture::{
-    NODE_ID, chain_dir, ordinary_version, publication_fixture, receipt_from_disk,
+    NODE_ID, ordinary_version, publication_fixture, receipt_files, receipt_from_disk,
     seed_timeline_node,
 };
 use std::sync::Arc;
@@ -130,7 +130,8 @@ async fn publish_writes_version_ref_and_receipt_and_replay_reuses_same_version()
     );
 
     // 发布回执：直接读回执文件断字段（不新增 store 公开读接口）。
-    let receipt = receipt_from_disk(&fixture.store, &fixture.chain).expect("published receipt file");
+    let receipt = receipt_from_disk(&fixture.store, &fixture.chain, &fixture.package.package_id)
+        .expect("published receipt file");
     assert_eq!(receipt.schema_version, 1);
     assert_eq!(receipt.package_id, fixture.package.package_id);
     assert_eq!(receipt.chain_id, fixture.package.chain_id);
@@ -229,7 +230,7 @@ async fn node_detail_filesystem_fault_keeps_package_pending_without_artifact_upd
         "未完成发布不得广播 ArtifactUpdate"
     );
     assert!(
-        receipt_from_disk(&fixture.store, &fixture.chain).is_none(),
+        receipt_from_disk(&fixture.store, &fixture.chain, &fixture.package.package_id).is_none(),
         "未完成发布不得留下发布回执"
     );
 }
@@ -266,21 +267,11 @@ async fn package_inconsistent_with_real_evidence_is_rejected() {
         "拒发的包不得广播 ArtifactUpdate"
     );
     assert!(
-        receipt_from_disk(&fixture.store, &fixture.chain).is_none(),
+        receipt_from_disk(&fixture.store, &fixture.chain, &fixture.package.package_id).is_none(),
         "拒发的包不得留下发布回执"
     );
-    // 证据分区目录仍只有事实日志（没有回执 JSON）。
-    let directory = chain_dir(&fixture.store, &fixture.chain);
-    let receipt_like = std::fs::read_dir(&directory)
-        .expect("chain dir")
-        .flatten()
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .and_then(|ext| ext.to_str())
-                == Some("json")
-        })
-        .count();
-    assert_eq!(receipt_like, 0, "拒发的包不得留下回执文件");
+    assert!(
+        receipt_files(&fixture.store, &fixture.chain).is_empty(),
+        "拒发的包不得留下任何回执文件"
+    );
 }

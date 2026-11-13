@@ -255,24 +255,41 @@ pub(super) fn chain_dir(store: &LifecycleStore, chain: &ScFailureChainIdentity) 
         .join(&chain.chain_id)
 }
 
-/// 直接读回执文件（不新增 store 公开读接口）：分区目录里逐个 JSON 试解。
+/// 直接读回执文件（不新增 store 公开读接口）：落点按 store 冻结绑定
+/// `<chain 分区>/published/<package_id>.json`。
+pub(super) fn receipt_path(
+    store: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+    package_id: &str,
+) -> PathBuf {
+    chain_dir(store, chain)
+        .join("published")
+        .join(format!("{package_id}.json"))
+}
+
+/// 读回执文件；不存在或不可解即 None（不猜内容）。
 pub(super) fn receipt_from_disk(
     store: &LifecycleStore,
     chain: &ScFailureChainIdentity,
+    package_id: &str,
 ) -> Option<ScArtifactPublishedReceipt> {
-    let directory = chain_dir(store, chain);
-    let entries = std::fs::read_dir(&directory).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        if let Ok(receipt) = serde_json::from_slice::<ScArtifactPublishedReceipt>(&bytes) {
-            return Some(receipt);
-        }
-    }
-    None
+    let path = receipt_path(store, chain, package_id);
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice::<ScArtifactPublishedReceipt>(&bytes).ok()
+}
+
+/// 回执目录里是否留下了任何回执文件（拒发/未完成发布必须为空）。
+pub(super) fn receipt_files(
+    store: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+) -> Vec<PathBuf> {
+    let directory = chain_dir(store, chain).join("published");
+    let Ok(entries) = std::fs::read_dir(&directory) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .collect()
 }
