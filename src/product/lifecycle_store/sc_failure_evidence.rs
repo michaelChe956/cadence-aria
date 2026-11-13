@@ -39,7 +39,7 @@ use crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandl
 use crate::web::workspace_ws_types::{
     ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScFailureScope, ScMissingEvidence,
     ScPackageCompleteness, ScPromptDisposition, ScRoundIdentity, ScRoundLaunchState,
-    ScTeachingPromptEvidence,
+    ScTeachingDecision, ScTeachingPromptEvidence,
 };
 
 /// 事实日志的 schema 版本（读侧遇到未知版本按坏行处理，不猜测）。
@@ -115,6 +115,12 @@ pub(crate) enum ScFailureEvidenceEvent {
         launch_observations: Vec<(String, ScRoundLaunchState)>,
         completeness: ScPackageCompleteness,
         missing_evidence: Vec<ScMissingEvidence>,
+    },
+    /// 教学决定：针对真实机械失败轮（该 round 须已 RoundBound 且已有
+    /// FailureObserved；未观察到失败前不得写决定，不伪造审计轮次）。
+    TeachingDecision {
+        failed_round_id: String,
+        decision: ScTeachingDecision,
     },
 }
 
@@ -663,6 +669,9 @@ fn sc_failure_entry_key(event: &ScFailureEvidenceEvent) -> String {
             sc_failure_disposition_key(&evidence.disposition)
         ),
         ScFailureEvidenceEvent::ChainTerminal { .. } => "terminal".to_string(),
+        ScFailureEvidenceEvent::TeachingDecision { failed_round_id, .. } => {
+            format!("teachingdecision/{failed_round_id}")
+        }
     }
 }
 

@@ -63,6 +63,27 @@ impl LifecycleStore {
                 Ok(())
             }
             ScFailureEvidenceEvent::ChainTerminal { .. } => Ok(()),
+            ScFailureEvidenceEvent::TeachingDecision {
+                failed_round_id, ..
+            } => {
+                // 决策必须针对真实机械失败轮：日志里须已有该 round 的 FailureObserved
+                // （FailureObserved 本身要求 round 已绑定，故"绑定 + 观察到失败"一并成立）。
+                if failed_round_id.is_empty() {
+                    return Err(locator_invalid_error(
+                        step,
+                        Some(failed_round_id.clone()),
+                        "教学决定的 failed_round_id 不能为空",
+                    ));
+                }
+                if !sc_failure_observed_round(read, failed_round_id) {
+                    return Err(round_not_bound_error(
+                        step,
+                        Some(failed_round_id.clone()),
+                        "教学决定必须针对已观察到的机械失败轮",
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -81,6 +102,17 @@ pub(super) fn sc_failure_prompt_round_bound(
         ));
     }
     Ok(())
+}
+
+/// 该 round 是否已有 FailureObserved 日志条目（教学决定必须针对真实机械失败轮）。
+fn sc_failure_observed_round(read: &ScFailureEvidenceRead, round_id: &str) -> bool {
+    read.entries.iter().any(|entry| {
+        matches!(
+            &entry.event,
+            ScFailureEvidenceEvent::FailureObserved { round_id: observed, .. }
+                if observed.as_str() == round_id
+        )
+    })
 }
 
 /// 日志类错误的统一形状：带上已验证前缀（坏行/断号之后的行不被跳行吞下）与具体
