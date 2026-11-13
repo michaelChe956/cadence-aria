@@ -9,6 +9,7 @@ pub mod paths;
 pub mod plan;
 pub mod review;
 pub mod run_scratch;
+pub(crate) mod sc_failure_evidence;
 pub mod spec;
 pub mod tool_policy_run_audit;
 mod usage_diagnostics;

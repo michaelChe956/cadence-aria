@@ -647,7 +647,7 @@ impl LifecycleStore {
     /// split run 分区根:按 handle 冻结的 `(workspace_session_id,
     /// role_run_seq)` 定位——complete/fail 仅凭 handle 即可收口,不需要
     /// 调用方重复传 project/issue(begin 已把它们写入 run.json 溯源)。
-    fn work_item_split_provider_run_dir(
+    pub(crate) fn work_item_split_provider_run_dir(
         &self,
         handle: &WorkItemSplitProviderRunHandle,
     ) -> Result<std::path::PathBuf, crate::product::json_store::ProductStoreError> {
