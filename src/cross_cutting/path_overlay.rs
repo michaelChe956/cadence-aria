@@ -29,8 +29,7 @@ struct OverlayEntry {
 }
 
 fn registry() -> &'static Mutex<Vec<OverlayEntry>> {
-    static REGISTRY: LazyLock<Mutex<Vec<OverlayEntry>>> =
-        LazyLock::new(|| Mutex::new(Vec::new()));
+    static REGISTRY: LazyLock<Mutex<Vec<OverlayEntry>>> = LazyLock::new(|| Mutex::new(Vec::new()));
     &REGISTRY
 }
 
@@ -103,6 +102,13 @@ pub fn effective_path(base: Option<&str>) -> String {
 #[cfg(test)]
 pub fn clear() {
     lock_registry().clear();
+}
+
+/// 启动期把**实际存在**的用户工具目录登记进 overlay（计划 2.4b）。候选
+/// 清单沿用 magpie `internal/proc/path_other.go` 的 `userDirs`。只登记、
+/// 不写盘、不创建目录。
+fn register_existing_candidates(home: Option<&Path>) {
+    let _ = home;
 }
 
 /// 进程级 overlay 测试锁：一切触碰注册表的用例（含其他文件里的合并点
@@ -213,6 +219,92 @@ mod tests {
             effective_path(None),
             std::env::var("PATH").unwrap_or_default(),
             "overlay 为空时 base 缺省取进程 env PATH 且原样返回"
+        );
+    }
+
+    /// 计划 2.4b：启动登记只收**实际存在**的候选目录；不存在的候选不得被
+    /// 登记、也不得在盘上创建。
+    #[test]
+    fn startup_registers_only_existing_install_bin_dirs() {
+        let _state = OverlayStateGuard::acquire();
+
+        let home = tempfile::tempdir().expect("temp home");
+        for existing in [".local/bin", ".cargo/bin"] {
+            std::fs::create_dir_all(home.path().join(existing)).expect("create existing candidate");
+        }
+        // ~/.npmrc 的 prefix + /bin
+        let npm_prefix = home.path().join("npm-prefix");
+        std::fs::create_dir_all(npm_prefix.join("bin")).expect("create npm prefix bin");
+        std::fs::write(
+            home.path().join(".npmrc"),
+            format!("prefix={}\n", npm_prefix.display()),
+        )
+        .expect("write npmrc");
+        // nvm 默认 node 的 bin
+        std::fs::create_dir_all(home.path().join(".nvm/alias")).expect("create nvm alias dir");
+        std::fs::write(home.path().join(".nvm/alias/default"), "v22.11.0\n")
+            .expect("write nvm default alias");
+        std::fs::create_dir_all(home.path().join(".nvm/versions/node/v22.11.0/bin"))
+            .expect("create nvm node bin");
+        // mise 的 node installs
+        std::fs::create_dir_all(
+            home.path()
+                .join(".local/share/mise/installs/node/22.11.0/bin"),
+        )
+        .expect("create mise node bin");
+
+        register_existing_candidates(Some(home.path()));
+
+        let registered = snapshot();
+        let expected = [
+            home.path().join(".local/bin"),
+            home.path().join(".cargo/bin"),
+            npm_prefix.join("bin"),
+            home.path().join(".nvm/versions/node/v22.11.0/bin"),
+            home.path()
+                .join(".local/share/mise/installs/node/22.11.0/bin"),
+        ];
+        for dir in &expected {
+            assert!(
+                registered.contains(dir),
+                "存在的候选目录必须登记 {dir:?}: {registered:?}"
+            );
+        }
+        // 临时 home 下的登记项必须全部来自预建目录（不得凭空多出）。
+        for dir in registered.iter().filter(|dir| dir.starts_with(home.path())) {
+            assert!(expected.contains(dir), "未预建的目录不得被登记 {dir:?}");
+        }
+        // 不存在的候选不得被登记，也不得在盘上创建。
+        for missing in [
+            ".npm-global/bin",
+            ".npm/bin",
+            ".bun/bin",
+            ".volta/bin",
+            ".asdf/shims",
+            ".deno/bin",
+        ] {
+            let path = home.path().join(missing);
+            assert!(!path.exists(), "登记不得创建目录: {missing}");
+            assert!(
+                !registered.contains(&path),
+                "不存在的候选不得登记: {missing}"
+            );
+        }
+    }
+
+    /// 无 HOME 时只登记宿主绝对路径目录，不得出现相对路径候选。
+    #[test]
+    fn startup_without_home_registers_only_host_absolute_dirs() {
+        let _state = OverlayStateGuard::acquire();
+
+        register_existing_candidates(None);
+
+        for dir in snapshot() {
+            assert!(dir.is_absolute(), "无 HOME 时不得登记相对路径目录: {dir:?}");
+        }
+        assert!(
+            !snapshot().iter().any(|dir| dir == Path::new(".local/bin")),
+            "相对形态的候选不得出现"
         );
     }
 
