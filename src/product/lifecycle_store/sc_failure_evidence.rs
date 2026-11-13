@@ -891,3 +891,6 @@ fn hex_digest(bytes: &[u8]) -> String {
 #[cfg(test)]
 #[path = "tests/sc_failure_evidence.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "tests/sc_failure_evidence_boundaries.rs"]
+mod boundary_tests;
