@@ -303,7 +303,11 @@ fn p14_concurrent_appends_allocate_unique_contiguous_versions_without_lost_paylo
                 for seq in 0..APPENDS_PER_WRITER {
                     let payload = format!("# writer{writer}-seq{seq}");
                     store
-                        .append_artifact_version(&sid, p14_version(99, &payload))
+                        .append_artifact_version(&sid, {
+                            let mut version = p14_version(99, &payload);
+                            version.source_node_id = format!("node_w{writer}_s{seq}");
+                            version
+                        })
                         .unwrap();
                 }
             })
@@ -319,14 +323,19 @@ fn p14_concurrent_appends_allocate_unique_contiguous_versions_without_lost_paylo
     let expected: Vec<u32> = (1..=total as u32).collect();
     assert_eq!(versions, expected, "versions must be unique, contiguous and in append order");
 
-    let mut payloads: Vec<String> = persisted
+    // payload→source_node_id 归属：并发写不得串号或丢失任一写者的 node 归属。
+    let mut pairs: Vec<(String, String)> = persisted
         .iter()
-        .map(|entry| entry.markdown().to_string())
+        .map(|entry| (entry.markdown().to_string(), entry.source_node_id.clone()))
         .collect();
-    payloads.sort();
-    let mut wanted: Vec<String> = (0..WRITERS)
-        .flat_map(|writer| (0..APPENDS_PER_WRITER).map(move |seq| format!("# writer{writer}-seq{seq}")))
+    pairs.sort();
+    let mut wanted: Vec<(String, String)> = (0..WRITERS)
+        .flat_map(|writer| {
+            (0..APPENDS_PER_WRITER).map(move |seq| {
+                (format!("# writer{writer}-seq{seq}"), format!("node_w{writer}_s{seq}"))
+            })
+        })
         .collect();
     wanted.sort();
-    assert_eq!(payloads, wanted, "every concurrently appended payload must survive exactly once");
+    assert_eq!(pairs, wanted, "every payload must survive exactly once with its own source_node_id");
 }
