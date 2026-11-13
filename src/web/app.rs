@@ -41,6 +41,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
         )
         .route("/api/runtime-info", get(handlers::runtime_info))
         .route(
+            "/api/providers/diagnostics",
+            get(handlers::provider_diagnostics),
+        )
+        .route(
             "/api/image-create/sessions",
             get(handlers::list_image_create_sessions).post(handlers::create_image_create_session),
         )
