@@ -6,7 +6,7 @@
 
 use super::fixture::{
     available, begin, bound_round, chain_dir, complete_raw, live_sc_session, observed, parts,
-    raw_locator, setup, sha256_hex, NODE_ID, PROMPT_TEXT, RAW1, RAW2,
+    raw_locator, setup, sha256_hex, ISSUE_ID, NODE_ID, PLAN_ID, PROMPT_TEXT, PROJECT_ID, RAW1, RAW2,
 };
 use sha2::{Digest, Sha256};
 
@@ -23,16 +23,23 @@ use crate::web::workspace_ws_types::{
 const RAW_EXACT: &str =
     r#"{"k":"v\u0041","path":"c:\\dir","quote":"a\"b","nl":"line1\nline2","cjk":"複雑"}"#;
 
-/// 独立 oracle：`prefix\0` + 三字段长度前缀 + u64 LE seq 的 SHA-256（不调用产品实现）。
+/// 独立 oracle（§2.3 冻结配方）：四段各用 u64 **大端**字节长度前缀 + UTF-8 正文，
+/// seq 先十进制字符串化再加前缀，无额外 domain tag。刻意用整块 buffer + 一次性
+/// digest（生产实现是流式 update），避免"实现对自己"的同形验证。
 fn oracle_chain_id(session: &str, business_key: &str, node: &str, seq: u64) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"sc-failure-chain-v1\0");
-    for part in [session, business_key, node] {
-        hasher.update((part.len() as u64).to_le_bytes());
-        hasher.update(part.as_bytes());
+    let seq_text = seq.to_string();
+    let mut buffer: Vec<u8> = Vec::new();
+    for part in [
+        session.as_bytes(),
+        business_key.as_bytes(),
+        node.as_bytes(),
+        seq_text.as_bytes(),
+    ] {
+        buffer.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        buffer.extend_from_slice(part);
     }
-    hasher.update(seq.to_le_bytes());
-    let hex: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    let digest = Sha256::digest(&buffer);
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     format!("chain-v1-{hex}")
 }
 
@@ -64,6 +71,20 @@ fn assert_locator_invalid(err: &ScFailureEvidenceError, step: &str, round_id: Op
 fn sc_failure_boundary_chain_identity_oracle_is_length_prefixed() {
     // 长度前缀消歧：("ab","c") 与 ("a","bc") 不得同键；四段都参与且不可互换。
     assert_eq!(sc_failure_chain_id("s", "ab", "c", 7).unwrap(), oracle_chain_id("s", "ab", "c", 7));
+    // 已知答案：按 §2.3 配方独立算出的固定摘要（不是从生产实现复制，也不是随意 re-pin）。
+    assert_eq!(
+        sc_failure_chain_id("s", "b", "n", 1).unwrap(),
+        "chain-v1-587e8ed5c9e89def68c1fb9e48037e9a7887bc8855a56c263294a0a3061febe6"
+    );
+    assert_eq!(
+        sc_failure_chain_id("s", "ab", "c", 7).unwrap(),
+        "chain-v1-8654d763b33f6e9ab155c1ebd21f089246ec8fdc84712ce4fa8ebd81ae74af47"
+    );
+    // 业务序号 0 合法（首轮 split run 的 role_run_seq 就是 0）：不得要求 >0。
+    assert_eq!(
+        sc_failure_chain_id("s", "b", "n", 0).unwrap(),
+        "chain-v1-c69e85db83bb94fc7c30e8df2fe0d67ac78d389c620f900682df2d4d14286887"
+    );
     assert_ne!(sc_failure_chain_id("s", "ab", "c", 7).unwrap(), sc_failure_chain_id("s", "a", "bc", 7).unwrap());
     let base = oracle_chain_id("s", "b", "n", 1);
     assert_ne!(base, oracle_chain_id("s", "b", "n", 2));
@@ -204,7 +225,7 @@ fn sc_failure_boundary_log_cross_scope_keeps_verified_prefix() {
     let foreign = ScFailureEvidenceEntry {
         schema_version: 1,
         entry_seq: 3,
-        entry_key: "round_bound/foreign".to_string(),
+        entry_key: "round/foreign".to_string(),
         chain: chain_b.clone(),
         event: ScFailureEvidenceEvent::RoundBound {
             round: ScRoundIdentity {
@@ -224,7 +245,7 @@ fn sc_failure_boundary_log_cross_scope_keeps_verified_prefix() {
     let prefix = err.verified_prefix.as_deref().expect("verified prefix");
     assert_eq!(prefix.entries, vec![bound, observed_entry]);
     assert_eq!(prefix.verified_prefix_bytes, before, "前缀字节止于坏行之前");
-    assert_eq!(prefix.evidence_through_entry_key, format!("failure_observed/{}", round.round_id));
+    assert_eq!(prefix.evidence_through_entry_key, format!("failureobserved/{}", round.round_id));
 }
 
 #[test]
@@ -286,4 +307,81 @@ fn sc_failure_boundary_unbound_round_rejected_before_write() {
     // 显式 RoundBound 后同一事件才被接受：顺序是事实，不是推断。
     bind(&store, &chain, &round);
     assert_eq!(store.append_sc_failure_evidence(&chain, &observed(&round, RAW1, RAW1)).expect("绑定后可写").entry_seq, 2);
+}
+
+/// F1：delete 侧已持真实 scope 的独占 lease（墓碑尚未落盘）时，迟到写必须被拒，
+/// 且不得 create_dir 复活已删实体的证据分区。
+#[test]
+fn sc_failure_boundary_late_write_blocked_by_delete_lease_on_same_scope() {
+    let (_tmp, store) = setup();
+    let session_id = live_sc_session(&store);
+    let handle = begin(&store, &session_id);
+    let (chain, round) = bound_round(&store, &session_id, &handle);
+    let log_path = chain_dir(&store, &chain).join("rounds.jsonl");
+    // 真实 scope 上的独占 delete lease（墓碑未落盘，只有 lease 在位）
+    let _lease = crate::product::entity_operation_store::EntityOperationStore::new(store.app_paths())
+        .try_acquire_delete(&crate::product::entity_deletion_store::EntityScope::new(
+            PROJECT_ID,
+            ISSUE_ID,
+            crate::product::entity_deletion_store::DeletionEntityKind::Plan,
+            PLAN_ID.to_string(),
+        ))
+        .expect("delete lease 必须在真实 scope 上取到独占");
+    let err = store
+        .append_sc_failure_evidence(&chain, &ScFailureEvidenceEvent::RoundBound { round: round.clone() })
+        .expect_err("delete lease 在位时迟到写必须被拒");
+    assert_eq!(err.code, "sc_failure_session_not_live");
+    assert_eq!(err.step, "append_sc_failure_evidence");
+    assert!(!err.publication_incomplete);
+    assert!(!log_path.exists(), "被拒写不得复活证据分区");
+    // prompt 写受同一 lease 约束
+    let err = put(&store, &chain, &round.round_id, 2, PROMPT_TEXT, ScPromptDisposition::Prepared)
+        .expect_err("delete lease 在位时迟到 prompt 写必须被拒");
+    assert_eq!(err.code, "sc_failure_session_not_live");
+    assert_eq!(err.step, "put_sc_teaching_prompt");
+    assert!(
+        !chain_dir(&store, &chain).join("prompts").join(format!("2-{}.txt", sha256_hex(PROMPT_TEXT))).exists(),
+        "被拒 prompt 不得落文件"
+    );
+}
+
+/// F4：RoundBound 必须钉住本会话的 round：跨会话 round 或身份不完整（空
+/// round_id / 空 run_ref）都不得写入——写进去的证据本 store 永远无法核验。
+#[test]
+fn sc_failure_boundary_round_bound_rejects_foreign_or_incomplete_round() {
+    let (_tmp, store) = setup();
+    let session_id = live_sc_session(&store);
+    let handle = begin(&store, &session_id);
+    let (chain, round) = bound_round(&store, &session_id, &handle);
+    let log_path = chain_dir(&store, &chain).join("rounds.jsonl");
+    // ① 跨会话 round：写后本 store 的读接口永远无法核验 → 必须拒
+    let mut foreign = round.clone();
+    foreign.workspace_session_id = "session_foreign_0001".to_string();
+    let err = store
+        .append_sc_failure_evidence(&chain, &ScFailureEvidenceEvent::RoundBound { round: foreign.clone() })
+        .expect_err("跨会话 round 必须拒绝");
+    assert_eq!(err.code, "sc_failure_scope_mismatch");
+    assert_eq!(err.step, "append_sc_failure_evidence");
+    assert_eq!(err.round_id.as_deref(), Some(foreign.round_id.as_str()));
+    assert!(!err.publication_incomplete);
+    assert!(!log_path.exists(), "被拒 round 不得落日志");
+    // ② 身份不完整：空 round_id / 空 run_ref → 必须拒
+    let mut empty_round_id = round.clone();
+    empty_round_id.round_id = String::new();
+    let err = store
+        .append_sc_failure_evidence(&chain, &ScFailureEvidenceEvent::RoundBound { round: empty_round_id })
+        .expect_err("空 round_id 必须拒绝");
+    assert_eq!(err.code, "sc_failure_locator_invalid");
+    let mut empty_run_ref = round.clone();
+    empty_run_ref.run_ref = String::new();
+    let err = store
+        .append_sc_failure_evidence(&chain, &ScFailureEvidenceEvent::RoundBound { round: empty_run_ref })
+        .expect_err("空 run_ref 必须拒绝");
+    assert_eq!(err.code, "sc_failure_locator_invalid");
+    assert!(!log_path.exists());
+    // ③ 本会话的真实 round 仍可写（守卫不得做成全拒）
+    store
+        .append_sc_failure_evidence(&chain, &ScFailureEvidenceEvent::RoundBound { round: round.clone() })
+        .expect("本会话 round 必须可写");
+    assert!(log_path.exists());
 }
