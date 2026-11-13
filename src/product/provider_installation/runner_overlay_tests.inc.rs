@@ -764,3 +764,29 @@ async fn installed_version_prefers_npm_package_json() {
         "版本必须优先读 npm 包的 package.json（读不到才跑 --version）"
     );
 }
+
+/// 装后验证除 `--version` 外**必须跑一个真实命令**（实测 `codegraph
+/// --version` 在平台 bundle 缺失时仍返回 1.6.2 / exit 0 ⇒ 不可作为唯一
+/// 依据）。
+#[tokio::test]
+async fn post_install_probe_runs_a_real_command() {
+    let root = tempdir().expect("root");
+    let runner = Arc::new(AlwaysFailingRunner::default());
+    let prober = health_prober(root.path(), runner.clone());
+
+    let outcome = prober
+        .refresh_after_install(InstallTarget::CodeGraph, None)
+        .await
+        .expect("probe");
+    assert!(
+        !outcome.real_command_ok,
+        "桩 runner 全部失败 ⇒ 真实命令必然不通过"
+    );
+    let requests = runner.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.argv != vec!["--version".to_string()]),
+        "装后必须跑一个真实命令（不能只 --version）: {requests:?}"
+    );
+}
