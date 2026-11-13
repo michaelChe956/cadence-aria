@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::product::coding_attempt_store::locking::ExclusiveFileLock;
-use crate::product::entity_deletion_store::EntityDeletionStore;
+use crate::product::entity_deletion_store::{EntityDeletionStore, EntityScope};
 use crate::product::json_store::ProductStoreError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::models::{WorkspaceSessionRecord, WorkspaceType};
@@ -149,6 +149,15 @@ impl fmt::Display for ScFailureEvidenceError {
 
 impl std::error::Error for ScFailureEvidenceError {}
 
+/// 教学提示写入请求（写体参数打包，避免长参数列表）。
+struct ScPromptWrite<'a> {
+    failed_round_id: &'a str,
+    target_round_ordinal: u32,
+    builder_id: &'a str,
+    text: &'a str,
+    disposition: ScPromptDisposition,
+}
+
 /// chain 身份：会话 / 业务键 / 原始节点 / 原始 role_run_seq 的长度前缀哈希。
 ///
 /// 长度前缀避免拼接歧义（`ab`+`c` 与 `a`+`bc` 不得同键）。
@@ -167,13 +176,14 @@ pub(crate) fn sc_failure_chain_id(
             return Err(chain_invalid_error("sc_failure_chain_id", format!("{name} 不能为空或含路径分隔符")));
         }
     }
+    // §2.3 冻结配方：四段各用 u64 大端字节长度前缀 + UTF-8 正文；seq 先十进制
+    // 字符串化再加前缀；无额外 domain tag（尚无生产 P05 链，不留旧链 alias）。
+    let seq_text = original_role_run_seq.to_string();
     let mut hasher = Sha256::new();
-    hasher.update(b"sc-failure-chain-v1\0");
-    for part in [session_id, business_key, original_node_id] {
-        hasher.update((part.len() as u64).to_le_bytes());
+    for part in [session_id, business_key, original_node_id, seq_text.as_str()] {
+        hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
     }
-    hasher.update(original_role_run_seq.to_le_bytes());
     Ok(format!(
         "{SC_FAILURE_CHAIN_ID_PREFIX}-{}",
         hex_digest(&hasher.finalize())
@@ -182,6 +192,9 @@ pub(crate) fn sc_failure_chain_id(
 
 impl LifecycleStore {
     /// 追加一条严格证据（幂等：同槽同文零膨胀；同槽异文冲突）。
+    ///
+    /// 写准入：会话必须是 live 的 SC session；整个写体在所属实体的 live-write
+    /// lease 内执行（scope lease → 日志锁，锁序不变）。
     pub(crate) fn append_sc_failure_evidence(
         &self,
         chain: &ScFailureChainIdentity,
@@ -189,23 +202,37 @@ impl LifecycleStore {
     ) -> Result<ScFailureEvidenceEntry, ScFailureEvidenceError> {
         const STEP: &str = "append_sc_failure_evidence";
         let session = self.sc_failure_session(chain, STEP)?;
+        let scope = self.sc_failure_entity_scope(&session, STEP)?;
         self.sc_failure_live_admission(&session, STEP)?;
-        self.sc_failure_chain_consistent(chain, STEP)?;
-        let directory = self.sc_failure_evidence_dir(chain, STEP)?;
+        self.sc_failure_with_live_write(&scope, STEP, || {
+            self.sc_failure_append_admitted(chain, event, STEP)
+        })
+    }
+
+    /// 已准入写体（append）：chain 自洽 → 证据目录 → 日志锁 → 读 → 幂等/冲突
+    /// → 事件校验 → 追加。
+    fn sc_failure_append_admitted(
+        &self,
+        chain: &ScFailureChainIdentity,
+        event: &ScFailureEvidenceEvent,
+        step: &str,
+    ) -> Result<ScFailureEvidenceEntry, ScFailureEvidenceError> {
+        self.sc_failure_chain_consistent(chain, step)?;
+        let directory = self.sc_failure_evidence_dir(chain, step)?;
         let log_path = directory.join(SC_FAILURE_EVIDENCE_LOG);
-        let _lock = self.sc_failure_log_lock(&directory, STEP)?;
-        let read = read_sc_failure_log(&log_path, chain, STEP)?;
+        let _lock = self.sc_failure_log_lock(&directory, step)?;
+        let read = read_sc_failure_log(&log_path, chain, step)?;
         let key = sc_failure_entry_key(event);
         if let Some(existing) = read.entries.iter().find(|entry| entry.entry_key == key) {
             if existing.event == *event {
                 return Ok(existing.clone());
             }
-            let mut conflict = entry_conflict_error(STEP, None, "同一逻辑槽位已存在不同正文");
+            let mut conflict = entry_conflict_error(step, None, "同一逻辑槽位已存在不同正文");
             conflict.verified_prefix = Some(Box::new(read));
             return Err(conflict);
         }
-        self.sc_failure_validate_event(chain, &read, event, STEP)?;
-        self.sc_failure_append_entry(&log_path, chain, &read, key, event.clone(), STEP)
+        self.sc_failure_validate_event(chain, &read, event, step)?;
+        self.sc_failure_append_entry(&log_path, chain, &read, key, event.clone(), step)
     }
 
     /// 读回严格证据（坏行/断号/跨 scope 都带已验证前缀报错）。
@@ -220,6 +247,8 @@ impl LifecycleStore {
     }
 
     /// 写入不可变教学提示正文（同槽同文零膨胀；同槽异文冲突）。
+    ///
+    /// 写准入同 append：整个写体在所属实体的 live-write lease 内执行。
     pub(crate) fn put_sc_teaching_prompt(
         &self,
         chain: &ScFailureChainIdentity,
@@ -231,9 +260,37 @@ impl LifecycleStore {
     ) -> Result<ScTeachingPromptEvidence, ScFailureEvidenceError> {
         const STEP: &str = "put_sc_teaching_prompt";
         let session = self.sc_failure_session(chain, STEP)?;
+        let scope = self.sc_failure_entity_scope(&session, STEP)?;
         self.sc_failure_live_admission(&session, STEP)?;
-        self.sc_failure_chain_consistent(chain, STEP)?;
-        let directory = self.sc_failure_evidence_dir(chain, STEP)?;
+        let request = ScPromptWrite {
+            failed_round_id,
+            target_round_ordinal,
+            builder_id,
+            text,
+            disposition,
+        };
+        self.sc_failure_with_live_write(&scope, STEP, || {
+            self.sc_failure_put_prompt_admitted(chain, request, STEP)
+        })
+    }
+
+    /// 已准入写体（教学提示）：chain 自洽 → 目录 → 日志锁 → 读 → 同槽幂等/冲突
+    /// → 正文不可变守卫 → 事件校验 → 写正文 → 追加日志。
+    fn sc_failure_put_prompt_admitted(
+        &self,
+        chain: &ScFailureChainIdentity,
+        request: ScPromptWrite<'_>,
+        step: &str,
+    ) -> Result<ScTeachingPromptEvidence, ScFailureEvidenceError> {
+        let ScPromptWrite {
+            failed_round_id,
+            target_round_ordinal,
+            builder_id,
+            text,
+            disposition,
+        } = request;
+        self.sc_failure_chain_consistent(chain, step)?;
+        let directory = self.sc_failure_evidence_dir(chain, step)?;
         let digest = sha256_hex(text.as_bytes());
         let bytes = text.len() as u64;
         let locator = sc_failure_prompt_locator(
@@ -265,14 +322,14 @@ impl LifecycleStore {
             }
         };
         let log_path = directory.join(SC_FAILURE_EVIDENCE_LOG);
-        let _lock = self.sc_failure_log_lock(&directory, STEP)?;
-        let read = read_sc_failure_log(&log_path, chain, STEP)?;
+        let _lock = self.sc_failure_log_lock(&directory, step)?;
+        let read = read_sc_failure_log(&log_path, chain, step)?;
         let key = sc_failure_entry_key(&event);
         if let Some(existing) = read.entries.iter().find(|entry| entry.entry_key == key) {
             if existing.event == event {
                 return Ok(evidence);
             }
-            let mut conflict = entry_conflict_error(STEP, Some(failed_round_id.to_string()), "同一教学提示槽位已存在不同正文");
+            let mut conflict = entry_conflict_error(step, Some(failed_round_id.to_string()), "同一教学提示槽位已存在不同正文");
             conflict.verified_prefix = Some(Box::new(read));
             return Err(conflict);
         }
@@ -299,20 +356,20 @@ impl LifecycleStore {
             }
         }
         if body_conflict {
-            let mut conflict = entry_conflict_error(STEP, Some(failed_round_id.to_string()), "同一教学提示槽位已存在不同正文");
+            let mut conflict = entry_conflict_error(step, Some(failed_round_id.to_string()), "同一教学提示槽位已存在不同正文");
             conflict.verified_prefix = Some(Box::new(read));
             return Err(conflict);
         }
-        self.sc_failure_validate_event(chain, &read, &event, STEP)?;
+        self.sc_failure_validate_event(chain, &read, &event, step)?;
         write_sc_failure_prompt_file(
             &directory
                 .join(SC_FAILURE_PROMPT_DIR)
                 .join(format!("{target_round_ordinal}-{digest}.txt")),
             text,
             &digest,
-            STEP,
+            step,
         )?;
-        self.sc_failure_append_entry(&log_path, chain, &read, key, event, STEP)?;
+        self.sc_failure_append_entry(&log_path, chain, &read, key, event, step)?;
         Ok(evidence)
     }
 
@@ -465,18 +522,49 @@ impl LifecycleStore {
         Ok(session)
     }
 
+    /// 实体归属 scope（live-write lease 的对象）：会话无法归属实体 → fail closed。
+    fn sc_failure_entity_scope(
+        &self,
+        session: &WorkspaceSessionRecord,
+        step: &str,
+    ) -> Result<EntityScope, ScFailureEvidenceError> {
+        self.entity_scope_for_session(session)
+            .map_err(|failure| io_error(step, None, format!("实体归属归约失败: {failure}")))?
+            .ok_or_else(|| session_not_live_error(step, "会话无法归属实体，拒绝写证据"))
+    }
+
+    /// 把整个写体放进所属实体的 live-write lease（仓库既有 scope 准入闸）：lease
+    /// 取得失败/墓碑在位 → Conflict → sc_failure_session_not_live；写体自身的严格
+    /// 错误原样透出。锁序：scope lease → 日志锁（写体内部）。
+    fn sc_failure_with_live_write<T>(
+        &self,
+        scope: &EntityScope,
+        step: &str,
+        body: impl FnOnce() -> Result<T, ScFailureEvidenceError>,
+    ) -> Result<T, ScFailureEvidenceError> {
+        let mut outcome: Option<Result<T, ScFailureEvidenceError>> = None;
+        self.with_entity_live_write(scope, || {
+            outcome = Some(body());
+            Ok(())
+        })
+        .map_err(|failure| match failure {
+            ProductStoreError::Conflict { .. } => session_not_live_error(
+                step,
+                "所属实体处于删除墓碑（purging/deleted）或删除独占进行中",
+            ),
+            other => io_error(step, None, format!("写准入失败: {other}")),
+        })?;
+        let outcome = outcome.ok_or_else(|| io_error(step, None, "写准入未执行写体"))?;
+        outcome
+    }
+
     /// 存活准入：所属实体存在删除墓碑（purging/deleted）时拒绝写。
     fn sc_failure_live_admission(
         &self,
         session: &WorkspaceSessionRecord,
         step: &str,
     ) -> Result<(), ScFailureEvidenceError> {
-        let scope = self
-            .entity_scope_for_session(session)
-            .map_err(|failure| io_error(step, None, format!("实体归属归约失败: {failure}")))?;
-        let Some(scope) = scope else {
-            return Err(session_not_live_error(step, "会话无法归属实体，拒绝写证据"));
-        };
+        let scope = self.sc_failure_entity_scope(session, step)?;
         let tombstone = EntityDeletionStore::new(self.app_paths())
             .get(&scope)
             .map_err(|failure| io_error(step, None, format!("读取删除事实失败: {failure}")))?;
@@ -520,6 +608,12 @@ impl LifecycleStore {
             ScFailureEvidenceEvent::RoundBound { round } => {
                 if round.chain_id != chain.chain_id {
                     return Err(scope_mismatch_error(step, Some(round.round_id.clone()), "round 的 chain_id 与 chain 不一致"));
+                }
+                if round.workspace_session_id != chain.scope.session_id {
+                    return Err(scope_mismatch_error(step, Some(round.round_id.clone()), "round 的 workspace_session_id 与 chain scope 不一致"));
+                }
+                if round.round_id.is_empty() || round.run_ref.is_empty() {
+                    return Err(locator_invalid_error(step, Some(round.round_id.clone()), "round 身份不完整（round_id / run_ref）"));
                 }
                 Ok(())
             }
@@ -596,10 +690,10 @@ impl LifecycleStore {
 fn sc_failure_entry_key(event: &ScFailureEvidenceEvent) -> String {
     match event {
         ScFailureEvidenceEvent::RoundBound { round } => {
-            format!("round_bound/{}", round.round_id)
+            format!("round/{}", round.round_id)
         }
         ScFailureEvidenceEvent::FailureObserved { round_id, .. } => {
-            format!("failure_observed/{round_id}")
+            format!("failureobserved/{round_id}")
         }
         ScFailureEvidenceEvent::PromptPrepared { evidence }
         | ScFailureEvidenceEvent::PromptUnavailable { evidence } => format!(
@@ -608,7 +702,7 @@ fn sc_failure_entry_key(event: &ScFailureEvidenceEvent) -> String {
             evidence.target_round_ordinal,
             sc_failure_disposition_key(&evidence.disposition)
         ),
-        ScFailureEvidenceEvent::ChainTerminal { .. } => "chain_terminal".to_string(),
+        ScFailureEvidenceEvent::ChainTerminal { .. } => "terminal".to_string(),
     }
 }
 
@@ -631,7 +725,9 @@ fn sc_failure_bound_round<'a>(
     })
 }
 
-fn sc_failure_split_locator(session_id: &str, role_run_seq: u64) -> String {
+/// split run 产物 locator 的规范构造（`sc-split-output/v1/{session}/{seq}`）。
+/// P08 等真实消费者直接调用本函数，不另立常量让调用方硬编码。
+pub(crate) fn sc_failure_split_locator(session_id: &str, role_run_seq: u64) -> String {
     format!("{SC_FAILURE_SPLIT_LOCATOR_PREFIX}/{session_id}/{role_run_seq}")
 }
 
