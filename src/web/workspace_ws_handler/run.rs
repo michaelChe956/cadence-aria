@@ -30,6 +30,11 @@ pub(crate) use gateway_start::{
 mod provider_run;
 #[path = "run/single_candidate.rs"]
 mod single_candidate;
+// P01：SC 教学重驱 transport 的 run 级路径登记。实现文件为
+// `run/sc_failure_transport.rs`；模块本体声明在 single_candidate.rs 内——
+// 归一化 helper（`prepare_author_delivery_for_compile` 与两个归一化事件发射器）
+// 是 `pub(in single_candidate)` 可见性，只有 single_candidate 子树可达。
+pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_failure_transport;
 #[path = "run/single_candidate_structure_reredrive.rs"]
 mod single_candidate_structure_reredrive;
 pub(crate) use provider_run::{
