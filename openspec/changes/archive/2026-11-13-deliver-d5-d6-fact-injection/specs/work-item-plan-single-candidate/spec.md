@@ -137,12 +137,12 @@ workitem author/reviewer prompt SHALL 仅承载产物规格（任务上下文、
 #### Scenario: 注入前轮结构化清单
 
 - **WHEN** reviewer prompt（单候选复评）组装
-- **THEN** reviewer prompt（单候选复评）SHALL 注入前轮结构化 findings：每轮注入前一轮非 advisory findings 的 canonical identity（结构化 key/fingerprint）、category、required_action 与当前候选 revision
+- **THEN** reviewer prompt（单候选复评）SHALL 注入前轮结构化 findings：每轮注入前一轮非 advisory findings 的 canonical identity（结构化 key/fingerprint）、category、required_action 与当前候选 revision；**并 SHALL 附本轮机械复算状态**（该 finding 在当前候选是否仍存在）**且按内容身份去重**（同一内容身份只保留一条，重复条目折叠为计数）
 
 #### Scenario: 重复判定不靠记忆
 
 - **WHEN** reviewer 复评遇到同 identity 重现的 finding
-- **THEN** reviewer SHALL 依据该清单执行重复判定纪律（同 identity 重现须显式标注），SHALL NOT 依赖自由文本记忆
+- **THEN** reviewer SHALL 依据该清单执行重复判定纪律（同 identity 重现须显式标注），SHALL NOT 依赖自由文本记忆；**「该前轮 finding 在本轮是否仍存在」SHALL 以平台给出的复算分区事实为准**，SHALL NOT 由模型依据清单文本自行推断
 
 #### Scenario: 越界路径回灌最近候选
 
@@ -158,16 +158,6 @@ workitem author/reviewer prompt SHALL 仅承载产物规格（任务上下文、
 
 - **WHEN** 注入基线树可用路径清单
 - **THEN** 清单 SHALL 落在**上下文面**（`WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES` = 32,000），MUST NOT 挤占固定规范面质量预算（`WORK_ITEM_PLAN_MARKDOWN_PROMPT_QUALITY_BUDGET_BYTES` = 23,500，实测余量仅 18~40 B）；**两个预算常量 SHALL NOT 上调**；新增直供内容 SHALL 计入其所属预算面（固定规范面内容计入 23,500、上下文面内容计入 32,000），SHALL NOT 以「动态段」名义规避任一面；清单超上限时 SHALL 按成员仓保底截断，MUST NOT 使上下文面超预算
-
-#### Scenario: 注入前轮结构化清单
-
-- **WHEN** reviewer prompt（单候选复评）组装
-- **THEN** reviewer prompt（单候选复评）SHALL 注入前轮结构化 findings：每轮注入前一轮非 advisory findings 的 canonical identity（结构化 key/fingerprint）、category、required_action 与当前候选 revision；**并 SHALL 附本轮机械复算状态**（该 finding 在当前候选是否仍存在）**且按内容身份去重**（同一内容身份只保留一条，重复条目折叠为计数）
-
-#### Scenario: 重复判定不靠记忆
-
-- **WHEN** reviewer 复评遇到同 identity 重现的 finding
-- **THEN** reviewer SHALL 依据该清单执行重复判定纪律（同 identity 重现须显式标注），SHALL NOT 依赖自由文本记忆；**「该前轮 finding 在本轮是否仍存在」SHALL 以平台给出的复算分区事实为准**，SHALL NOT 由模型依据清单文本自行推断
 
 #### Scenario: 前轮 finding 状态求交按内容身份
 

@@ -12,7 +12,10 @@
 - [x] 0.1 **契约双审**：proposal / design / specs delta / tasks 四件齐备；一致性裁决 + 接地审查各一轮。验证：双评审结论与修正记录
 - [x] 0.2 **requirement 归属唯一**：本 change 声明 REQ-WSC-06（承接自 `deliver-d5-d6-fact-injection`）、REQ-WSC-32（承接自 `teach-sc-compile-reredrive-feedback`）、REQ-WSC-12（MODIFIED）三者互不相同；无其它 active change 声明同一 requirement。验证：`openspec list` + 全目录 grep
 - [x] 0.3 **描述段门禁前置**：三个 requirement 的描述段实测 REQ-WSC-06 = **480**、REQ-WSC-12 = **489**、REQ-WSC-32 = **349** 字符（均 ≤500）。验证：python 实测
-- [x] 0.4 **既有场景逐字保全**：主规格 REQ-WSC-06 的 **36 个**场景、REQ-WSC-12 的 **5 个**场景标题与正文**逐字**进入 delta。验证：脚本比对（主规格侧零改动）
+- [x] 0.4 **既有场景逐字保全**：主规格 REQ-WSC-06 的 **34 个**场景、REQ-WSC-12 的 **5 个**场景标题与正文**逐字**进入 delta。验证：脚本比对（主规格侧零改动）
+- [x] 0.5 **已发现的规格缺陷与修正（评审前自查发现）**：S0 拆分 `deliver-d5-d6-fact-injection` 时，主规格 REQ-WSC-06 出现**两个同名场景**——「注入前轮结构化清单」「重复判定不靠记忆」各有**弱版**（原有 28 场景内）与**强化版**（D5/D6 交付内容，多出「SHALL 附本轮机械复算状态」「且按内容身份去重」「SHALL 以平台给出的复算分区事实为准」等 SHALL）。**同名两版并存 ⇒ 规范歧义（哪一版 binding 不定）。** **修正**：以「交付行为为准」保留**强化版**、删除弱版 ⇒ 主规格 REQ-WSC-06 由 36 场景收敛为 **34 场景**（28 − 2 + 8）。**义务零丢失**（强化版是弱版的**严格超集**，只增不减 SHALL）；其余 **26 个原有场景逐字未变**。**同步修正**：归档拆分件 delta（36 → 34）与本 change 的 delta（REQ-WSC-06 = 34 + 4 新 = 38）。验证：脚本比对「主规格 REQ-WSC-06 标题集合 == 归档拆分件标题集合」、重复标题零命中、26 个原有场景正文逐字比对通过
+- [x] 0.6 **delta 形态归一**：`## MODIFIED Requirements` 与 `## ADDED Requirements` 各**一个**头，其下挂多个 `### Requirement:` 块（此前 REQ-WSC-06 与 REQ-WSC-12 各带一个重复头，虽 openspec 可容忍，但非规范形态）。验证：`grep '^## '` 仅两行
+
 
 ## 1. A1 · 预算内事实不丢字段（3 文件）
 
