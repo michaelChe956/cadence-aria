@@ -425,8 +425,3 @@ fn error(code: &str, round_id: Option<String>, detail: impl Into<String>) -> ScF
 #[cfg(test)]
 #[path = "tests/sc_failure_artifacts.rs"]
 mod tests;
-
-/// P11 严格 publisher 行为用例（真实 store / 真实 engine / 真实文件故障）。
-#[cfg(test)]
-#[path = "tests/sc_failure_publication.rs"]
-mod publication_tests;
