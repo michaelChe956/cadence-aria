@@ -205,35 +205,50 @@ describe("ProviderInstallActionButton 显示规则（REQ-PCI-02）", () => {
     ).toHaveTextContent("1.5.0");
   });
 
-  it("本地版本等于最新版本时不渲染任何按钮", () => {
+  // §五 2.11 起：已安装（任意版本）始终渲染【暴露到终端 PATH】，不再
+  // 整体返回 null；「安装 / 更新」按钮仍按 REQ-PCI-02 规则不渲染。
+  it("本地版本等于最新版本时不渲染「安装/更新」，仅保留「暴露到终端 PATH」", () => {
     installFetchRouter({ target: "codex" });
-    const { container } = renderButton({
+    renderButton({
       cliAvailable: true,
       capabilityConfirmed: true,
       localVersion: "1.5.0",
       latestVersion: "1.5.0",
     });
 
-    expect(container).toBeEmptyDOMElement();
+    expect(
+      screen.queryByRole("button", { name: "安装" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "更新" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("provider-install-expose-codex"),
+    ).toBeInTheDocument();
   });
 
   it("本地版本高于最新版本时不提供「更新」（不因字符串不等就误报）", () => {
     installFetchRouter({ target: "codex" });
-    const { container } = renderButton({
+    renderButton({
       cliAvailable: true,
       capabilityConfirmed: true,
       localVersion: "1.10.0",
       latestVersion: "1.9.0",
     });
 
-    expect(container).toBeEmptyDOMElement();
+    expect(
+      screen.queryByRole("button", { name: "更新" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("provider-install-expose-codex"),
+    ).toBeInTheDocument();
   });
 });
 
 describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-07）", () => {
   it("latestVersion 为 null 时不出现「更新」", () => {
     installFetchRouter({ target: "kimi_code" });
-    const { container } = renderButton({
+    renderButton({
       target: "kimi_code",
       cliAvailable: true,
       capabilityConfirmed: true,
@@ -241,7 +256,10 @@ describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-0
       latestVersion: null,
     });
 
-    expect(container).toBeEmptyDOMElement();
+    // §五 2.11：已安装 ⇒ 「暴露到终端 PATH」仍在；「更新」不出现。
+    expect(
+      screen.getByTestId("provider-install-expose-kimi_code"),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "更新" }),
     ).not.toBeInTheDocument();

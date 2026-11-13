@@ -95,3 +95,12 @@ export type InstallJob = {
 };
 
 export type StartInstallResponse = { job_id: string };
+
+/** POST /api/providers/{target}/expose 的响应（§五 2.11）：软链已落在
+ *  登录 shell PATH 上的可写目录 `dir`，新终端可直接运行 `command`。 */
+export type ExposeTerminalPathResult = {
+  exposed: boolean;
+  command: string;
+  dir: string;
+  target: string;
+};
