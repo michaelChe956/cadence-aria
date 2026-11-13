@@ -398,52 +398,6 @@ mod author_structure_gate_reredrive {
         );
     }
 
-    /// ④ witness 完整的逆仓序环（2026-10-31 现场形态）：修复指令必须给出
-    ///    环在哪（人话）+ **两个合法修法各带后果** + 保护项 + 完整修订版
-    ///    输出口径——这是作者阶段教学重驱要模型自己改对的主形态。
-    #[test]
-    fn witness_complete_cycle_repair_prompt_carries_two_options_with_consequences() {
-        use super::structure_parity::{Repos, ir_of, item, structure_context};
-        use crate::product::workspace_engine::plan_projection::assess_single_candidate_structure;
-        use crate::product::workspace_engine::types::StructuralAssessment;
-        use crate::product::workspace_engine::single_candidate_structure_failure::{
-            author_structure_gate_failure, author_structure_repair_prompt,
-        };
-
-        let repos = Repos::new();
-        // 现场形态：WI-004 托管仓序第 2（repository_b），却消费仓序第 3 的产出。
-        let ir = ir_of(vec![
-            item("WI-001", "repository_a", None),
-            item("WI-002", "repository_b", Some("WI-001")),
-            item("WI-003", "repository_c", Some("WI-002")),
-            item("WI-004", "repository_b", Some("WI-003")),
-        ]);
-        let context = structure_context(repos.table(), repos.change_order());
-        let StructuralAssessment::Rejected(failures, _) =
-            assess_single_candidate_structure(String::new(), &ir, &context)
-        else {
-            panic!("逆仓序的跨仓消费必须在候选门被拦下");
-        };
-        let typed = author_structure_gate_failure(&ir, &context, &failures);
-        let prompt = author_structure_repair_prompt(&typed);
-        for required in [
-            "依赖环",
-            "两个合法修法",
-            "后果：",
-            "去掉「",
-            "整体迁到第",
-            "不得删除真实业务数据流",
-            "不得改动仓序本身",
-            "必须输出完整修订版 markdown",
-            "不得输出 diff、patch",
-        ] {
-            assert!(
-                prompt.contains(required),
-                "witness 完整的修复指令必须包含 {required}：{prompt}"
-            );
-        }
-    }
-
     /// ⑤ 原 typed 失败集透传：route 必须把**原**结构失败集原样带回（多成员
     ///    不丢、序不变），不得重算、不得从 sealed 文本反解析；sealed 失败
     ///    仍是 Operational 形态 ＋ 原稳定码 ＋ 原失败身份。

@@ -935,7 +935,12 @@ pub(crate) async fn run_single_candidate_author(
             }
             // SG3a.1 拒收：消费同一教学窗口后带着可执行修复指令重驱作者
             // 一次（provider 通道复用，不新造 attempt 通道）。
-            Ok(SingleCandidateAuthorCompletion::Rejected { repair_prompt }) => {
+            Ok(SingleCandidateAuthorCompletion::Rejected {
+                failure,
+                structure_failures: _,
+            }) => {
+                let repair_prompt =
+                    crate::product::workspace_engine::single_candidate_structure_failure::author_structure_repair_prompt(&failure);
                 let attempt = {
                     let request = sc_teaching_failure_request(
                         &teaching_binding,
