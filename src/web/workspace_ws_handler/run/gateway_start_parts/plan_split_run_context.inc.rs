@@ -285,7 +285,7 @@ impl PlanSplitRunContext {
                 let recovery = record
                     .lc_resume_recovery
                     .as_mut()
-                    .ok_or_else(|| binding_conflict())?;
+                    .ok_or_else(binding_conflict)?;
                 if recovery.recovery_id != expected_recovery_id
                     || recovery.state != LcResumeRecoveryState::FreshRunning
                     || recovery.operation_id.as_deref() != Some(expected_operation_id.as_str())
@@ -296,7 +296,7 @@ impl PlanSplitRunContext {
                     .fresh_operations
                     .iter_mut()
                     .find(|operation| operation.operation_id == expected_operation_id)
-                    .ok_or_else(|| binding_conflict())?;
+                    .ok_or_else(binding_conflict)?;
                 if operation.state != LcFreshOperationState::Running {
                     return Err(binding_conflict());
                 }

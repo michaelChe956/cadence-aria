@@ -499,11 +499,22 @@ async fn reredrive_prompt_instruction_summary_reports_true_total_through_handler
         "摘要不得报告截断后长度（Important-1 缺陷形态）: {}",
         reredrive_input.prompt
     );
+    // A3 起 prompt 自含上一轮失败源码全文，源码里本就带着 bogus_key_00..07，
+    // 因此「超上限不得逐条透传」只能钉**指令段**，不能对全文做子串否定。
+    let (instructions_section, source_section) = reredrive_input
+        .prompt
+        .split_once("上一轮失败源码（")
+        .expect("教学 prompt 必须自带上一轮失败源码块");
     assert!(
-        reredrive_input.prompt.contains("bogus_key_03")
-            && !reredrive_input.prompt.contains("bogus_key_04"),
-        "上限内（前 4 条）逐条在场，超上限以摘要收口: {}",
-        reredrive_input.prompt
+        instructions_section.contains("bogus_key_03")
+            && !instructions_section.contains("bogus_key_04"),
+        "指令面：上限内（前 4 条）逐条在场，超上限以摘要收口: {instructions_section}"
+    );
+    // 同一处的正向对立面：源码块必须逐字含完整上一轮源码（含被指令面省略的
+    // 第 5..8 条），否则「完整失败源自含」就是假的。
+    assert!(
+        source_section.contains("bogus_key_07"),
+        "源码块必须逐字内嵌完整上一轮源码（含指令面已省略的条目）：{source_section}"
     );
     no_more_provider_inputs(&mut input_rx).await;
     let message = next_error_message(&mut outbound_rx).await;

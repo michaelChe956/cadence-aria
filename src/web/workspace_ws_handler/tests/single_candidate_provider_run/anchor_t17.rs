@@ -477,11 +477,24 @@ async fn anchor_t17_sc_fresh_reuses_logical_reservation_without_rearm() {
     let (dispatch_tx, mut dispatch_rx) = mpsc::channel::<OutboundControl>(8);
     dispatch_lc_fresh_recovery_run(run_context, dispatch_tx).await;
 
-    let fresh_input =
-        tokio::time::timeout(std::time::Duration::from_secs(2), fresh_input_rx.recv())
-            .await
-            .expect("显式 fresh 授权后 sc_author 必须真实 spawn（非 typed 拒）")
-            .expect("fresh provider input");
+    // 超时必须带出 run 的对外帧：否则只看到 Elapsed，无从区分「typed 拒」
+    // 与「认领后臂内早退」。
+    let fresh_input = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fresh_input_rx.recv(),
+    )
+    .await
+    {
+        Ok(input) => input.expect("fresh provider input"),
+        Err(elapsed) => {
+            let frame = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                dispatch_rx.recv(),
+            )
+            .await;
+            panic!("显式 fresh 授权后 sc_author 必须真实 spawn（非 typed 拒）: {elapsed:?} / outbound={frame:?}");
+        }
+    };
     // fresh 重入是全新 native run：resume=None（不回捞旧 native）。
     assert!(
         fresh_input.resume_provider_session_id.is_none(),

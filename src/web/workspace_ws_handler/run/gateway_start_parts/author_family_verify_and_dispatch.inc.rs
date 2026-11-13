@@ -219,7 +219,7 @@ async fn lc_bind_fresh_node_after_spawn(
             let recovery = record
                 .lc_resume_recovery
                 .as_mut()
-                .ok_or_else(|| binding_conflict())?;
+                .ok_or_else(binding_conflict)?;
             if recovery.recovery_id != expected_recovery_id
                 || recovery.state != LcResumeRecoveryState::FreshRunning
                 || recovery.operation_id.as_deref() != Some(expected_operation_id.as_str())
@@ -230,7 +230,7 @@ async fn lc_bind_fresh_node_after_spawn(
                 .fresh_operations
                 .iter_mut()
                 .find(|operation| operation.operation_id == expected_operation_id)
-                .ok_or_else(|| binding_conflict())?;
+                .ok_or_else(binding_conflict)?;
             if operation.state != LcFreshOperationState::Running {
                 return Err(binding_conflict());
             }
@@ -396,6 +396,12 @@ pub(crate) async fn dispatch_lc_fresh_recovery_run(
                 .lc_resume_recovery
                 .clone()
                 .unwrap_or_else(|| recovery.clone());
+            // spawn 必须观察 CAS **之后**的状态：`run_context.session_record` 是
+            // dispatch 入口快照（FreshReserved），而臂内 SC 轮身份锚读的是由该
+            // 快照构建的引擎镜像。不在此更新，就会把已提交的 FreshRunning 读回成
+            // FreshReserved，进而以 `sc_failure_fresh_operation_not_running` 拒启。
+            let mut run_context = run_context;
+            run_context.session_record = saved.clone();
             let spawned = super::spawn_provider_run_claiming_idle(
                 run_context.clone(),
                 run_kind.clone(),

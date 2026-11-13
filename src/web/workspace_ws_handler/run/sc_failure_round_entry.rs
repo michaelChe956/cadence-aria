@@ -32,6 +32,9 @@ use crate::web::workspace_ws_types::{ScFailureChainIdentity, ScFailureScope};
 /// `operation_id` 对齐者，退化到最后一个受理 item）的 `role_run_seq` /
 /// `fresh_node_id`，以及原 recovery `run_context::ScAuthor.business.original_node_id`
 /// 给出的旧链锚。不读 `PlanSplitRunContext` 私有快照、不改既有 authorize 策略。
+// 一次决策返回一次，非热路径；boxing Fresh/Bound 会波及所有 match 点且不改变
+// 行为，故保留平铺语义。
+#[allow(clippy::large_enum_variant)]
 pub(in crate::web::workspace_ws_handler::run) enum FreshRoundAnchor {
     /// 当前 operation 已绑定真实物理轮（同 operation crash 重入）：直接返回该轮
     /// 的真实分类（Ready/Completed/Waiting），**绝不**新造 node/seq。
@@ -42,9 +45,11 @@ pub(in crate::web::workspace_ws_handler::run) enum FreshRoundAnchor {
         reason_code: &'static str,
         detail: String,
     },
-    /// 当前 operation 尚未绑定：沿用旧链身份，新 AuthorRun node + `max(ordinal)+1`。
+    /// 当前 operation 尚未绑定：新 AuthorRun node + 链内下一个 ordinal。
+    /// `original` 为 `None` 表示旧链**尚无任何证据**（首次尝试即被 supersede、
+    /// provider 从未物理启动）——这是链的首轮，按 ordinal 0 新建链身份。
     Fresh {
-        original: ScFailureChainIdentity,
+        original: Option<ScFailureChainIdentity>,
         ordinal: u32,
     },
 }
@@ -75,8 +80,19 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
     provider: &ProviderName,
 ) -> Result<FreshRoundAnchor, ScFailureEvidenceError> {
     const STEP: &str = "fresh_operation_sc_round_anchor";
-    let session = engine.session();
-    let Some(recovery) = session.lc_resume_recovery.as_ref() else {
+    // 事实只取 **durable** 记录：引擎内存镜像由 run 入口快照构建，可能仍停在
+    // `FreshReserved`（dispatch 的 CAS 已提交 FreshRunning，但镜像未同步），
+    // 据此判定会把已提交的可运行态读回成「未运行」并错误拒启。
+    let session_id = engine.session().session_id.clone();
+    let durable = lifecycle
+        .get_workspace_session(&session_id)
+        .map_err(|error| {
+            anchor_error(
+                "sc_failure_fresh_anchor_unavailable",
+                format!("读取显式 fresh 恢复记录失败（零启动）：{error}"),
+            )
+        })?;
+    let Some(recovery) = durable.lc_resume_recovery else {
         return Ok(FreshRoundAnchor::NotLaunched {
             reason_code: "sc_failure_fresh_operation_not_running",
             detail: "显式 fresh 入口缺少 recovery 记录：不启动 provider（等 gateway 预约/prepare）"
@@ -127,32 +143,39 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
             "显式 fresh 恢复缺少原节点锚：不把新 node 当 original（零启动）",
         ));
     };
-    let (original, first_round) = lifecycle
+    let found = lifecycle
         .find_sc_failure_round(scope, business_key, old_original_node, old_original_node, 0)
         .map_err(|mut failure| {
             failure.step = STEP.to_string();
             failure
-        })?
-        .ok_or_else(|| {
-            anchor_error(
-                "sc_failure_fresh_anchor_unavailable",
-                format!("旧失败链首轮（节点 {old_original_node} / ordinal 0）不可读：零启动"),
-            )
         })?;
-    let read = lifecycle
-        .read_sc_failure_evidence(&original)
-        .map_err(|mut failure| {
-            failure.step = STEP.to_string();
-            failure
-        })?;
-    let rounds: Vec<ScRoundIdentity> = read
-        .entries
-        .iter()
-        .filter_map(|entry| match &entry.event {
-            ScFailureEvidenceEvent::RoundBound { round } => Some(round.clone()),
-            _ => None,
-        })
-        .collect();
+    // 旧链尚无任何 RoundBound：这是**链的首轮**，不是「无法归属」。以 ordinal 0
+    // 新建链身份启动；绝不为从未物理启动的节点伪造 RoundBound，也不从「最后
+    // 一个」猜身份。
+    let (original, base_ordinal, rounds): (
+        Option<ScFailureChainIdentity>,
+        u32,
+        Vec<ScRoundIdentity>,
+    ) = match found {
+        Some((original, first_round)) => {
+            let read = lifecycle
+                .read_sc_failure_evidence(&original)
+                .map_err(|mut failure| {
+                    failure.step = STEP.to_string();
+                    failure
+                })?;
+            let rounds: Vec<ScRoundIdentity> = read
+                .entries
+                .iter()
+                .filter_map(|entry| match &entry.event {
+                    ScFailureEvidenceEvent::RoundBound { round } => Some(round.clone()),
+                    _ => None,
+                })
+                .collect();
+            (Some(original), first_round.round_ordinal, rounds)
+        }
+        None => (None, 0, Vec::new()),
+    };
     // 当前 operation 必须**显式**且精确匹配：不从“最后一个”猜 latest。缺
     // `operation_id`、或该 id 不在 `fresh_operations` 内、或其状态不是 Running
     // （既有准入验证未通过）⇒ 可见错误、零启动，绝不挑最近 operation 顶替。
@@ -203,14 +226,14 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
                     format!("当前 operation 绑定 seq {seq} 但旧链内无对应 RoundBound：零启动"),
                 )
             })?;
-        // 必须带**原链身份**（Some(&original)）：传 None 会让 begin 以
+        // 必须带**原链身份**（`original.as_ref()`）：传 None 会让 begin 以
         // (scope, key, bound_node, bound_node, ordinal) 查询，跨原节点必然落空
         // ⇒ 建新 chain/新 seq（= 对同一 operation 的第二物理启动）。
         let entry = begin_sc_failure_round(
             lifecycle,
             scope,
             business_key,
-            Some(&original),
+            original.as_ref(),
             &bound_round.node_id,
             provider,
             bound_round.round_ordinal,
@@ -226,7 +249,7 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
         .iter()
         .map(|round| round.round_ordinal)
         .max()
-        .unwrap_or(first_round.round_ordinal);
+        .unwrap_or(base_ordinal);
     let ordinal = max_ordinal.checked_add(1).ok_or_else(|| {
         anchor_error(
             "sc_failure_round_ordinal_overflow",
@@ -270,7 +293,7 @@ pub(in crate::web::workspace_ws_handler::run) async fn begin_sc_author_round_ent
                     lifecycle,
                     scope,
                     business_key,
-                    Some(&original),
+                    original.as_ref(),
                     &node_id,
                     provider,
                     ordinal,
