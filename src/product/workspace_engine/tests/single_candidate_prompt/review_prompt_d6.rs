@@ -802,7 +802,11 @@ fn previous_round_section_agrees_with_session_effective_view() {
         presented, effective_set,
         "前轮清单呈现集合 == 会话有效视图 actionable 集合: {payload}"
     );
-    assert_eq!(effective_set.len(), 2, "窄例外命中项不在有效 actionable 集合");
+    assert_eq!(
+        effective_set.len(),
+        2,
+        "窄例外命中项不在有效 actionable 集合"
+    );
     assert!(
         zone(&payload, "resolved_findings").is_empty(),
         "三个身份都在本轮机械报告 ⇒ 无已关闭区: {payload}"
@@ -833,10 +837,12 @@ fn previous_round_section_unchanged_for_findings_outside_narrow_exception() {
         ],
         vec![contract_suggestion.clone(), must_fix_open.clone()],
     );
-    let projected = replay.engine.apply_sc_effective_review_verdict(replay_verdict(vec![
-        contract_suggestion,
-        must_fix_open,
-    ]));
+    let projected = replay
+        .engine
+        .apply_sc_effective_review_verdict(replay_verdict(vec![
+            contract_suggestion,
+            must_fix_open,
+        ]));
     assert!(
         projected
             .findings
@@ -853,7 +859,10 @@ fn previous_round_section_unchanged_for_findings_outside_narrow_exception() {
     let unresolved = zone(&payload, "unresolved_findings");
     assert_eq!(unresolved.len(), 2, "{payload}");
     assert_eq!(unresolved[0]["content_identity"], "capability_gap");
-    assert_eq!(unresolved[0]["contract_field"], "plan_preflight.capability_gap");
+    assert_eq!(
+        unresolved[0]["contract_field"],
+        "plan_preflight.capability_gap"
+    );
     assert_eq!(unresolved[0]["required_action"], "补齐输出能力");
     assert_eq!(unresolved[1]["content_identity"], "acceptance_missing");
     assert_eq!(unresolved[1]["required_action"], "补齐验收标准");
