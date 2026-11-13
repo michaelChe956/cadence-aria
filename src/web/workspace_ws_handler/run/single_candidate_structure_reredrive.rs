@@ -213,31 +213,39 @@ pub(super) fn verify_sc_teaching_start(
     Ok(())
 }
 
-/// 实际发送后的处置记账：只有**真的发出**才记 `Sent`（预算拒绝/仅装配
-/// 永不冒充已发送）。正文与已落盘全文逐字相同（不可变正文守卫），失败
-/// 只留告警——发送事实不因记账失败而被改写。
+/// 真实发送边界的处置记账（P25 F1）：只有**真的发出**（`start_work_item_plan_author`
+/// 成功返回真实 `ProviderSession`）才记 `Sent`，且由 transport 在 drive 之前调用。
+/// 正文与已落盘 `Prepared` 全文逐字相同（store 不可变正文守卫按同一
+/// (round, ordinal) digest 校验 ⇒ locator/digest 与审计证据同源）。
+///
+/// 返回真实持久化错误：发送已发生而审计写失败，调用方不得再启动/重跑，
+/// 必须按终局 Incomplete 收口（真实 missing），不得只留告警把事实咽掉。
+#[allow(clippy::result_large_err)] // 证据面错误沿既有 typed 出口上浮。
 pub(super) fn record_sc_teaching_prompt_sent(
     lifecycle: &LifecycleStore,
     chain: &ScFailureChainIdentity,
     verify: &ScTeachingStartVerify,
     text: &str,
-) {
+) -> Result<(), ScFailureEvidenceError> {
     let evidence = &verify.prompt_evidence;
-    let outcome = lifecycle.put_sc_teaching_prompt(
-        chain,
-        &evidence.failed_round_id,
-        evidence.target_round_ordinal,
-        &evidence.builder_id,
-        text,
-        ScPromptDisposition::Sent,
-    );
-    if let Err(error) = outcome {
-        tracing::warn!(
-            session_id = %chain.scope.session_id,
-            error = ?error,
-            "record sc teaching prompt sent failed (send stands)"
-        );
-    }
+    lifecycle
+        .put_sc_teaching_prompt(
+            chain,
+            &evidence.failed_round_id,
+            evidence.target_round_ordinal,
+            &evidence.builder_id,
+            text,
+            ScPromptDisposition::Sent,
+        )
+        .map(|_| ())
+        .map_err(|error| ScFailureEvidenceError {
+            code: "sc_teaching_prompt_sent_audit_failed".to_string(),
+            step: "record_sc_teaching_prompt_sent".to_string(),
+            round_id: Some(evidence.failed_round_id.clone()),
+            detail: format!("真实发送后 Sent 处置写入失败: {error:?}"),
+            publication_incomplete: true,
+            verified_prefix: None,
+        })
 }
 
 /// 结构臂失败源的真实摘要面：只读该轮 sealed 的 canonical revision（不取
@@ -540,7 +548,9 @@ pub(super) async fn drive_compile_teaching_reredrive(
             )
             .await;
     }
-    let (delivery, launched) = super::sc_failure_round_entry::drive_sc_teaching_entry(
+    // P25 F1：`Sent` 由 transport 在真实 provider start 返回之后、drive 之前
+    // durable 记下（本臂不再后置记录：interrupted 轮也不会漏记、无双重记录）。
+    super::sc_failure_round_entry::drive_sc_teaching_entry(
         engine,
         lifecycle,
         launch,
@@ -553,13 +563,12 @@ pub(super) async fn drive_compile_teaching_reredrive(
         repository_path,
         entry,
         Some(attempt),
+        super::sc_failure_transport::ScTeachingSentBoundary {
+            chain: &original.chain,
+            verify,
+        },
     )
-    .await?;
-    // 真的发出之后才记 `Sent`（预算拒绝/仅装配/已完成重放永不冒充已发送）。
-    if launched {
-        record_sc_teaching_prompt_sent(lifecycle, &original.chain, verify, reredrive_prompt);
-    }
-    Ok(delivery)
+    .await
 }
 
 /// 结构门拒收教学重驱：发一条可观测的 prompt 事件（与 compile/IR 重驱的
@@ -624,7 +633,8 @@ pub(super) async fn drive_structure_gate_reredrive(
             )
             .await;
     }
-    let (delivery, launched) = super::sc_failure_round_entry::drive_sc_teaching_entry(
+    // P25 F1：同 compile/IR 臂——`Sent` 在 transport 的真实 start 边界记录。
+    super::sc_failure_round_entry::drive_sc_teaching_entry(
         engine,
         lifecycle,
         launch,
@@ -637,13 +647,12 @@ pub(super) async fn drive_structure_gate_reredrive(
         repository_path,
         entry,
         sc_teaching_attempt,
+        super::sc_failure_transport::ScTeachingSentBoundary {
+            chain: &original.chain,
+            verify,
+        },
     )
-    .await?;
-    // 真的发出之后才记 `Sent`（预算拒绝/仅装配/已完成重放永不冒充已发送）。
-    if launched {
-        record_sc_teaching_prompt_sent(lifecycle, &original.chain, verify, repair_prompt);
-    }
-    Ok(delivery)
+    .await
 }
 
 /// Task 8（tasks 5.1/5.2，REQ-WSC-25/28D；评审 Important-1 修订）：generate

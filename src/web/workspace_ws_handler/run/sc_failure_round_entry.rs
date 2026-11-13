@@ -461,7 +461,11 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_sc_teaching_entry(
     repository_path: &std::path::Path,
     entry: ScRoundEntry,
     sc_teaching_attempt: Option<&crate::product::work_item_plan_policy::ScTeachingAttemptRef>,
-) -> Result<(ScAuthorRoundDelivery, bool), SingleCandidateProviderRunError> {
+    // P25 F1：真实发送边界审计（正文/locator 与已 Prepared 证据同源）。
+    // 只有 Ready 会真正 start，因此也只有 Ready 会把它带到 transport 的记录点；
+    // Completed（重放）与 Waiting（等待）永不写 Sent。
+    sent_boundary: super::sc_failure_transport::ScTeachingSentBoundary<'_>,
+) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
     match entry {
         ScRoundEntry::Ready(bound) => drive_single_candidate_reredrive(
             engine,
@@ -476,14 +480,14 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_sc_teaching_entry(
             &bound,
             lifecycle,
             sc_teaching_attempt,
+            Some(sent_boundary),
         )
-        .await
-        .map(|delivery| (delivery, true)),
+        .await,
         ScRoundEntry::Completed {
             bound,
             raw_text,
             raw,
-        } => Ok((replayed_sc_round_delivery(raw_text, raw, bound.round), false)),
+        } => Ok(replayed_sc_round_delivery(raw_text, raw, bound.round)),
         ScRoundEntry::Waiting {
             bound,
             reason_code,

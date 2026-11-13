@@ -293,6 +293,18 @@ pub(in crate::web::workspace_ws_handler::run) fn replayed_sc_round_delivery(
     }
 }
 
+/// 真实发送边界的审计上下文（P25 F1）。
+///
+/// 只携带**已审计、已严格读回**的事实：链身份 + 启动前复验过的窗口请求与
+/// prompt 证据。正文由调用方以同一个 `reredrive_prompt` 传入（与交给 provider
+/// 的输入、与 `Prepared` 落盘正文同一份），故 `Sent` 的 body/locator 与审计证据
+/// 逐字同源；不从 Reserved ledger 或按钮文案猜发送事实。
+pub(in crate::web::workspace_ws_handler::run) struct ScTeachingSentBoundary<'a> {
+    pub(in crate::web::workspace_ws_handler::run) chain: &'a ScFailureChainIdentity,
+    pub(in crate::web::workspace_ws_handler::run) verify:
+        &'a crate::web::workspace_ws_handler::run::single_candidate_structure_reredrive::ScTeachingStartVerify,
+}
+
 /// Waiting 构造（内部）：只带诊断，不是新的恢复状态。
 fn sc_waiting_round(
     bound: ScBoundProviderRound,
@@ -561,6 +573,9 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_single_candidate_re
     lifecycle: &LifecycleStore,
     // Task 4（REQ-WSC-28C）：教学 attempt 引用（claim 侧 Task 6 接线）。
     sc_teaching_attempt: Option<&crate::product::work_item_plan_policy::ScTeachingAttemptRef>,
+    // P25 F1：`Some` = 教学臂的真实发送边界（写入点在本函数内、start 成功之后）。
+    // 原轮/非教学调用传 `None`。
+    sent_boundary: Option<ScTeachingSentBoundary<'_>>,
 ) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
     let reredrive_input = engine
         .build_work_item_plan_streaming_input(
@@ -582,6 +597,38 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_single_candidate_re
         Some(&bound.split),
     )
     .await;
+    // P25 F1：`Ok(ProviderSession)` 就是「提示词已物理送出」的边界——`Sent` 必须
+    // 在此 durable 记下，早于任何 drive/close 失败返回（interrupted 轮不再停留在
+    // Prepared）。start 被拒（Err）/ 构造失败 ⇒ 不写 Sent；Completed/Waiting 根本
+    // 不进入本函数。记录失败时发送已发生：不得再启动/重跑，按终局 Incomplete
+    // 收口（真实 missing）。
+    if reredrive_session.is_ok()
+        && let Some(boundary) = sent_boundary
+    {
+        if let Err(error) = crate::web::workspace_ws_handler::run::
+            single_candidate_structure_reredrive::record_sc_teaching_prompt_sent(
+            lifecycle,
+            boundary.chain,
+            boundary.verify,
+            reredrive_prompt,
+        ) {
+            let observations = super::sc_failure_evidence::teaching_launch_observations(
+                lifecycle,
+                &bound.chain.scope.session_id,
+                &bound.round,
+                sc_teaching_attempt,
+            );
+            return Err(super::sc_failure_evidence::terminal_exit_error(
+                engine,
+                lifecycle,
+                &bound.chain,
+                super::sc_failure_evidence::SC_TERMINAL_CLASS_TEACHING_INTERRUPTED,
+                observations,
+                format!("SC 教学提示已真实发送，但 Sent 审计写入失败：{error}"),
+            )
+            .await);
+        }
+    }
     // Task 4（REQ-WSC-28C）：spawn 确认后、事件循环前同步回填（fail-closed）。
     let reredrive_session =
         engine.backfill_sc_teaching_launch(sc_teaching_attempt, reredrive_session);
