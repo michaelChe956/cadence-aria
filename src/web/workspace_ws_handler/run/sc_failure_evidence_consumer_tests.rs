@@ -9,7 +9,9 @@
 //! 边界：本模块只证明真实 store 的未截断读回与「写失败⇒零 FailureObserved 行」；
 //! 端到端 gate 顺序（FailureObserved 先于 claim、判定先于 provider start）由
 //! P27 真实 adapter 集成验收，不用恒定零计数冒充。
-use super::super::sc_failure_transport::{ScBoundProviderRound, begin_sc_failure_round};
+use super::super::sc_failure_transport::{
+    ScBoundProviderRound, ScRoundEntry, begin_sc_failure_round,
+};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::inputs::{
@@ -68,7 +70,7 @@ fn split_locator(bound: &ScBoundProviderRound) -> String {
 }
 
 fn bind_round(lifecycle: &LifecycleStore, scope: &ScFailureScope) -> ScBoundProviderRound {
-    begin_sc_failure_round(
+    match begin_sc_failure_round(
         lifecycle,
         scope,
         BUSINESS_KEY,
@@ -78,6 +80,10 @@ fn bind_round(lifecycle: &LifecycleStore, scope: &ScFailureScope) -> ScBoundProv
         0,
     )
     .expect("round binds a real handle")
+    {
+        ScRoundEntry::Ready(bound) => bound,
+        _ => panic!("a freshly bound round has no start fact and must classify Ready"),
+    }
 }
 
 /// 独立摘要（绝不复用生产 `sc_sha256` 作期望值，避免同错自证）。
@@ -234,7 +240,9 @@ fn evidence_write_failure_leaves_no_failure_observed_rows() {
 /// 断言的是终局事实本身（class/身份/缺项/坏日志零 synthetic、Unknown 零字节），
 /// 不是编译误差：每个用例都从真实 RoundBound + 生产 producer 的 FailureObserved 出发。
 mod terminal {
-    use super::super::super::sc_failure_transport::{ScBoundProviderRound, begin_sc_failure_round};
+    use super::super::super::sc_failure_transport::{
+        ScBoundProviderRound, ScRoundEntry, begin_sc_failure_round,
+    };
     use super::super::sc_failure_terminal::{
         SC_TERMINAL_CLASS_COMPILE, SC_TERMINAL_CLASS_IR_PREFLIGHT, SC_TERMINAL_CLASS_STRUCTURE_GATE,
         SC_TERMINAL_CLASS_TEACHING_INTERRUPTED, ScFailureTerminalOutcome, finalize_sc_failure_chain,
@@ -256,7 +264,7 @@ mod terminal {
         original: Option<&ScBoundProviderRound>,
         ordinal: u32,
     ) -> ScBoundProviderRound {
-        begin_sc_failure_round(
+        match begin_sc_failure_round(
             lifecycle,
             scope,
             super::BUSINESS_KEY,
@@ -266,6 +274,10 @@ mod terminal {
             ordinal,
         )
         .expect("bind round")
+        {
+            ScRoundEntry::Ready(bound) => bound,
+            _ => panic!("a freshly bound round has no start fact and must classify Ready"),
+        }
     }
 
     /// 本轮真实 raw 引用（locator 与 store 校验逐字相等）。

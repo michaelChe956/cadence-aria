@@ -17,7 +17,9 @@ use super::single_candidate_compile_preflight::{
 };
 use super::*;
 use crate::product::lifecycle_store::LifecycleStore;
-use crate::product::models::{LcRecoveryRunContext, LcResumeRecoveryState, ProviderName};
+use crate::product::models::{
+    LcFreshOperationState, LcRecoveryRunContext, LcResumeRecoveryState, ProviderName,
+};
 use crate::web::workspace_ws_types::{ScFailureChainIdentity, ScFailureScope};
 
 /// 显式 fresh operation 的物理身份锚（P08 Case 5/6）。
@@ -67,11 +69,10 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
     let Some(recovery) = session.lc_resume_recovery.as_ref() else {
         return Ok(None);
     };
-    // 只有显式 fresh operation 的恢复态走本锚（Waiting/Resolved 保持既有路径）。
-    if !matches!(
-        recovery.state,
-        LcResumeRecoveryState::FreshReserved | LcResumeRecoveryState::FreshRunning
-    ) {
+    // 显式 fresh 只有**真实 FreshRunning** 才可能携带可 spawn 的物理身份：
+    // FreshReserved（claim 已受理、prepare 未完成）不是 spawn 授权，Waiting/
+    // Resolved 保持既有路径。预约/受理步骤仍由 gateway 完成，本锚只读。
+    if recovery.state != LcResumeRecoveryState::FreshRunning {
         return Ok(None);
     }
     let LcRecoveryRunContext::ScAuthor { business, .. } = &recovery.run_context else {
@@ -127,20 +128,40 @@ pub(in crate::web::workspace_ws_handler::run) fn fresh_operation_sc_round_anchor
             _ => None,
         })
         .collect();
-    // 当前 operation item：root `operation_id` 对齐优先，退化到最后一个受理 item。
-    let current = recovery
+    // 当前 operation 必须**显式**且精确匹配：不从“最后一个”猜 latest。缺
+    // `operation_id`、或该 id 不在 `fresh_operations` 内、或其状态不是 Running
+    // （既有准入验证未通过）⇒ 可见错误、零启动，绝不挑最近 operation 顶替。
+    let operation_id = recovery
         .operation_id
         .as_deref()
-        .and_then(|operation_id| {
-            recovery
-                .fresh_operations
-                .iter()
-                .find(|item| item.operation_id == operation_id)
-        })
-        .or_else(|| recovery.fresh_operations.last());
-    if let Some(item) = current
-        && let Some(seq) = item.role_run_seq
-    {
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            anchor_error(
+                "sc_failure_fresh_anchor_unavailable",
+                "显式 fresh 恢复缺少当前 operation_id：不对账、不挑 latest（零启动）",
+            )
+        })?;
+    let item = recovery
+        .fresh_operations
+        .iter()
+        .find(|item| item.operation_id == operation_id)
+        .ok_or_else(|| {
+            anchor_error(
+                "sc_failure_fresh_anchor_unavailable",
+                format!("当前 operation {operation_id} 不在 fresh_operations 中（零启动）"),
+            )
+        })?;
+    if item.state != LcFreshOperationState::Running {
+        return Err(anchor_error(
+            "sc_failure_fresh_anchor_unavailable",
+            format!(
+                "当前 operation {operation_id} 的状态为 {:?}（非 Running）：不得据此启动 provider（零启动）",
+                item.state
+            ),
+        ));
+    }
+    if let Some(seq) = item.role_run_seq {
         // 已绑定（同 operation crash 重入）：只分类既有轮，不再造 node/seq。
         let bound_round = rounds
             .iter()
