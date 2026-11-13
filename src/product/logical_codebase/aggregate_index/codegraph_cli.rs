@@ -200,7 +200,7 @@ impl CodeGraphCli {
 
     pub fn files(&self, root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
         let output = self.run_checked(
-            &["files", "--json", "--no-metadata"],
+            &["files", "--json"],
             root,
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_files_failed",
@@ -617,7 +617,7 @@ mod tests {
             requests[0].timeout,
             Duration::from_secs(AggregateIndexBudget::INCREMENTAL.fail_secs)
         );
-        assert_eq!(requests[1].argv, ["files", "--json", "--no-metadata"]);
+        assert_eq!(requests[1].argv, ["files", "--json"]);
         assert_eq!(requests[2].argv, ["query", "crossRepoGreeting", "--json"]);
         assert_eq!(requests[3].argv, ["status", ".", "--json"]);
         for request in requests.iter() {
@@ -761,10 +761,14 @@ mod tests {
         );
     }
 
-    /// `files` 走专用抓取配额（64 MiB）与 `--no-metadata` flag；`status` /
-    /// `query_json` 等其余命令维持 1 MiB 通用上限（不得被一起放大）。
+    /// `files` 走专用抓取配额（64 MiB）；`status` / `query_json` 等其余命令
+    /// 维持 1 MiB 通用上限（不得被一起放大）。
+    ///
+    /// owner 2026-11-13 裁决：不传 `--no-metadata`（实测该旗标在 `--json`
+    /// 模式下载荷逐字节不变、零收益，却引入「未来 CLI 移除该旗标 ⇒ `files`
+    /// 全线失败」的风险）。
     #[test]
-    fn files_uses_dedicated_output_limit_and_no_metadata_flag() {
+    fn files_uses_dedicated_output_limit() {
         let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
             CommandCapture::success(r#"[{"path":"src/lib.rs"}]"#),
             CommandCapture::success(r#"[{"name":"crossRepoGreeting"}]"#),
@@ -780,7 +784,7 @@ mod tests {
         cli.status(root).unwrap();
 
         let requests = runner.requests();
-        assert_eq!(requests[0].argv, ["files", "--json", "--no-metadata"]);
+        assert_eq!(requests[0].argv, ["files", "--json"]);
         assert_eq!(requests[0].stdout_limit, FILES_OUTPUT_LIMIT_BYTES);
         assert_eq!(requests[1].stdout_limit, OUTPUT_LIMIT_BYTES);
         assert_eq!(requests[2].stdout_limit, OUTPUT_LIMIT_BYTES);

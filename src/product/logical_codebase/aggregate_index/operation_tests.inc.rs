@@ -928,9 +928,7 @@ mod tests {
                 }
                 [init, dot] if init == "init" && dot == "." => "Indexed 2 files\n".to_string(),
                 [sync, dot] if sync == "sync" && dot == "." => "Synced 2 files\n".to_string(),
-                [files, json, no_metadata]
-                    if files == "files" && json == "--json" && no_metadata == "--no-metadata" =>
-                {
+                [files, json] if files == "files" && json == "--json" => {
                     // 空索引形态复刻上游契约缺陷：exit 0 + 人读提示（非 JSON）。
                     if state.files_empty_index_notice {
                         "ℹ No files indexed. Run \"codegraph index\" first.".to_string()
