@@ -107,3 +107,9 @@ pub fn render_sc_previous_source_block(
         fence
     ))
 }
+
+/// 本模块自带的测试挂载（Plan P21）：测试文件与 renderer 同目录树下，由 renderer
+/// 以 `#[path]` 挂载，避免在 `engine/tests.rs` 里再登记一次。
+#[cfg(test)]
+#[path = "tests/sc_teaching_source_block.rs"]
+mod tests;
