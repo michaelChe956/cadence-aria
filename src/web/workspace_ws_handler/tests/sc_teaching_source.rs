@@ -64,13 +64,33 @@ async fn sc_teaching_integration_compile_source_block_bytes_equal_failed_source(
     wait_for_single_candidate_phase(&run.fixture, SingleCandidatePhase::Failed).await;
 
     // durable 事实：失败轮的 raw / source 引用（生产写入）。
+    //
+    // 真实重驱语义：原轮失败 ⇒ 恰一次教学重驱**又把同一失败面喂回去**，教学轮
+    // 也真实失败 ⇒ durable 里恰有**两轮**机械失败事实（原轮 + 这一轮教学；规格
+    // 允许上限恰为一次教学重驱），此后进入终局。这不是缺陷，因此断言计数 2。
     let chain_id = only_chain_id(&run.fixture);
     let entries = evidence_entries(&run.fixture, &chain_id);
     let observed: Vec<&serde_json::Value> = entries
         .iter()
         .filter(|entry| entry["event"]["kind"] == "failure_observed")
         .collect();
-    assert_eq!(observed.len(), 1, "本用例只应有一轮机械失败事实");
+    assert_eq!(
+        observed.len(),
+        2,
+        "机械失败事实应为两轮：原轮 + 恰一次教学重驱轮（教学重驱复发了同一个真实失败面）"
+    );
+    let mut observed_round_ids: Vec<&str> = observed
+        .iter()
+        .map(|entry| entry["event"]["round_id"].as_str().unwrap_or_default())
+        .collect();
+    observed_round_ids.sort_unstable();
+    observed_round_ids.dedup();
+    assert_eq!(
+        observed_round_ids.len(),
+        2,
+        "两轮失败事实必须来自两个不同的轮（原轮 / 教学轮），实测 {observed_round_ids:?}"
+    );
+    // 教学 prompt 绑定的是**产生该 prompt 的那一轮** ⇒ 第一条失败事实（原轮）。
     let failure = &observed[0]["event"];
     let raw = &failure["raw"];
     let source = &failure["source"];
@@ -119,6 +139,11 @@ async fn sc_teaching_integration_compile_source_block_bytes_equal_failed_source(
 
     // 计数口径：实际启动 = 原轮 + 恰一次教学重驱（队列 + durable 账本两处事实）。
     run.queue.expect_no_further_input().await;
+    assert_eq!(
+        run.queue.received_count(),
+        2,
+        "实际 provider 启动回调恰两条：原轮 + 恰一次教学重驱（没有第三次启动）"
+    );
     assert_eq!(
         author_start_count(&run.fixture),
         2,
