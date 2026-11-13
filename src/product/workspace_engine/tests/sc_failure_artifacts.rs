@@ -4,6 +4,7 @@
 //   #[path = "tests/sc_failure_artifacts.rs"]
 //   mod tests;
 // `super` 仍解析到 `sc_failure_artifacts` 模块，函数体逐字未改。
+// 文件末尾另附 Q1 行为 RED 用例（已绑定但明确 NotStarted 的轮不得谎称已启动未交付）。
 
 use super::build_sc_failure_repair_package;
 use crate::product::lifecycle_store::sc_failure_evidence::{
@@ -255,4 +256,53 @@ fn missing_teaching_decision_is_rejected_instead_of_defaulted() {
     let error = build_sc_failure_repair_package(&chain(), &evidence).expect_err("missing decision on a failed round must not be defaulted");
     assert_eq!(error.code, "sc_failure_teaching_decision_missing");
     assert!(!error.step.is_empty());
+}
+
+// P11 Q1 行为 RED（独立件，仅新增用例；不改实现）。
+// 落位：`src/product/workspace_engine/tests/sc_failure_artifacts.rs` 末尾
+// （既有用例之后、文件末尾）。
+//
+// 观察目标：当前实现把“已绑定但明确 NotStarted”的轮无条件写成
+// `Missing{code:"sc_failure_output_not_delivered"}`（谎称已启动未交付）。
+// 期望：显式 NotStarted 轮必须用 `sc_failure_raw_missing`，且 last physical 仍是
+// 真实交付的 r1（raw 保持 Available，last_failure_source 仍取 r1 的 source）。
+// 本用例只断 code 与结构，不钉 detail 文案。
+
+#[test]
+fn bound_but_not_started_round_keeps_raw_missing_instead_of_not_delivered() {
+    let chain = chain();
+    let (r1, r2) = (round(1, "node-compile", 11), round(2, "node-compile", 12));
+    let raw1 = available(&split_locator(11), RAW1);
+    let src1 = available(&split_locator(11), SOURCE1);
+    let gap = ScMissingEvidence { round_id: r2.round_id.clone(), kind: "raw".into(), code: "sc_failure_raw_missing".into(), detail: "第二轮教学 handle 已绑定但 provider 未启动".into(), locator: None };
+    let entries = vec![
+        bound(1, &chain, &r1),
+        failure(2, &chain, &r1, ScFailureClass::Compile, vec!["E0308:3: mismatched types".into()], vec!["fix the compile error".into()], raw1.clone(), src1.clone()),
+        decision(3, &chain, &r1, ScTeachingDecision::Granted),
+        bound(4, &chain, &r2),
+        terminal(5, &chain, &r1, &r1, "teaching_interrupted", INTERRUPTED_REASON, vec![started(&r1), (r2.round_id.clone(), ScRoundLaunchState::NotStarted)], ScPackageCompleteness::Incomplete, vec![gap.clone()]),
+    ];
+    let prefix = interrupted_prefix();
+    let package = build_sc_failure_repair_package(&chain, &read(entries, prefix.clone())).expect("a bound but never started round must still build an honest package");
+
+    assert_eq!(package.rounds.len(), 2);
+    assert_eq!(package.rounds[1].identity, r2);
+    assert_eq!(package.rounds[1].launch_state, ScRoundLaunchState::NotStarted);
+    assert!(package.rounds[1].failure_class.is_none());
+    match &package.rounds[1].raw {
+        ScEvidenceRef::Missing { code, detail, round_id } => {
+            assert_eq!(code, "sc_failure_raw_missing", "a never-started round must not claim it started and lost its output");
+            assert_eq!(round_id.as_str(), r2.round_id.as_str());
+            assert!(!detail.is_empty());
+        }
+        other => panic!("bound but never started round must stay explicitly raw-missing: {other:?}"),
+    }
+    assert_eq!(package.rounds[1].source, package.rounds[1].raw, "raw and source share the same honesty verdict");
+    assert_eq!(package.last_provider_output, raw1, "last physical round is r1 and it did deliver, so its raw stays available");
+    assert_eq!(package.last_failure_source.source_round_id, r1.round_id);
+    assert_eq!(package.last_failure_source.source, src1);
+    assert_eq!(package.completeness, ScPackageCompleteness::Incomplete);
+    assert_eq!(package.missing_evidence, vec![gap]);
+    assert_eq!(package.evidence_digest, sha_hex(&prefix));
+    assert!(package.validate().is_ok(), "{:?}", package.validate());
 }
