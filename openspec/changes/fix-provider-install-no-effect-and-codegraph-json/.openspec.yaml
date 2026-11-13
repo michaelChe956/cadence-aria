@@ -1,0 +1,23 @@
+schema: spec-driven
+created: 2026-11-13
+goal: 让「本机没装 provider CLI / codegraph」的用户在页面点【安装】后真的装上并立刻可用；并让聚合索引在大型聚合根上不再因 codegraph 输出被 1 MiB 抓取上限截断而误报 codegraph_files_invalid_json
+x-tracker-status: draft
+x-owner-decisions:
+  - id: provider-install-platform-visible-path
+    decided: 2026-11-13
+    decision: D1/D2 —— 装完 CLI 仍不在宿主 PATH 上 ⇒ 判成功，并把安装目录纳入「平台自身命令可见 PATH」
+    implementation: 实现口径 = 共享 PATH overlay（进程级注册表 + 两个命令汇聚点合并）；不改进程真实 env
+    reason: 仓库 edition 2024 下 std::env::set_var 是 unsafe fn，且多线程改全局 env 有竞态；overlay 与「改 env」语义等价（平台自身发起的命令立即可见新装的 CLI），但无 unsafe、无全局 env 竞态
+  - id: codegraph-files-fetch-quota
+    decided: 2026-11-13
+    decision: D3 —— codegraph files --json 使用 64 MiB 专用抓取上限 + 无条件传 --no-metadata（1.6.0 / 1.6.2 均接受该 flag）
+    reason: 容器实测 --no-metadata 在 --json 模式下载荷逐字节不变（不瘦身）；保留该 flag 的理由改为「flag 被支持区间内的 CLI 接受且不改变 JSON 语义」，64 MiB 上限是唯一防线
+    risk: 未来 CLI 若移除该 flag ⇒ files 全线失败（未知选项）；本轮不做版本特判、不做静默去旗标降级
+  - id: provider-install-path-hint-rendering
+    decided: 2026-11-13
+    decision: D4 —— 前端 path_hint 原样渲染，不二次包裹
+    reason: 后端 path_hint 本身已是完整句子（已安装到 …；若命令不在 PATH 上，请把 … 加入 PATH 后重试），前端再包一层让用户看到破碎双句，更像「没效果」
+  - id: magpie-install-flow-not-adopted
+    decided: 2026-11-13
+    decision: magpie「不代跑安装、只展示 vendor 安装命令让用户复制到终端」的做法不作为参照；目标不变 —— 产品内一键安装必须真的装上并能用
+    reason: 我们是服务端 + 界面安装，「让用户自己复制命令到终端」不构成产品内闭环；仅采纳其前提检查与提示形态（Node/npm 缺失、不可写前缀 ⇒ 给迁移提示，绝不 sudo）
