@@ -147,8 +147,7 @@ impl WorkspaceEngine {
                 .map_err(|e| format!("build candidate dto failed: {e}"))?;
         self.update_artifact(ArtifactPayload::WorkItemPlanCandidate {
             candidate: Box::new(candidate),
-        })
-        .await;
+        }).await?;
 
         self.complete_active_node(Some("WorkItemPlan provider 输出完成".to_string()))
             .await;
@@ -175,7 +174,7 @@ impl WorkspaceEngine {
                     allowed_actions: vec!["provide_context".to_string(), "abort".to_string()],
                 }),
             };
-            self.update_artifact(payload).await;
+            self.update_artifact(payload).await?;
             self.complete_active_node(Some(
                 "WorkItemPlan Outline author 请求补充上下文".to_string(),
             ))
@@ -214,7 +213,7 @@ impl WorkspaceEngine {
                         allowed_actions: vec!["provide_context".to_string(), "abort".to_string()],
                     }),
                 };
-                self.update_artifact(payload).await;
+                self.update_artifact(payload).await?;
                 self.enter_work_item_plan_context_blocker(Some(
                     "Outline 校验失败，请终止后重新创建 Work Item Plan".to_string(),
                 ))
@@ -236,8 +235,7 @@ impl WorkspaceEngine {
                 current_generation_round_id: None,
                 selected_generation_mode: None,
             }),
-        })
-        .await;
+        }).await?;
         self.complete_active_node(Some("WorkItemPlan Outline provider 输出完成".to_string()))
             .await;
         self.enter_work_item_plan_outline_confirm(Some(
@@ -287,7 +285,7 @@ impl WorkspaceEngine {
                     allowed_actions: vec!["provide_context".to_string(), "abort".to_string()],
                 }),
             };
-            self.update_artifact(payload).await;
+            self.update_artifact(payload).await?;
             self.enter_work_item_plan_context_blocker(Some(
                 "Outline 结构化输出解析失败，请补充上下文或终止".to_string(),
             ))

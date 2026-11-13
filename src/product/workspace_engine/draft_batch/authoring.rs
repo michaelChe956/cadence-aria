@@ -206,8 +206,7 @@ impl WorkspaceEngine {
                 validator_findings,
                 can_accept,
             }),
-        })
-        .await;
+        }).await?;
         self.complete_active_node(Some(completion_summary)).await;
         self.enter_work_item_draft_confirm(Some("请确认当前 Work Item Draft".to_string()))
             .await;
@@ -378,15 +377,13 @@ impl WorkspaceEngine {
                 validator_findings,
                 can_accept: !report.has_errors(),
             }),
-        })
-        .await;
+        }).await?;
         if index.active_outline_id.is_none() {
             let batch_state =
                 self.current_work_item_batch_state_payload(&store, &index, &batch_id)?;
             self.update_artifact(ArtifactPayload::WorkItemBatchState {
                 batch_state: Box::new(batch_state),
-            })
-            .await;
+            }).await?;
             self.complete_active_node(Some("Work Item Batch 生成完成，等待整组确认".to_string()))
                 .await;
             self.enter_work_item_batch_confirm(Some("请确认整组 Work Item Draft".to_string()))

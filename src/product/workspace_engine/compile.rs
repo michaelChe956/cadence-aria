@@ -1283,8 +1283,7 @@ impl WorkspaceEngine {
             Err(error) => {
                 self.update_artifact(ArtifactPayload::WorkItemPlanCompileReport {
                     compile_report: Box::new(failure_report),
-                })
-                .await;
+                }).await?;
                 return Err(error);
             }
         };

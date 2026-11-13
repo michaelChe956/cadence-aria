@@ -70,8 +70,7 @@ impl WorkspaceEngine {
         self.plan_repair_snapshot = Some(snapshot);
         self.update_artifact(ArtifactPayload::WorkItemPlanProjection {
             projection: Box::new(prepared.plan_projection_bundle),
-        })
-        .await;
+        }).await.map_err(|message| PlanRepairError::Store(crate::product::json_store::ProductStoreError::Io(message)))?;
         self.begin_work_item_plan_outline_review_run().await;
         if let Some(snapshot) = self.plan_repair_snapshot.as_mut() {
             snapshot.timeline_nodes = self.timeline_nodes.clone();
@@ -202,8 +201,7 @@ impl WorkspaceEngine {
         self.plan_repair_snapshot = Some(snapshot);
         self.update_artifact(ArtifactPayload::WorkItemPlanProjection {
             projection: Box::new(package.projection),
-        })
-        .await;
+        }).await.map_err(|message| PlanRepairError::Store(crate::product::json_store::ProductStoreError::Io(message)))?;
         self.begin_work_item_plan_outline_review_run().await;
         if let Some(snapshot) = self.plan_repair_snapshot.as_mut() {
             snapshot.timeline_nodes = self.timeline_nodes.clone();
