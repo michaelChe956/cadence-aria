@@ -84,12 +84,14 @@ pub(super) fn sc_failure_prompt_round_bound(
 }
 
 /// 日志类错误的统一形状：带上已验证前缀（坏行/断号之后的行不被跳行吞下）与具体
-/// missing 项——round 不可知时不伪 round（"unknown"），locator 只给受控的内部
-/// 相对 ref（本 chain 的日志），code/detail 沿用原故障。
+/// missing 项——round 不可知时不伪 round（"unknown"），code/detail 沿用原故障。
+///
+/// `chain`：已校验的真实 chain → locator 给受控的内部相对 ref；`None`（坏首行、
+/// 真实 chain 未知）→ locator 留 `None`，**不拿日志里的假 chain 拼 locator**。
 pub(super) fn sc_failure_log_failure(
     code: &str,
     step: &str,
-    chain: &ScFailureChainIdentity,
+    chain: Option<&ScFailureChainIdentity>,
     entries: &[ScFailureEvidenceEntry],
     verified_bytes: &[u8],
     detail: String,
@@ -107,7 +109,7 @@ pub(super) fn sc_failure_log_failure(
             kind: "evidence_log".to_string(),
             code: code.to_string(),
             detail,
-            locator: sc_failure_evidence_log_ref(chain).ok(),
+            locator: chain.and_then(|identity| sc_failure_evidence_log_ref(identity).ok()),
         }],
     }));
     failure

@@ -762,13 +762,13 @@ fn read_sc_failure_log(
         if line.is_empty() {
             continue;
         }
-        let text = std::str::from_utf8(line).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, chain, &entries, &bytes[..verified_bytes], format!("证据日志行不是 UTF-8: {failure}"), ))?;
-        let entry: ScFailureEvidenceEntry = serde_json::from_str(text).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, chain, &entries, &bytes[..verified_bytes], format!("证据日志行不是合法条目: {failure}"), ))?;
+        let text = std::str::from_utf8(line).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, Some(chain), &entries, &bytes[..verified_bytes], format!("证据日志行不是 UTF-8: {failure}"), ))?;
+        let entry: ScFailureEvidenceEntry = serde_json::from_str(text).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, Some(chain), &entries, &bytes[..verified_bytes], format!("证据日志行不是合法条目: {failure}"), ))?;
         if entry.schema_version != SC_FAILURE_EVIDENCE_SCHEMA_VERSION {
             return Err(sc_failure_log_failure(
                 CODE_LOG_CORRUPT,
                 step,
-                chain,
+                Some(chain),
                 &entries,
                 &bytes[..verified_bytes],
                 format!(
@@ -781,7 +781,7 @@ fn read_sc_failure_log(
             return Err(sc_failure_log_failure(
                 CODE_LOG_SEQUENCE_GAP,
                 step,
-                chain,
+                Some(chain),
                 &entries,
                 &bytes[..verified_bytes],
                 format!("证据日志序号断档: 期望 {expected_seq}, 实际 {}", entry.entry_seq),
@@ -791,7 +791,7 @@ fn read_sc_failure_log(
             return Err(sc_failure_log_failure(
                 CODE_SCOPE_MISMATCH,
                 step,
-                chain,
+                Some(chain),
                 &entries,
                 &bytes[..verified_bytes],
                 "证据日志条目属于其他 chain（跨 scope 注入）".to_string(),
