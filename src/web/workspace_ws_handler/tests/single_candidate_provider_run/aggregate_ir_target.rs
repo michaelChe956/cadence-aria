@@ -449,7 +449,7 @@ async fn omitted_parse_diagnostics_fully_retrievable_from_durable_audit() {
     let accounting = reredrive_input
         .prompt
         .lines()
-        .find(|line| line.contains("parse 事实块预算"))
+        .find(|line| line.contains("parse 事实块有界投影收口"))
         .expect("reredrive prompt must carry the parse fact budget accounting")
         .to_string();
     let count_after = |label: &str| -> usize {
