@@ -162,28 +162,40 @@ impl WorkspaceEngine {
         let mut prompt = String::from(
             "请作为 Plan Reviewer 审核当前 Canonical Contract 与 Projection 候选。\n\n## Plan Review Context\n",
         );
-        append_review_context_section(
+        append_single_candidate_context_section_compact(
             &mut prompt,
             "Canonical Contract Candidates",
             &contract_candidates,
         )?;
-        append_review_context_section(&mut prompt, "Dependency Contract Graph", &dependency_graph)?;
-        append_review_context_section(
+        append_single_candidate_context_section_compact(
+            &mut prompt,
+            "Dependency Contract Graph",
+            &dependency_graph,
+        )?;
+        append_single_candidate_context_section_compact(
             &mut prompt,
             "Reviewer Capability Coverage Projection",
             &reviewer_coverage,
         )?;
-        append_review_context_section(
+        append_single_candidate_context_section_compact(
             &mut prompt,
             "Cross-Item Contract Supply / Demand",
             &cross_item_contracts,
         )?;
-        append_review_context_section(
+        append_single_candidate_context_section_compact(
             &mut prompt,
             "Projection Validation Report",
             &mechanical_report,
         )?;
-        append_review_context_section(
+        append_single_candidate_context_section_compact(
+            &mut prompt,
+            "Immutable Candidate Artifact Refs",
+            &json!({
+                "plan_candidate_ir_ref": ir_ref,
+                "mechanical_report_ref": report_ref,
+            }),
+        )?;
+        append_single_candidate_context_section_compact(
             &mut prompt,
             "Immutable Candidate Artifact Refs",
             &json!({
@@ -201,7 +213,7 @@ impl WorkspaceEngine {
                 .work_item_plan_source_revision_ref
                 .clone()
                 .unwrap_or_default();
-            append_review_context_section(
+            append_single_candidate_context_section_compact(
                 &mut prompt,
                 "Deterministic Structure Report",
                 &json!({
@@ -212,7 +224,7 @@ impl WorkspaceEngine {
                     "protected_predicates": structure.protected_predicates,
                 }),
             )?;
-            append_review_context_section(
+            append_single_candidate_context_section_compact(
                 &mut prompt,
                 "Structure Context Identity",
                 &json!({
@@ -225,7 +237,7 @@ impl WorkspaceEngine {
                     "report_digest": structure.report_digest,
                 }),
             )?;
-            append_review_context_section(
+            append_single_candidate_context_section_compact(
                 &mut prompt,
                 "Structural Repair Audit",
                 &json!({
@@ -316,4 +328,24 @@ impl WorkspaceEngine {
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         })
     }
+}
+
+/// D1（REQ-WSC-06「reviewer 无损紧凑序列化」）：SC 投影专用的**局部**
+/// compact JSON 段输出——与通用 pretty 段函数同构（同标题头、同错误面），
+/// 仅把载荷从 pretty 换成 compact：去掉缩进/换行等序列化冗余，section
+/// 顺序、所有键值、数组顺序、绑定 refs、结构审计与 D6 内容零变化。
+/// 局部于本 include 目标（不改 review_context.rs 的通用 pretty helper，
+/// 不构成第二个全局序列化策略）；Cross-Item 段及其值完整保留。
+fn append_single_candidate_context_section_compact(
+    prompt: &mut String,
+    title: &str,
+    value: &impl serde::Serialize,
+) -> Result<(), String> {
+    prompt.push_str(&format!("\n### {title}\n"));
+    prompt.push_str(
+        &serde_json::to_string(value)
+            .map_err(|error| format!("serialize Plan Review Context `{title}` failed: {error}"))?,
+    );
+    prompt.push('\n');
+    Ok(())
 }
