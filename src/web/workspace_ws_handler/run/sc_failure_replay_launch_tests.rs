@@ -8,7 +8,7 @@
 //! 不伪造 provider 启动：`provider_start` 一律经真实审计 sink（`LifecycleStore`
 //! 的 `ToolPolicyAuditSink::append`，与 adapter 的 run-bound sink 同一准入）。
 
-use super::sc_failure_replay_completed_tests::{bind_original, classify, evidence_rows};
+use super::replay_completed_tests::{bind_original, classify, evidence_rows};
 use super::tests::actual_starts;
 use super::*;
 use crate::cross_cutting::tool_policy_audit::{

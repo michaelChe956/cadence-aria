@@ -80,6 +80,12 @@ const SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE: &str =
 #[path = "sc_failure_transport.rs"]
 pub(super) mod sc_failure_transport;
 
+/// P08：SC 轮入场编排（Ready 才真实 start / Completed 复用 durable raw /
+/// Waiting 走既有 CAS / 显式 fresh 的当前 operation 绑定）——自 transport 物理
+/// 拆出以守 1200 行硬线。
+#[path = "sc_failure_round_entry.rs"]
+pub(super) mod sc_failure_round_entry;
+
 /// P09：SC 失败证据 blocking reasons 纯拼装（compile/IR/structure 三通道共用）。
 #[path = "sc_failure_evidence.rs"]
 pub(super) mod sc_failure_evidence;
@@ -138,10 +144,8 @@ pub(super) mod single_candidate_compile_preflight;
 mod single_candidate_delivery;
 
 use single_candidate_compile_preflight::{
-    compile_failure_surface, emit_author_ears_normalized_event,
-    emit_author_heading_normalized_event, emit_contract_autorepair_instructions_event,
-    prepare_author_delivery_for_compile, prevalidate_plan_candidate_ir,
-    record_equivalence_canonicalizations,
+    compile_failure_surface, emit_contract_autorepair_instructions_event,
+    prevalidate_plan_candidate_ir, record_equivalence_canonicalizations,
 };
 use single_candidate_structure_reredrive::{
     close_sc_teaching_delivered, drive_compile_teaching_reredrive,
@@ -638,17 +642,6 @@ pub(crate) async fn run_single_candidate_author(
         ),
     }
     .map_err(SingleCandidateProviderRunError::Message)?;
-    let node_id = if engine.active_node_type()
-        == Some(crate::web::workspace_ws_types::TimelineNodeType::AuthorRun)
-    {
-        engine.active_timeline_node_id().ok_or_else(|| {
-            SingleCandidateProviderRunError::Message(
-                "single candidate author run node unavailable".to_string(),
-            )
-        })?
-    } else {
-        engine.begin_work_item_plan_author_run().await
-    };
     #[cfg(test)]
     super::record_single_candidate_generation_step(
         &engine.session().session_id,
@@ -663,14 +656,6 @@ pub(crate) async fn run_single_candidate_author(
         }
         (None, _) => "发送给 SingleCandidate markdown author 的完整提示词",
     };
-    engine
-        .emit_provider_prompt_event(
-            &node_id,
-            full_prompt.clone(),
-            prompt_event_detail,
-            Some(author_provider.clone()),
-        )
-        .await;
     // B2c（Task 5.5，设计 §5.3 sc_author 行）：fresh 重入走 fresh input
     // builder——resume_provider_session_id 结构性为 None（全新物理 native，
     // 不回捞旧会话）；正常 run 维持 resume 候选路径零变化。
@@ -702,85 +687,90 @@ pub(crate) async fn run_single_candidate_author(
     let business_key = engine
         .sc_author_business_key_for_failure_chain()
         .map_err(SingleCandidateProviderRunError::Message)?;
-    // P08：SC 物理轮绑定（真实 handle → chain 身份 → durable RoundBound，
-    // provider 启动之前落盘）。LC 与非 LC 同形：都分配真实 handle。
-    let bound = match sc_failure_transport::begin_sc_failure_round(
+    // P08：SC 物理轮绑定（真实 handle → chain → durable RoundBound，启动前落盘）。
+    // Case 5/6：显式 fresh operation 的物理身份由**当前 operation item** 决定——
+    // 已绑定则只分类既有轮（不新 node/seq）；未绑定则沿旧链锚新建 AuthorRun node
+    // 并以 max(ordinal)+1 绑定。非 fresh 保持「active 复用，否则新建」原样。
+    let entry = sc_failure_round_entry::begin_sc_author_round_entry(
+        engine,
         &lifecycle,
         &sc_failure_transport::sc_failure_scope_for(engine),
         &business_key,
-        None,
-        &node_id,
         &author_provider,
-        0,
-    ) {
-        Ok(bound) => bound,
-        Err(failure) => {
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
-            );
-            return Err(SingleCandidateProviderRunError::Message(format!("{failure}")));
+        is_fresh_context,
+    )
+    .await?;
+    // 只有 `Ready` 可真实启动；`Completed` 复用严格 durable raw；`Waiting` 走既有
+    // `LcResumeRecoveryState::Waiting` CAS（不第二 start、不落 Failed/A4 终局）。
+    let (bound, replayed_round) = match entry {
+        sc_failure_transport::ScRoundEntry::Ready(bound) => (bound, None),
+        sc_failure_transport::ScRoundEntry::Completed {
+            bound,
+            raw_text,
+            raw,
+        } => (bound, Some((raw_text, raw))),
+        sc_failure_transport::ScRoundEntry::Waiting {
+            bound,
+            reason_code,
+            detail,
+        } => {
+            return Err(sc_failure_round_entry::wait_sc_round_launch(
+                engine,
+                &bound,
+                reason_code,
+                &detail,
+            )
+            .await);
         }
     };
-    // T6 fix-loop r2：trust 分类已下沉 start_work_item_plan_author 的
-    // Logical 分支共享口（preflight 之后的撤销窗口残余同样以分类面呈现）。
-    let provider_session = start_work_item_plan_author(
-        launch.clone(),
-        Arc::clone(&provider_for_run),
-        provider_input,
-        run_cancel.clone(),
-        Some(&bound.split),
-    )
-    .await;
-    let full_output = match engine
-        .drive_work_item_plan_provider_session_to_output(
-            provider_session,
-            command_rx,
-            node_id.clone(),
-            author_provider.clone(),
-        )
-        .await
-    {
-        Ok(output) => output,
-        Err(message) => {
-            crate::web::workspace_ws_handler::run::fail_plan_split_run(
-                Some(&bound.split),
-                &format!("provider session drive failed: {message}"),
+    let node_id = bound.round.node_id.clone();
+    let mut current_round: Option<(ScEvidenceRef, ScRoundIdentity)>;
+    let full_output = match replayed_round {
+        // 已完成轮严格重放：同一 normalizer 复用 durable raw（零 start/claim、不改
+        // 完成时间、不重发提示词事件）。
+        Some((raw_text, raw)) => {
+            let delivery = sc_failure_transport::replayed_sc_round_delivery(
+                raw_text,
+                raw,
+                bound.round.clone(),
             );
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
-            );
-            return Err(SingleCandidateProviderRunError::AlreadyFinished);
+            current_round = Some((delivery.raw, bound.round.clone()));
+            delivery.source
+        }
+        None => {
+            engine
+                .emit_provider_prompt_event(
+                    &node_id,
+                    full_prompt.clone(),
+                    prompt_event_detail,
+                    Some(author_provider.clone()),
+                )
+                .await;
+            // T6 fix-loop r2：trust 分类已下沉 start_work_item_plan_author 的
+            // Logical 分支共享口（preflight 之后的撤销窗口残余同样以分类面呈现）；
+            // 真实 start/驱动/严格收口整体在 `drive_ready_sc_round`（同出口语义）。
+            let delivery = match sc_failure_round_entry::drive_ready_sc_round(
+                engine,
+                &lifecycle,
+                &launch,
+                Arc::clone(&provider_for_run),
+                provider_input,
+                &run_cancel,
+                command_rx,
+                &node_id,
+                &author_provider,
+                &full_prompt,
+                &bound,
+            )
+            .await
+            {
+                Ok(delivery) => delivery,
+                Err(error) => return Err(error),
+            };
+            current_round = Some((delivery.raw, bound.round.clone()));
+            delivery.source
         }
     };
-    // P08 严格收口（complete → 读回真实 raw → 逐字比较 → 才 finalize 纪元）。
-    // 失败保留严格证据错误原文并立即停止，不交付无 durable raw 的 source。
-    let mut current_round: Option<(ScEvidenceRef, ScRoundIdentity)> =
-        match sc_failure_transport::close_sc_split_round(
-            &lifecycle,
-            &bound,
-            &full_prompt,
-            &full_output,
-        ) {
-            Ok(raw) => Some((raw, bound.round.clone())),
-            Err(failure) => {
-                engine.persist_single_candidate_terminal_phase(
-                    crate::product::models::SingleCandidatePhase::Failed,
-                );
-                return Err(SingleCandidateProviderRunError::Message(format!("{failure}")));
-            }
-        };
-    let delivery = prepare_author_delivery_for_compile(&full_output);
-    emit_author_heading_normalized_event(
-        engine,
-        &node_id,
-        &full_output,
-        &delivery,
-        &author_provider,
-    )
-    .await;
-    emit_author_ears_normalized_event(engine, &node_id, &full_output, &delivery, &author_provider)
-        .await;
-    let full_output = delivery.source;
     // F2-B/SG6a.2（REQ-SG-05）/O1（裁决二 §2.2/§2.4）：教学重驱资格只认
     // typed 事实（WSC-09 判据面）；converge 单次编译不本地改写 source，
     // 机器指令渲染进 owner 可见呈现面、缺口沿机械 verdict 通道（F5-A）

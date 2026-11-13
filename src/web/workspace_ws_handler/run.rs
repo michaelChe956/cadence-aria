@@ -35,6 +35,10 @@ mod single_candidate;
 // 归一化 helper（`prepare_author_delivery_for_compile` 与两个归一化事件发射器）
 // 是 `pub(in single_candidate)` 可见性，只有 single_candidate 子树可达。
 pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_failure_transport;
+// P08：SC 轮入场编排（Ready 才真实 start / Completed 复用 durable raw / Waiting
+// 走既有 CAS）的 run 级路径登记。实现文件为 `run/sc_failure_round_entry.rs`；
+// 模块本体声明在 single_candidate.rs 内（与 P01 transport 同形）。
+pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_failure_round_entry;
 // P09：SC 失败证据 blocking reasons 的 run 级路径登记。实现文件为
 // `run/sc_failure_evidence.rs`；模块本体声明在 single_candidate.rs 内。
 pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_failure_evidence;
