@@ -11,5 +11,6 @@ export * from "./types/logical-codebase-bootstrap";
 export * from "./types/provider-capability";
 export * from "./types/pointer-publication";
 export * from "./types/provider";
+export * from "./types/sc-failure-repair";
 export * from "./types/work-item-plan";
 export * from "./types/workspace";
