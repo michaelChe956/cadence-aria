@@ -338,3 +338,229 @@ impl WorkspaceEngine {
         artifact_ref
     }
 }
+
+#[cfg(test)]
+mod update_artifact_tests {
+    use super::*;
+    use crate::product::app_paths::ProductAppPaths;
+    use tempfile::TempDir;
+
+    /// 持久引擎 fixture：真实 `LifecycleStore` + 真实 checkpoint store；保留事件接收端，
+    /// 便于断言失败路径没有广播 `ArtifactUpdate`。
+    fn persistent_engine() -> (
+        TempDir,
+        LifecycleStore,
+        WorkspaceEngine,
+        mpsc::Receiver<EngineEvent>,
+        String,
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let checkpoint_store = Arc::new(CheckpointStore::new(tmp.path().to_path_buf()));
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, rx) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+                work_item_plan_options: None,
+            })
+            .unwrap();
+        let session_id = session_record.id.clone();
+        let session = WorkspaceSession::from_record(session_record);
+        let engine = WorkspaceEngine::new_persistent(
+            checkpoint_store,
+            lifecycle_store.clone(),
+            tx,
+            session,
+        );
+        (tmp, lifecycle_store, engine, rx, session_id)
+    }
+
+    /// `artifact_versions.json` 的真实落盘路径（与 store 的 `workspace-timelines` 布局一致）。
+    fn artifact_versions_path(tmp: &TempDir, session_id: &str) -> std::path::PathBuf {
+        ProductAppPaths::new(tmp.path().join(".aria"))
+            .issue_lifecycle_root("project_0001", "issue_0001")
+            .join("workspace-timelines")
+            .join(session_id)
+            .join("artifact_versions.json")
+    }
+
+    fn story_payload() -> ArtifactPayload {
+        ArtifactPayload::Markdown {
+            markdown: "# Story Spec".to_string(),
+            diff: None,
+        }
+    }
+
+    fn version_at_max() -> ArtifactVersion {
+        ArtifactVersion {
+            version: u32::MAX,
+            payload: story_payload(),
+            generated_by: ProviderName::ClaudeCode,
+            reviewed_by: None,
+            review_verdict: None,
+            confirmed_by: None,
+            is_current: true,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            source_node_id: "timeline_node_001".to_string(),
+        }
+    }
+
+    fn saw_artifact_update(rx: &mut mpsc::Receiver<EngineEvent>) -> bool {
+        let mut saw = false;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, EngineEvent::ArtifactUpdate { .. }) {
+                saw = true;
+            }
+        }
+        saw
+    }
+
+    #[tokio::test]
+    async fn update_artifact_surfaces_raw_read_failure_without_touching_memory() {
+        let (tmp, store, mut engine, mut rx, session_id) = persistent_engine();
+        let versions_path = artifact_versions_path(&tmp, &session_id);
+        std::fs::create_dir_all(versions_path.parent().unwrap()).unwrap();
+        let corrupt = b"{ this is not json";
+        std::fs::write(&versions_path, corrupt).unwrap();
+
+        let node_id = engine
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::AuthorRun,
+                agent: Some(ProviderName::ClaudeCode),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "Story 生成".to_string(),
+                summary: None,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+
+        let error = engine
+            .update_artifact(story_payload())
+            .await
+            .expect_err("损坏的 artifact_versions raw 必须上浮为 Err");
+
+        assert!(
+            error.starts_with("artifact_versions_write_failed:"),
+            "错误必须带步骤前缀：{error}"
+        );
+        assert!(engine.session.artifact.is_none(), "失败不得提交 session.artifact");
+        assert!(
+            engine.artifact_versions.is_empty(),
+            "失败不得提交 engine.artifact_versions"
+        );
+        assert_eq!(
+            std::fs::read(&versions_path).unwrap(),
+            corrupt.to_vec(),
+            "失败不得改写磁盘真值"
+        );
+        let registered_ref = store
+            .load_node_detail(&session_id, &node_id)
+            .ok()
+            .and_then(|detail| detail.artifact_ref);
+        assert!(
+            registered_ref.is_none(),
+            "失败路径不得登记 artifact ref：{registered_ref:?}"
+        );
+        assert!(
+            !saw_artifact_update(&mut rx),
+            "失败路径不得广播 ArtifactUpdate"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_artifact_surfaces_version_space_exhaustion() {
+        let (_tmp, store, mut engine, mut rx, session_id) = persistent_engine();
+        store
+            .save_artifact_versions(&session_id, &[version_at_max()])
+            .unwrap();
+
+        let error = engine
+            .update_artifact(story_payload())
+            .await
+            .expect_err("版本号溢出必须上浮为 Err");
+
+        assert!(
+            error.starts_with("artifact_versions_write_failed:"),
+            "错误必须带步骤前缀：{error}"
+        );
+        assert!(
+            error.contains("version_space_exhausted"),
+            "错误必须指明版本空间耗尽：{error}"
+        );
+        assert!(engine.session.artifact.is_none(), "失败不得提交 session.artifact");
+        assert!(
+            engine.artifact_versions.is_empty(),
+            "失败不得提交 engine.artifact_versions"
+        );
+        assert!(
+            !saw_artifact_update(&mut rx),
+            "失败路径不得广播 ArtifactUpdate"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_artifact_without_lifecycle_store_rejects_version_overflow() {
+        let (_tmp, _store, mut engine, mut rx, _session_id) = persistent_engine();
+        engine.lifecycle_store = None;
+        engine.artifact_versions = vec![version_at_max()];
+
+        let error = engine
+            .update_artifact(story_payload())
+            .await
+            .expect_err("无持久存储时版本号溢出必须上浮为 Err");
+
+        assert!(
+            error.starts_with("artifact_versions_write_failed:"),
+            "错误必须带步骤前缀：{error}"
+        );
+        assert!(engine.session.artifact.is_none(), "失败不得提交 session.artifact");
+        assert_eq!(
+            engine.artifact_versions.len(),
+            1,
+            "失败不得改写既有内存版本表"
+        );
+        assert!(
+            !saw_artifact_update(&mut rx),
+            "失败路径不得广播 ArtifactUpdate"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_artifact_persists_version_then_commits_memory() {
+        let (tmp, store, mut engine, mut rx, session_id) = persistent_engine();
+
+        let artifact_ref = engine
+            .update_artifact(story_payload())
+            .await
+            .expect("健康路径的 artifact 写入必须成功");
+
+        assert_eq!(artifact_ref.version, 1);
+        assert_eq!(artifact_ref.artifact_id, "artifact_version_001");
+        assert!(
+            matches!(engine.session.artifact, Some(ArtifactPayload::Markdown { .. })),
+            "成功后才提交 session.artifact"
+        );
+        assert_eq!(engine.artifact_versions.len(), 1);
+        assert!(engine.artifact_versions[0].is_current);
+        let persisted = store.list_artifact_versions(&session_id).unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].version, 1);
+        assert!(
+            artifact_versions_path(&tmp, &session_id).exists(),
+            "成功路径必须真实落盘"
+        );
+        assert!(
+            saw_artifact_update(&mut rx),
+            "成功路径必须广播 ArtifactUpdate"
+        );
+    }
+}

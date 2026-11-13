@@ -1178,6 +1178,124 @@ mod tests {
         assert!(!provider_allows_artifact_retry(&ProviderName::Pi));
         assert!(provider_allows_artifact_retry(&ProviderName::Codex));
     }
+
+    /// 通过 Story gate 的唯一候选产物（`artifact_selection` 的合规样本）。
+    fn compliant_story_artifact() -> String {
+        "```artifact\n# Story Spec\n\n\
+         ## 范围\n来源 source id: Issue issue_0001；覆盖 provider 检查。\n\n\
+         ## 用户故事\n作为用户，我希望 provider 状态可见。\n\n\
+         ## 功能需求\n- [REQ-001] 系统支持 provider 检查。\n\n\
+         ## 成功标准\n- [AC-001] 用户能看到 provider 状态。\n\n\
+         ## 待确认项\n无。\n\n\
+         ## 非功能需求\n无。\n```\n"
+            .to_string()
+    }
+
+    /// Story/Design 的 void 出口：artifact 落盘失败必须显式暴露为 Error 事件 +
+    /// Failed 节点，且不得推进到 checkpoint / MessageComplete / AuthorConfirm。
+    #[tokio::test]
+    async fn complete_assistant_message_reports_artifact_write_failure_and_fails_node() {
+        use crate::product::app_paths::ProductAppPaths;
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().unwrap();
+        let checkpoint_store = Arc::new(CheckpointStore::new(tmp.path().to_path_buf()));
+        let lifecycle_store = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
+        let (tx, mut rx) = mpsc::channel(64);
+        let session_record = lifecycle_store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "story_spec_0001".to_string(),
+                workspace_type: WorkspaceType::Story,
+                author_provider: ProviderName::ClaudeCode,
+                reviewer_provider: Some(ProviderName::Codex),
+                review_rounds: 2,
+                superpowers_enabled: true,
+                openspec_enabled: true,
+                work_item_plan_options: None,
+            })
+            .unwrap();
+        let session_id = session_record.id.clone();
+        let session = WorkspaceSession::from_record(session_record);
+        let mut engine =
+            WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
+
+        // 真实存储故障：artifact_versions.json 的 raw 不可解析。
+        let versions_path = ProductAppPaths::new(tmp.path().join(".aria"))
+            .issue_lifecycle_root("project_0001", "issue_0001")
+            .join("workspace-timelines")
+            .join(&session_id)
+            .join("artifact_versions.json");
+        std::fs::create_dir_all(versions_path.parent().unwrap()).unwrap();
+        std::fs::write(&versions_path, b"{ this is not json").unwrap();
+
+        let node_id = engine
+            .create_timeline_node(TimelineNodeDraft {
+                node_type: TimelineNodeType::AuthorRun,
+                agent: Some(ProviderName::ClaudeCode),
+                stage: WorkspaceStage::Running,
+                round: None,
+                title: "Story 生成".to_string(),
+                summary: None,
+                status: TimelineNodeStatus::Active,
+            })
+            .await;
+
+        engine
+            .complete_assistant_message(
+                "assistant_msg_001".to_string(),
+                compliant_story_artifact(),
+                false,
+            )
+            .await;
+
+        let mut saw_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let EngineEvent::Error { message } = event {
+                assert!(
+                    message.starts_with("artifact_versions_write_failed:"),
+                    "Error 事件必须带步骤前缀：{message}"
+                );
+                saw_error = true;
+            }
+        }
+        assert!(saw_error, "artifact 落盘失败必须显式暴露为 Error 事件");
+
+        let node = engine
+            .timeline_nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .expect("author run 节点");
+        assert_eq!(
+            node.status,
+            TimelineNodeStatus::Failed,
+            "落盘失败必须把当前节点标记为 Failed"
+        );
+        assert!(
+            engine.session.artifact.is_none(),
+            "失败不得提交 session.artifact"
+        );
+        assert!(
+            engine.artifact_versions.is_empty(),
+            "失败不得提交 engine.artifact_versions"
+        );
+        assert_ne!(
+            engine.current_stage(),
+            WorkspaceStage::AuthorConfirm,
+            "失败不得推进到 AuthorConfirm"
+        );
+        assert!(
+            engine
+                .session
+                .messages
+                .last()
+                .expect("assistant 消息")
+                .checkpoint_id
+                .is_none(),
+            "失败不得创建 checkpoint"
+        );
+    }
 }
 
 mod work_item_plan;
