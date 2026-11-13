@@ -94,9 +94,19 @@ jobs:
           node-version: "20"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Resolve version from tag
+      - name: Resolve version and dist-tag from tag
         id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        # 预发布版本（版本号带 -rcN/-betaN 之类后缀）必须挂 `next` 标签，
+        # 否则 `npm publish` 默认用 `latest`，会让预发布版成为所有人的默认
+        # 安装版本（2026-11-14 实测：v0.1.6-rc1 发布后 latest 指向了 rc）。
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -146,10 +156,11 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
+          TAG="${{ steps.ver.outputs.tag }}"
           for key in linux-x64 darwin-x64 darwin-arm64; do
-            npm publish "./npm/cli-${key}" --access public
+            npm publish "./npm/cli-${key}" --access public --tag "$TAG"
           done
-          npm publish "./npm/cli" --access public
+          npm publish "./npm/cli" --access public --tag "$TAG"
 
       # GitHub Release 附件（设计 §6.4）
       - name: Make release assets
