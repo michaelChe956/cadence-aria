@@ -13,8 +13,12 @@
 
 use super::gateway_start::PlanAuthorLaunch;
 use super::sc_failure_transport::{ScAuthorRoundDelivery, ScBoundProviderRound};
+use super::sc_teaching_source::{
+    ScResolvedTeachingSource, ScTeachingSourceInput, verify_sc_teaching_request_sources,
+};
 use super::single_candidate::SingleCandidateProviderRunError;
 use super::*;
+use crate::product::lifecycle_store::sc_failure_evidence::ScFailureEvidenceError;
 use crate::product::lifecycle_store::{ScTeachingClaimOutcome, ScTeachingEstablishOutcome};
 use crate::product::models::{SingleCandidatePhase, WorkspaceSessionRecord};
 use crate::product::planning_failure::PlanningFailureKind;
@@ -22,8 +26,12 @@ use crate::product::work_item_plan_policy::{
     ScTeachingAttemptLifecycle, ScTeachingAttemptOutcome, ScTeachingAttemptRef,
     ScTeachingWindowRequest, ScTeachingWindowStatus,
 };
+use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 use crate::web::types::GenerateWorkItemsRequest;
-use crate::web::workspace_ws_types::{ScEvidenceRef, ScRoundIdentity, ScTeachingDecision};
+use crate::web::workspace_ws_types::{
+    ScEvidenceRef, ScFailureClass, ScFailureChainIdentity, ScFailureScope, ScPromptDisposition,
+    ScRoundIdentity, ScTeachingDecision, ScTeachingPromptEvidence,
+};
 
 /// 结构门拒收的首轮失败描述（终态错误文案用；只述事实，不虚构原因）。
 pub(super) fn structure_gate_first_round_failure() -> String {
@@ -91,32 +99,175 @@ pub(super) fn compile_typed_kinds(
         .collect()
 }
 
-/// 各失败类的窗口请求构造：`failure_source_sha256` 为失败原文摘要（调用方
-/// 预计算，避免结构臂移动 source），`reredrive_prompt` 为已构建的重驱
-/// prompt（其 sha256 进入冻结摘要）。
+/// 各失败类的窗口请求构造：失败源引用/摘要取**真实解析出的失败源**
+/// （`ScResolvedTeachingSource`：split locator 或 canonical revision ref），
+/// prompt 引用/摘要取**已落盘并严格读回**的 prompt 证据（真实 locator +
+/// 已核正文摘要）。构造器名只作审计留痕，**绝不进 `prompt_ref`**。
+///
+/// prompt 证据无可用 locator（历史/缺提示记录）⇒ 显式 Err，不伪造引用。
+#[allow(clippy::result_large_err)] // 证据面错误沿既有 typed 出口上浮。
 pub(super) fn sc_teaching_failure_request(
     binding: &ScTeachingChainBinding,
-    failure_source_sha256: String,
+    source: &ScResolvedTeachingSource,
     failure_typed_kinds: Vec<PlanningFailureKind>,
-    prompt_ref: &str,
+    prompt: &ScTeachingPromptEvidence,
     instruction_digest: String,
-    reredrive_prompt: &str,
-) -> ScTeachingWindowRequest {
-    ScTeachingWindowRequest {
+) -> Result<ScTeachingWindowRequest, ScFailureEvidenceError> {
+    let ScEvidenceRef::Available {
+        locator: prompt_ref,
+        sha256: prompt_digest,
+        ..
+    } = &prompt.prompt
+    else {
+        return Err(ScFailureEvidenceError {
+            code: "sc_failure_prompt_ref_missing".to_string(),
+            step: "sc_teaching_failure_request".to_string(),
+            round_id: Some(prompt.failed_round_id.clone()),
+            detail: "教学提示证据无可用 locator，无法构造窗口请求".to_string(),
+            publication_incomplete: false,
+            verified_prefix: None,
+        });
+    };
+    Ok(ScTeachingWindowRequest {
         // 判据②：author 走 start_work_item_plan_author 且 Task 4 回填已接线。
         provider_path_admissible: true,
-        // 初次可教学失败处尚无 durable 候选 source 引用 ⇒ 显式 None。
-        failure_source_ref: None,
-        failure_source_sha256,
+        // 失败源引用 = 本轮真实失败源（与证据面同源；缺失 ⇒ 无引用可填）。
+        failure_source_ref: Some(source.failure_source_ref.clone()),
+        failure_source_sha256: source.sha256.clone(),
         failure_typed_kinds,
         business_request_digest: binding.business_request_digest.clone(),
         material_digests: binding.material_digests.clone(),
         context_digest: binding.context_digest.clone(),
         allowed_edit_closure: SC_TEACHING_ALLOWED_EDIT_CLOSURE.to_string(),
         instruction_digest,
-        prompt_ref: prompt_ref.to_string(),
-        prompt_digest: sc_sha256(reredrive_prompt),
+        prompt_ref: prompt_ref.clone(),
+        prompt_digest: prompt_digest.clone(),
+    })
+}
+
+/// 启动前复验用的冻结事实：失败源输入（本轮真实 raw/source 引用——零回退
+/// latest/last-good、不以摘要当身份）+ 已核验的窗口请求 + 已落盘读回的
+/// prompt 证据。
+#[derive(Debug)]
+pub(super) struct ScTeachingStartVerify {
+    /// 失败轮身份（复验时的轮绑定）。
+    pub identity: ScRoundIdentity,
+    /// 失败类别（来源类别只由它决定，绝不从 locator 反猜）。
+    pub failure_class: ScFailureClass,
+    /// 本轮 raw 引用（split 原始正文）。
+    pub raw: ScEvidenceRef,
+    /// 本轮失败源引用（split locator / canonical revision ref）。
+    pub source: ScEvidenceRef,
+    /// 已核验的窗口请求（引用/摘要冻结面）。
+    pub request: ScTeachingWindowRequest,
+    /// 已落盘并严格读回的 prompt 证据。
+    pub prompt_evidence: ScTeachingPromptEvidence,
+}
+
+impl ScTeachingStartVerify {
+    /// 复验用的借用输入（与 resolver 的冻结契约同形：只四个引用，无
+    /// `ScRoundEvidence`、无默认教学决定）。
+    fn source_input(&self) -> ScTeachingSourceInput<'_> {
+        ScTeachingSourceInput {
+            identity: &self.identity,
+            failure_class: &self.failure_class,
+            raw: &self.raw,
+            source: &self.source,
+        }
     }
+}
+
+/// 启动前复验（硬前置 ⇒ 零额外启动）：失败源引用/摘要必须与真实失败源
+/// 一致（P20 复验：读真实 source，不取最新、不回退 last-good），且教学
+/// 提示正文必须严格读回、摘要与窗口请求一致。任一不符 ⇒ 零启动（不 claim、
+/// 不发 prompt 事件、不起 provider）。
+#[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同既有先例）。
+pub(super) fn verify_sc_teaching_start(
+    lifecycle: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+    verify: &ScTeachingStartVerify,
+) -> Result<(), SingleCandidateProviderRunError> {
+    verify_sc_teaching_request_sources(
+        lifecycle,
+        &chain.scope,
+        &verify.source_input(),
+        &verify.request,
+    )
+    .map_err(|error| {
+        SingleCandidateProviderRunError::Message(format!(
+            "SC 教学重驱启动前复验失败（失败源不可用）：{error}"
+        ))
+    })?;
+    let body = lifecycle
+        .read_sc_teaching_prompt(chain, &verify.request.prompt_ref)
+        .map_err(|error| {
+            SingleCandidateProviderRunError::Message(format!(
+                "SC 教学重驱启动前复验失败（教学提示正文不可读）：{error}"
+            ))
+        })?;
+    if sc_sha256(&body) != verify.request.prompt_digest {
+        return Err(SingleCandidateProviderRunError::Message(
+            "SC 教学重驱启动前复验失败：教学提示正文摘要与窗口请求不一致".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 实际发送后的处置记账：只有**真的发出**才记 `Sent`（预算拒绝/仅装配
+/// 永不冒充已发送）。正文与已落盘全文逐字相同（不可变正文守卫），失败
+/// 只留告警——发送事实不因记账失败而被改写。
+pub(super) fn record_sc_teaching_prompt_sent(
+    lifecycle: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+    verify: &ScTeachingStartVerify,
+    text: &str,
+) {
+    let evidence = &verify.prompt_evidence;
+    let outcome = lifecycle.put_sc_teaching_prompt(
+        chain,
+        &evidence.failed_round_id,
+        evidence.target_round_ordinal,
+        &evidence.builder_id,
+        text,
+        ScPromptDisposition::Sent,
+    );
+    if let Err(error) = outcome {
+        tracing::warn!(
+            session_id = %chain.scope.session_id,
+            error = ?error,
+            "record sc teaching prompt sent failed (send stands)"
+        );
+    }
+}
+
+/// 结构臂失败源的真实摘要面：只读该轮 sealed 的 canonical revision（不取
+/// 最新、不回退 last-good）——事实面的 source 摘要/字节必须是该 revision
+/// 的真值（split locator 冒充 ⇒ 拒绝）。
+#[allow(clippy::result_large_err)] // 证据面错误沿既有 typed 出口上浮。
+pub(super) fn structure_source_digest(
+    lifecycle: &LifecycleStore,
+    scope: &ScFailureScope,
+    locator: &str,
+) -> Result<(String, u64), ScFailureEvidenceError> {
+    let store = WorkItemPlanSourceStore::new(lifecycle.app_paths());
+    let record = store
+        .get_source_revision(
+            &SourceStoreScope {
+                project_id: scope.project_id.clone(),
+                issue_id: scope.issue_id.clone(),
+                plan_id: scope.plan_id.clone(),
+            },
+            locator,
+        )
+        .map_err(|failure| ScFailureEvidenceError {
+            code: "sc_failure_source_unavailable".to_string(),
+            step: "structure_source_digest".to_string(),
+            round_id: None,
+            detail: format!("读取 source revision 失败: {} ({:?})", failure.code(), failure),
+            publication_incomplete: false,
+            verified_prefix: None,
+        })?;
+    Ok((record.source_revision_hash, record.source.len() as u64))
 }
 
 /// 单槽收口的教学窗口消费判定结果（四类失败共用）。
@@ -344,10 +495,16 @@ pub(super) async fn drive_compile_teaching_reredrive(
     reredrive_prompt: &str,
     repository_path: &std::path::Path,
     attempt: &ScTeachingAttemptRef,
+    // P25：启动前复验用的冻结事实（失败源引用面 + 已核验的窗口请求 +
+    // 已落盘读回的 prompt 证据）——启动前必核，零额外启动。
+    verify: &ScTeachingStartVerify,
     // P08：教学轮沿用原轮链身份；当前轮（raw + 轮身份）推进教学轮 ordinal。
     original: &ScBoundProviderRound,
     previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
 ) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
+    // 启动前复验（硬前置）：失败源引用/摘要与 prompt 正文摘要都必须与冻结
+    // 请求一致；任一不符 ⇒ 零启动（不发 prompt 事件、不起 provider）。
+    verify_sc_teaching_start(lifecycle, &original.chain, verify)?;
     engine
         .emit_execution_event(
             ProviderExecutionEvent {
@@ -373,7 +530,7 @@ pub(super) async fn drive_compile_teaching_reredrive(
         node_id,
         author_provider,
     )?;
-    super::sc_failure_transport::drive_single_candidate_reredrive(
+    let delivery = super::sc_failure_transport::drive_single_candidate_reredrive(
         engine,
         launch,
         Arc::clone(provider_for_run),
@@ -387,7 +544,10 @@ pub(super) async fn drive_compile_teaching_reredrive(
         lifecycle,
         Some(attempt),
     )
-    .await
+    .await?;
+    // 真的发出之后才记 `Sent`（预算拒绝/仅装配永不冒充已发送）。
+    record_sc_teaching_prompt_sent(lifecycle, &original.chain, verify, reredrive_prompt);
+    Ok(delivery)
 }
 
 /// 结构门拒收教学重驱：发一条可观测的 prompt 事件（与 compile/IR 重驱的
@@ -409,10 +569,16 @@ pub(super) async fn drive_structure_gate_reredrive(
     repair_prompt: &str,
     repository_path: &std::path::Path,
     sc_teaching_attempt: Option<&ScTeachingAttemptRef>,
+    // P25：启动前复验用的冻结事实（失败源引用面 + 已核验的窗口请求 +
+    // 已落盘读回的 prompt 证据）——启动前必核，零额外启动。
+    verify: &ScTeachingStartVerify,
     // P08：教学轮沿用原轮链身份；当前轮（raw + 轮身份）推进教学轮 ordinal。
     original: &ScBoundProviderRound,
     previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
 ) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
+    // 启动前复验（硬前置）：失败源引用/摘要与 prompt 正文摘要都必须与冻结
+    // 请求一致；任一不符 ⇒ 零启动（不发 prompt 事件、不起 provider）。
+    verify_sc_teaching_start(lifecycle, &original.chain, verify)?;
     engine
         .emit_execution_event(
             ProviderExecutionEvent {
@@ -443,7 +609,7 @@ pub(super) async fn drive_structure_gate_reredrive(
         node_id,
         author_provider,
     )?;
-    super::sc_failure_transport::drive_single_candidate_reredrive(
+    let delivery = super::sc_failure_transport::drive_single_candidate_reredrive(
         engine,
         launch,
         provider_for_run,
@@ -457,7 +623,10 @@ pub(super) async fn drive_structure_gate_reredrive(
         lifecycle,
         sc_teaching_attempt,
     )
-    .await
+    .await?;
+    // 真的发出之后才记 `Sent`（预算拒绝/仅装配永不冒充已发送）。
+    record_sc_teaching_prompt_sent(lifecycle, &original.chain, verify, repair_prompt);
+    Ok(delivery)
 }
 
 /// Task 8（tasks 5.1/5.2，REQ-WSC-25/28D；评审 Important-1 修订）：generate

@@ -145,15 +145,28 @@ use single_candidate_compile_preflight::{
 use single_candidate_structure_reredrive::{
     close_sc_teaching_delivered, drive_compile_teaching_reredrive,
     record_generate_segment_compile_failure, record_generate_segment_ir_validation_failure,
-    sc_sha256, sc_teaching_chain_binding,
+    sc_teaching_chain_binding,
 };
-// Task 4：`is_teachable_parse_failure` 判据已由 `teaching_verdict` 接管，
-// 已切 `build_preflight_ir_reredrive_prompt`——两者仅为 `ir_prompt_tests`
-//（经 `use super::*`）保名。
+// 终局面的类型/常量别名：真实组包与发布在
+// `sc_failure_evidence::sc_failure_terminal` 子模块内实现，本层只取用出口。
+use sc_failure_evidence::sc_failure_terminal::{
+    SC_TERMINAL_CLASS_COMPILE, SC_TERMINAL_CLASS_IR_PREFLIGHT, SC_TERMINAL_CLASS_STRUCTURE_GATE,
+    terminal_exit_error,
+};
+// Task 4：`is_teachable_parse_failure` 判据已由 `teaching_verdict` 接管；
+// IR 重驱 prompt 的构造已下沉 P22 facade（生产与测试同一入口，旧 builder
+// 别名不再保名）。
 #[cfg(test)]
-use single_candidate_compile_preflight::{
-    build_work_item_plan_ir_reredrive_prompt, is_teachable_parse_failure,
-};
+use single_candidate_compile_preflight::is_teachable_parse_failure;
+
+/// 教学链失败的终局原因文案：既有 `Message` 载荷逐字取用（原始失败原因不
+/// 丢），其余变体按 Debug 呈现（该错误类型无 Display）。
+fn sc_teaching_terminal_reason(error: &SingleCandidateProviderRunError) -> String {
+    match error {
+        SingleCandidateProviderRunError::Message(message) => message.clone(),
+        other => format!("{other:?}"),
+    }
+}
 
 fn preflight_lc_member_rules_before_author_run(
     engine: &mut WorkspaceEngine,
@@ -802,7 +815,7 @@ pub(crate) async fn run_single_candidate_author(
                 let detail = reasons.join("; ");
                 // Task 6：事实写读 → 既有资格/窗口 claim → 真实判定写读，
                 // 全在 grant 之前（原窗口 establish/漂移/claim 顺序不变）。
-                let grant = sc_failure_evidence::gate_compile_failure(
+                let grant = match sc_failure_evidence::gate_compile_failure(
                     engine,
                     &lifecycle,
                     &bound,
@@ -813,7 +826,22 @@ pub(crate) async fn run_single_candidate_author(
                     &teaching_binding,
                     &design_requirement_ids,
                     &detail,
-                )?;
+                ) {
+                    Ok(grant) => grant,
+                    // 失败源/预算/审计失败：判定与缺提示记录已 durable ⇒ 交终局
+                    // 处理器组包（不只丢一条 Message 丢掉终局）。
+                    Err(error) => {
+                        return Err(terminal_exit_error(
+                            engine,
+                            &lifecycle,
+                            &bound.chain,
+                            SC_TERMINAL_CLASS_COMPILE,
+                            Vec::new(),
+                            format!("SC compile 失败收口：{}", sc_teaching_terminal_reason(&error)),
+                        )
+                        .await);
+                    }
+                };
                 // Task 8（5.1/5.2，REQ-WSC-25/28D）：generate 段失败流水行
                 // （阶段=Parse/TypedLowering/TypedIrValidation；non-blocking）。
                 record_generate_segment_compile_failure(engine, &lifecycle, &diagnostics, &detail);
@@ -835,6 +863,7 @@ pub(crate) async fn run_single_candidate_author(
                             &grant.reredrive_prompt,
                             &repository.path,
                             &grant.attempt,
+                            &grant.verify,
                             &bound,
                             current_round.as_ref(),
                         )
@@ -854,11 +883,11 @@ pub(crate) async fn run_single_candidate_author(
                          {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
                     ),
                 };
-                return Err(sc_failure_evidence::terminal_exit_error(
+                return Err(terminal_exit_error(
                     engine,
                     &lifecycle,
                     &bound.chain,
-                    sc_failure_evidence::SC_TERMINAL_CLASS_COMPILE,
+                    SC_TERMINAL_CLASS_COMPILE,
                     Vec::new(),
                     message,
                 )
@@ -892,7 +921,7 @@ pub(crate) async fn run_single_candidate_author(
             // Task 6：与 compile 类共用同一耐久教学窗口（无独立槽位）。
             // Task 6：与 compile 类共用同一耐久教学窗口（无独立槽位）。
             let detail = preflight.presentation_reasons().join("; ");
-            let grant = sc_failure_evidence::gate_ir_failure(
+            let grant = match sc_failure_evidence::gate_ir_failure(
                 engine,
                 &lifecycle,
                 &bound,
@@ -902,7 +931,22 @@ pub(crate) async fn run_single_candidate_author(
                 &teaching_binding,
                 &design_requirement_ids,
                 &detail,
-            )?;
+            ) {
+                Ok(grant) => grant,
+                // 失败源/预算/审计失败：判定与缺提示记录已 durable ⇒ 交终局
+                // 处理器组包（不只丢一条 Message 丢掉终局）。
+                Err(error) => {
+                    return Err(terminal_exit_error(
+                        engine,
+                        &lifecycle,
+                        &bound.chain,
+                        SC_TERMINAL_CLASS_IR_PREFLIGHT,
+                        Vec::new(),
+                        format!("SC IR 校验失败收口：{}", sc_teaching_terminal_reason(&error)),
+                    )
+                    .await);
+                }
+            };
             // Task 8（5.1）：typed IR 校验失败流水行（stage=TypedIrValidation）。
             record_generate_segment_ir_validation_failure(engine, &lifecycle, &detail);
             if let Some(grant) = grant {
@@ -923,6 +967,7 @@ pub(crate) async fn run_single_candidate_author(
                         &grant.reredrive_prompt,
                         &repository.path,
                         &grant.attempt,
+                        &grant.verify,
                         &bound,
                         current_round.as_ref(),
                     )
@@ -942,11 +987,11 @@ pub(crate) async fn run_single_candidate_author(
                      {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
                 ),
             };
-            return Err(sc_failure_evidence::terminal_exit_error(
+            return Err(terminal_exit_error(
                 engine,
                 &lifecycle,
                 &bound.chain,
-                sc_failure_evidence::SC_TERMINAL_CLASS_IR_PREFLIGHT,
+                SC_TERMINAL_CLASS_IR_PREFLIGHT,
                 Vec::new(),
                 message,
             )
@@ -954,8 +999,6 @@ pub(crate) async fn run_single_candidate_author(
         }
         // Task 6：结构门类不再有独立槽位——拒收统一交回，重驱资格由同一
         // 教学窗口的 claim 结果决定（Denied ⇒ 停止该生成自动链）。
-        let failure_source_sha256 = sc_sha256(&compile_source);
-        let failure_source_bytes = compile_source.len() as u64;
         break match engine
             .complete_single_candidate_work_item_plan_author(
                 compile_source,
@@ -979,18 +1022,31 @@ pub(crate) async fn run_single_candidate_author(
                     super::single_candidate_structure_reredrive::structure_gate_first_round_failure();
                 // 结构臂不重算 typed 集：原 sealed failure + 原 typed 失败集
                 // 原样进事实写读，重驱资格仍由同一窗口 claim 决定。
-                let grant = sc_failure_evidence::gate_structure_failure(
+                let grant = match sc_failure_evidence::gate_structure_failure(
                     engine,
                     &lifecycle,
                     &bound,
                     current_round.as_ref(),
-                    failure_source_sha256,
-                    failure_source_bytes,
                     &failure,
                     &structure_failures,
                     &teaching_binding,
                     &detail,
-                )?;
+                ) {
+                    Ok(grant) => grant,
+                    // 失败源/预算/审计失败：判定与缺提示记录已 durable ⇒ 交终局
+                    // 处理器组包（不只丢一条 Message 丢掉终局）。
+                    Err(error) => {
+                        return Err(terminal_exit_error(
+                            engine,
+                            &lifecycle,
+                            &bound.chain,
+                            SC_TERMINAL_CLASS_STRUCTURE_GATE,
+                            Vec::new(),
+                            format!("SC 结构门拒收收口：{}", sc_teaching_terminal_reason(&error)),
+                        )
+                        .await);
+                    }
+                };
                 if let Some(grant) = grant {
                     first_round_failure.get_or_insert(detail.clone());
                     let ScAuthorRoundDelivery { source, raw, round } =
@@ -1006,6 +1062,7 @@ pub(crate) async fn run_single_candidate_author(
                             &grant.reredrive_prompt,
                             &repository.path,
                             Some(&grant.attempt),
+                            &grant.verify,
                             &bound,
                             current_round.as_ref(),
                         )
@@ -1028,11 +1085,11 @@ pub(crate) async fn run_single_candidate_author(
                          {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
                     ),
                 };
-                return Err(sc_failure_evidence::terminal_exit_error(
+                return Err(terminal_exit_error(
                     engine,
                     &lifecycle,
                     &bound.chain,
-                    sc_failure_evidence::SC_TERMINAL_CLASS_STRUCTURE_GATE,
+                    SC_TERMINAL_CLASS_STRUCTURE_GATE,
                     Vec::new(),
                     message,
                 )

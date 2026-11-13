@@ -1,24 +1,26 @@
-//! P25：SC 教学重驱 prompt 的审计面（compile/IR/结构三臂共用一份实现）。
+//! P25：SC 教学重驱的审计面（compile/IR/结构三臂共用一份实现）。
 //!
-//! 本模块只做两件事，都是「事实落盘 + 严格读回」：
-//! - `audit_sc_teaching_prompt`：把 facade 装配出的**最终全文**（超预算也
-//!   逐字写入）落成不可变 prompt 证据，并按 locator 严格读回；读回正文
-//!   必须逐字等于写入全文（摘要不符即拒）——审计不成立就不进入任何窗口
-//!   判定，更不 claim。
-//! - `record_sc_prompt_unavailable`：缺提示（失败源/渲染失败）的真实记录
-//!   ——`put` 不接受 `Unavailable`（store 明确拒绝），故走 append 的
-//!   `PromptUnavailable` + `Missing` 真实原因（code/detail/round），绝不
-//!   伪造「已 put」。
+//! 本模块承载两件同族的事，都是「事实落盘 + 严格读回」：
+//! - 教学判定的写读（`observe_sc_teaching_decision`）：判定追加 → 严格读回
+//!   → 读回行逐字核对 → 轮证据投影；缺判定即 Err，绝不默认 `NotRequested`。
+//! - 教学 prompt 的审计（`audit_sc_teaching_prompt`）：把 facade 装配出的
+//!   **最终全文**（超预算也逐字写入）落成不可变 prompt 证据，并按 locator
+//!   严格读回；读回正文必须逐字等于写入全文（摘要不符即拒）——审计不成立
+//!   就不进入任何窗口判定，更不 claim。
+//! - 缺提示的真实记录（`record_sc_prompt_unavailable`）：`put` 不接受
+//!   `Unavailable`（store 明确拒绝），故走 append 的 `PromptUnavailable` +
+//!   `Missing` 真实原因（code/detail/round），绝不伪造「已 put」。
 //!
 //! 全文只装配一次、只落一次、只读一次：本模块不重建正文、不截断、不裁剪。
 use super::sc_teaching_prompt::{ScPreparedTeachingPrompt, ScTeachingPromptBudgetVerdict};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::sc_failure_evidence::{
-    ScFailureEvidenceError, ScFailureEvidenceEvent,
+    ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceEvent,
+    ScFailureEvidenceRead,
 };
 use crate::web::workspace_ws_types::{
-    ScEvidenceRef, ScFailureChainIdentity, ScPromptDisposition, ScRoundIdentity,
-    ScTeachingPromptEvidence,
+    ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScPromptDisposition, ScRoundEvidence,
+    ScRoundIdentity, ScRoundLaunchState, ScTeachingDecision, ScTeachingPromptEvidence,
 };
 
 /// 审计面的稳定步名（错误 step 面）。
@@ -115,11 +117,173 @@ pub(super) fn record_sc_prompt_unavailable(
 /// 审计面稳定错误的统一构造（字段全 pub，与既有 `sc_failure_step_error`
 /// 同形；不新增码、不吞错）。
 fn audit_error(code: &str, round_id: &str, detail: &str) -> ScFailureEvidenceError {
+    sc_failure_step_error(code, STEP_AUDIT, Some(round_id), detail)
+}
+
+/// 一轮失败的事实集合：全部来自本轮真实实参（不做内存 last-valid 回退）。
+#[derive(Debug)]
+pub(super) struct ScFailureFacts {
+    pub failure_class: ScFailureClass,
+    pub blocking_reasons: Vec<String>,
+    pub repair_instructions: Vec<String>,
+    pub raw: ScEvidenceRef,
+    pub source: ScEvidenceRef,
+    pub existing_failure_id: Option<String>,
+    pub attempt_key: Option<String>,
+}
+
+/// 观察结果：只到「本轮 FailureObserved 已真实写读」；判定形成前不产出轮证据，
+/// 也不携带任何默认 `teaching_decision`。
+#[derive(Debug)]
+pub(super) struct ScObservedFailure {
+    pub facts: ScFailureFacts,
+    pub round: ScRoundIdentity,
+    /// 严格读回的本轮 FailureObserved 行（持久化证明，不是内存副本）。
+    pub entry: ScFailureEvidenceEntry,
+}
+
+/// TeachingDecision 追加 → 严格读回 → 仅在此时投影完整轮证据（缺 decision
+/// 即 Err，绝不默认 `NotRequested`）。
+pub(super) fn observe_sc_teaching_decision(
+    lifecycle: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+    observed: &ScObservedFailure,
+    decision: ScTeachingDecision,
+) -> Result<ScRoundEvidence, ScFailureEvidenceError> {
+    const STEP: &str = "observe_sc_teaching_decision";
+    let failed_round_id = observed.round.round_id.clone();
+    let event = ScFailureEvidenceEvent::TeachingDecision {
+        failed_round_id: failed_round_id.clone(),
+        decision,
+    };
+    lifecycle.append_sc_failure_evidence(chain, &event)?;
+    let read = lifecycle.read_sc_failure_evidence(chain)?;
+    let key = teaching_decision_key(&failed_round_id);
+    let entry = read
+        .entries
+        .iter()
+        .find(|entry| entry.entry_key == key)
+        .ok_or_else(|| {
+            sc_failure_step_error(
+                "sc_failure_teaching_decision_missing",
+                STEP,
+                Some(failed_round_id.as_str()),
+                "本轮教学判定未出现在严格读回中",
+            )
+        })?;
+    if entry.event != event {
+        return Err(sc_failure_step_error(
+            "sc_failure_entry_conflict",
+            STEP,
+            Some(failed_round_id.as_str()),
+            "本轮教学判定严格读回与写入正文不一致",
+        ));
+    }
+    project_sc_round_evidence(&read, observed)
+}
+
+/// 完整轮证据投影：只在本轮 FailureObserved 与显式 decision 都已 durable
+/// 之后调用；缺任一项都 Err（不猜默认值）。launch_state 取「该轮确已交付
+/// 输出并产出机械失败」的事实。
+fn project_sc_round_evidence(
+    read: &ScFailureEvidenceRead,
+    observed: &ScObservedFailure,
+) -> Result<ScRoundEvidence, ScFailureEvidenceError> {
+    const STEP: &str = "project_sc_round_evidence";
+    let round_id = observed.round.round_id.clone();
+    let observed_key = failure_observed_key(&round_id);
+    let entry = read
+        .entries
+        .iter()
+        .find(|entry| entry.entry_key == observed_key)
+        .ok_or_else(|| {
+            sc_failure_step_error(
+                "sc_failure_observed_readback_missing",
+                STEP,
+                Some(round_id.as_str()),
+                "轮证据投影缺少本轮 FailureObserved 行",
+            )
+        })?;
+    // 读回行必须就是观察行（它在 `observe_sc_failure` 中已逐字校验过写入事件），
+    // 否则投影不成立——不拿内存事实冒充 durable 行。
+    if entry.event != observed.entry.event {
+        return Err(sc_failure_step_error(
+            "sc_failure_entry_conflict",
+            STEP,
+            Some(round_id.as_str()),
+            "本轮 FailureObserved 读回行与观察行不一致",
+        ));
+    }
+    let prompts = read
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.event {
+            ScFailureEvidenceEvent::PromptPrepared { evidence }
+            | ScFailureEvidenceEvent::PromptUnavailable { evidence }
+                if evidence.failed_round_id == round_id =>
+            {
+                Some(evidence.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<ScTeachingPromptEvidence>>();
+    let decision = read
+        .entries
+        .iter()
+        .rev()
+        .find_map(|entry| match &entry.event {
+            ScFailureEvidenceEvent::TeachingDecision {
+                failed_round_id,
+                decision,
+            } if *failed_round_id == round_id => Some(decision.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            sc_failure_step_error(
+                "sc_failure_teaching_decision_missing",
+                STEP,
+                Some(round_id.as_str()),
+                "轮证据投影缺少显式教学判定，绝不写默认值",
+            )
+        })?;
+    Ok(ScRoundEvidence {
+        identity: observed.round.clone(),
+        launch_state: ScRoundLaunchState::Started,
+        failure_class: Some(observed.facts.failure_class.clone()),
+        blocking_reasons: observed.facts.blocking_reasons.clone(),
+        repair_instructions: observed.facts.repair_instructions.clone(),
+        raw: observed.facts.raw.clone(),
+        source: observed.facts.source.clone(),
+        existing_failure_id: observed.facts.existing_failure_id.clone(),
+        attempt_key: observed.facts.attempt_key.clone(),
+        prompts,
+        teaching_decision: decision,
+    })
+}
+
+/// FailureObserved 行的逻辑槽位键。
+pub(super) fn failure_observed_key(round_id: &str) -> String {
+    format!("failureobserved/{round_id}")
+}
+
+/// 教学判定行的逻辑槽位键。
+pub(super) fn teaching_decision_key(round_id: &str) -> String {
+    format!("teachingdecision/{round_id}")
+}
+
+/// 审计面稳定错误的构造（与既有 `sc_failure_step_error` 同形；字段全 pub，
+/// 不新增码、不吞错）。
+pub(super) fn sc_failure_step_error(
+    code: &str,
+    step: &str,
+    round_id: Option<&str>,
+    detail: impl Into<String>,
+) -> ScFailureEvidenceError {
     ScFailureEvidenceError {
         code: code.to_string(),
-        step: STEP_AUDIT.to_string(),
-        round_id: Some(round_id.to_string()),
-        detail: detail.to_string(),
+        step: step.to_string(),
+        round_id: round_id.map(str::to_string),
+        detail: detail.into(),
         publication_incomplete: false,
         verified_prefix: None,
     }

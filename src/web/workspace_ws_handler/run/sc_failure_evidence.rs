@@ -9,37 +9,55 @@
 //! `FailureObserved` 并严格读回，在 claim 之后、provider 启动之前把真实判定
 //! （`TeachingDecision`）写读一次；顺序与既有 establish/漂移/claim 一字不改。
 use super::single_candidate_compile_preflight::{PreflightVerdict, format_compile_failure_reasons};
-use crate::product::planning_failure::{PlanningFailure, PlanningFailureSet};
+use crate::product::planning_failure::{PlanningFailure, PlanningFailureKind, PlanningFailureSet};
 use crate::product::work_item_plan_compiler::{
     CompilerDiagnostic, IrFault, IrFaultKind, IrFaultLocator,
 };
 
 use super::sc_failure_transport::ScBoundProviderRound;
-use super::single_candidate_compile_preflight::{
-    TeachingVerdict, build_preflight_ir_reredrive_prompt, build_typed_compile_reredrive_prompt,
-    teaching_verdict,
+use super::sc_teaching_audit::{
+    ScFailureFacts, ScObservedFailure, audit_sc_teaching_prompt, failure_observed_key,
+    observe_sc_teaching_decision, record_sc_prompt_unavailable, sc_failure_step_error,
+    sc_teaching_target_ordinal,
 };
+use super::sc_teaching_prompt::{
+    ScPreparedTeachingPrompt, ScTeachingPromptBudgetVerdict, prepare_compile_teaching_prompt,
+    prepare_ir_teaching_prompt, prepare_structure_teaching_prompt,
+};
+use super::sc_teaching_source::{
+    ScResolvedTeachingSource, ScTeachingSourceInput, resolve_sc_teaching_source,
+    verify_sc_teaching_request_sources,
+};
+use super::single_candidate_compile_preflight::{TeachingVerdict, teaching_verdict};
 use super::single_candidate_structure_reredrive::{
-    ScTeachingChainBinding, authorize_sc_teaching_reredrive, compile_typed_kinds, sc_sha256,
-    sc_teaching_failure_request, stable_code_kind,
+    ScTeachingChainBinding, ScTeachingStartVerify, authorize_sc_teaching_reredrive,
+    compile_typed_kinds, sc_sha256, sc_teaching_failure_request, stable_code_kind,
+    structure_source_digest,
 };
 use super::{ScEvidenceRef, ScRoundIdentity, SingleCandidateProviderRunError};
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::sc_failure_evidence::{
-    ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceEvent, ScFailureEvidenceRead,
-    sc_failure_evidence_log_ref,
+    ScFailureEvidenceError, ScFailureEvidenceEvent,
 };
-use crate::product::lifecycle_store::sc_failure_publication::ScLocalTerminal;
 use crate::product::work_item_plan_policy::ScTeachingAttemptRef;
 use crate::product::workspace_engine::PlanningCompileFailure;
+use crate::product::workspace_engine::ScTeachingPromptError;
 use crate::product::workspace_engine::WorkspaceEngine;
 use crate::product::workspace_engine::single_candidate_structure_failure::{
-    STRUCTURE_STABLE_CODE, author_structure_repair_prompt,
+    STRUCTURE_STABLE_CODE, legacy_author_structure_repair_body,
 };
 use crate::web::workspace_ws_types::{
-    ScFailureChainIdentity, ScFailureClass, ScMissingEvidence, ScPackageCompleteness,
-    ScRoundEvidence, ScRoundLaunchState, ScTeachingDecision, ScTeachingPromptEvidence,
+    ScFailureChainIdentity, ScFailureClass, ScTeachingDecision,
 };
+
+/// 三臂的审计用构造器名（**不进 `prompt_ref`**——与 P22 facade 的 builder
+/// id 同名同值，供既有 prompt 证据对照）。
+const COMPILE_BUILDER_ID: &str = "build_typed_compile_reredrive_prompt";
+const IR_BUILDER_ID: &str = "build_preflight_ir_reredrive_prompt";
+const STRUCTURE_BUILDER_ID: &str = "author_structure_repair_prompt";
+
+/// 教学 prompt 超预算的稳定码（真实未请求消费窗口，不是假 Denied）。
+const SC_TEACHING_PROMPT_BUDGET_EXCEEDED: &str = "sc_teaching_prompt_budget_exceeded";
 
 
 /// compile 失败面：逐条 `code:line:message`（复用既有单源形态；顺序即
@@ -153,35 +171,18 @@ fn render_structure_failure(failure: &PlanningFailure) -> String {
 // 每失败轮恰一次的顺序契约：完整本轮事实 → FailureObserved 追加+严格读回 →
 // 既有资格/窗口（establish → 漂移核验 → claim，一字不改）→ 真实判定追加+
 // 严格读回 → 调用方在 grant 后启动重驱 provider。判定只形成一次：store
-// 写读错误 ⇒ 不写任何 decision，fail-closed 上浮。
-
-/// 一轮失败的事实集合：全部来自本轮真实实参（不做内存 last-valid 回退）。
-#[derive(Debug)]
-pub(super) struct ScFailureFacts {
-    pub failure_class: ScFailureClass,
-    pub blocking_reasons: Vec<String>,
-    pub repair_instructions: Vec<String>,
-    pub raw: ScEvidenceRef,
-    pub source: ScEvidenceRef,
-    pub existing_failure_id: Option<String>,
-    pub attempt_key: Option<String>,
-}
-
-/// 观察结果：只到「本轮 FailureObserved 已真实写读」；判定形成前不产出轮证据，
-/// 也不携带任何默认 `teaching_decision`。
-#[derive(Debug)]
-pub(super) struct ScObservedFailure {
-    pub facts: ScFailureFacts,
-    pub round: ScRoundIdentity,
-    /// 严格读回的本轮 FailureObserved 行（持久化证明，不是内存副本）。
-    pub entry: ScFailureEvidenceEntry,
-}
+/// 写读错误 ⇒ 不写任何 decision，fail-closed 上浮。
 
 /// 已形成的重驱授予：返回时判定已 durable 记录（append + 严格读回）。
+///
+/// `reredrive_prompt` 是**已落盘并严格读回**的最终全文（全文只装配一次、
+/// 只落一次、只读一次——此处不再重建）；`verify` 携带启动前复验所需的
+/// 冻结事实（失败源引用面 + 已核验的窗口请求 + prompt 证据）。
 #[derive(Debug)]
 pub(super) struct ScTeachingGrant {
     pub attempt: ScTeachingAttemptRef,
     pub reredrive_prompt: String,
+    pub verify: ScTeachingStartVerify,
 }
 
 /// compile 通道纯 facts（无 I/O）：诊断原文 + **未截断**指令全集；
@@ -225,29 +226,15 @@ pub(super) fn ir_failure_facts(
 }
 
 /// 结构门通道纯 facts：原 typed 失败集逐条渲染（sidecar 原样，不重算）；
-/// source 只认 sealed 失败的 revision ref，缺 ref 显式 Missing，绝不借 split
-/// locator 冒充 revision；existing_failure_id 取 seal 后的内容寻址 id。
+/// source 由调用方给**真实**引用面（sealed canonical revision ref + 该
+/// revision 的真值摘要/字节；缺 ref 或读不到 ⇒ 显式 Missing，绝不借 split
+/// locator 冒充 revision）；existing_failure_id 取 seal 后的内容寻址 id。
 pub(super) fn structure_failure_facts(
     failure: &PlanningCompileFailure,
     structure_failures: &PlanningFailureSet,
     raw: &ScEvidenceRef,
-    round: &ScRoundIdentity,
-    source_sha256: String,
-    source_bytes: u64,
+    source: ScEvidenceRef,
 ) -> ScFailureFacts {
-    let source = match &failure.source_revision_ref {
-        Some(locator) => ScEvidenceRef::Available {
-            locator: locator.clone(),
-            sha256: source_sha256,
-            bytes: source_bytes,
-        },
-        None => ScEvidenceRef::Missing {
-            code: "sc_failure_source_ref_missing".to_string(),
-            detail: "结构失败缺少 source_revision_ref，不能借用 split locator 冒充 revision"
-                .to_string(),
-            round_id: round.round_id.clone(),
-        },
-    };
     ScFailureFacts {
         failure_class: ScFailureClass::StructureGate,
         blocking_reasons: structure_blocking_reasons(structure_failures),
@@ -308,127 +295,9 @@ pub(super) fn observe_sc_failure(
     })
 }
 
-/// TeachingDecision 追加 → 严格读回 → 仅在此时投影完整轮证据（缺 decision
-/// 即 Err，绝不默认 `NotRequested`）。
-pub(super) fn observe_sc_teaching_decision(
-    lifecycle: &LifecycleStore,
-    chain: &ScFailureChainIdentity,
-    observed: &ScObservedFailure,
-    decision: ScTeachingDecision,
-) -> Result<ScRoundEvidence, ScFailureEvidenceError> {
-    const STEP: &str = "observe_sc_teaching_decision";
-    let failed_round_id = observed.round.round_id.clone();
-    let event = ScFailureEvidenceEvent::TeachingDecision {
-        failed_round_id: failed_round_id.clone(),
-        decision,
-    };
-    lifecycle.append_sc_failure_evidence(chain, &event)?;
-    let read = lifecycle.read_sc_failure_evidence(chain)?;
-    let key = teaching_decision_key(&failed_round_id);
-    let entry = read
-        .entries
-        .iter()
-        .find(|entry| entry.entry_key == key)
-        .ok_or_else(|| {
-            sc_failure_step_error(
-                "sc_failure_teaching_decision_missing",
-                STEP,
-                Some(failed_round_id.as_str()),
-                "本轮教学判定未出现在严格读回中",
-            )
-        })?;
-    if entry.event != event {
-        return Err(sc_failure_step_error(
-            "sc_failure_entry_conflict",
-            STEP,
-            Some(failed_round_id.as_str()),
-            "本轮教学判定严格读回与写入正文不一致",
-        ));
-    }
-    project_sc_round_evidence(&read, observed)
-}
-
-/// 完整轮证据投影：只在本轮 FailureObserved 与显式 decision 都已 durable
-/// 之后调用；缺任一项都 Err（不猜默认值）。launch_state 取「该轮确已交付
-/// 输出并产出机械失败」的事实。
-fn project_sc_round_evidence(
-    read: &ScFailureEvidenceRead,
-    observed: &ScObservedFailure,
-) -> Result<ScRoundEvidence, ScFailureEvidenceError> {
-    const STEP: &str = "project_sc_round_evidence";
-    let round_id = observed.round.round_id.clone();
-    let observed_key = failure_observed_key(&round_id);
-    let entry = read
-        .entries
-        .iter()
-        .find(|entry| entry.entry_key == observed_key)
-        .ok_or_else(|| {
-            sc_failure_step_error(
-                "sc_failure_observed_readback_missing",
-                STEP,
-                Some(round_id.as_str()),
-                "轮证据投影缺少本轮 FailureObserved 行",
-            )
-        })?;
-    // 读回行必须就是观察行（它在 `observe_sc_failure` 中已逐字校验过写入事件），
-    // 否则投影不成立——不拿内存事实冒充 durable 行。
-    if entry.event != observed.entry.event {
-        return Err(sc_failure_step_error(
-            "sc_failure_entry_conflict",
-            STEP,
-            Some(round_id.as_str()),
-            "本轮 FailureObserved 读回行与观察行不一致",
-        ));
-    }
-    let prompts = read
-        .entries
-        .iter()
-        .filter_map(|entry| match &entry.event {
-            ScFailureEvidenceEvent::PromptPrepared { evidence }
-            | ScFailureEvidenceEvent::PromptUnavailable { evidence }
-                if evidence.failed_round_id == round_id =>
-            {
-                Some(evidence.clone())
-            }
-            _ => None,
-        })
-        .collect::<Vec<ScTeachingPromptEvidence>>();
-    let decision = read
-        .entries
-        .iter()
-        .rev()
-        .find_map(|entry| match &entry.event {
-            ScFailureEvidenceEvent::TeachingDecision {
-                failed_round_id,
-                decision,
-            } if *failed_round_id == round_id => Some(decision.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| {
-            sc_failure_step_error(
-                "sc_failure_teaching_decision_missing",
-                STEP,
-                Some(round_id.as_str()),
-                "轮证据投影缺少显式教学判定，绝不写默认值",
-            )
-        })?;
-    Ok(ScRoundEvidence {
-        identity: observed.round.clone(),
-        launch_state: ScRoundLaunchState::Started,
-        failure_class: Some(observed.facts.failure_class.clone()),
-        blocking_reasons: observed.facts.blocking_reasons.clone(),
-        repair_instructions: observed.facts.repair_instructions.clone(),
-        raw: observed.facts.raw.clone(),
-        source: observed.facts.source.clone(),
-        existing_failure_id: observed.facts.existing_failure_id.clone(),
-        attempt_key: observed.facts.attempt_key.clone(),
-        prompts,
-        teaching_decision: decision,
-    })
-}
-
-/// compile 失败门：事实写读 → 既有纯判据（raw 归档 + Eligible）→ 既有窗口
-/// claim → 真实判定写读 → 返回 grant（调用方唯一启动点）。
+/// compile 失败门：事实写读 → 既有纯判据（raw 归档 + Eligible）→ 三臂共用的
+/// 教学链接线（真实失败源 → 完整 prompt 审计 → 预算裁决 → 既有窗口 claim
+/// → 真实判定写读）→ 返回 grant（调用方唯一启动点）。
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同既有先例）。
 pub(super) fn gate_compile_failure(
@@ -450,39 +319,49 @@ pub(super) fn gate_compile_failure(
     let facts = compile_failure_facts(diagnostics, instruction_lines, raw, compile_source, round);
     let observed = observe_sc_failure(lifecycle, &bound.chain, round, facts)
         .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
-    let decision = if !raw_archived(&observed.facts.raw) {
-        ScTeachingDecision::NotRequested
-    } else {
-        match teaching_verdict(diagnostics, &[]) {
-            TeachingVerdict::NotEligible { .. } => ScTeachingDecision::Ineligible,
-            TeachingVerdict::Eligible { payload } => {
-                let reredrive_prompt = build_typed_compile_reredrive_prompt(
-                    &payload,
-                    &observed.facts.repair_instructions,
-                    design_requirement_ids,
-                );
-                let request = sc_teaching_failure_request(
-                    binding,
-                    sc_sha256(compile_source),
-                    compile_typed_kinds(diagnostics),
-                    "build_typed_compile_reredrive_prompt",
-                    instruction_digest,
-                    &reredrive_prompt,
-                );
-                let (decision, attempt) =
-                    authorize_sc_teaching_reredrive(lifecycle, &mut *engine, &request)?;
-                observe_sc_teaching_decision(lifecycle, &bound.chain, &observed, decision)
-                    .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
-                return Ok(attempt.map(|attempt| ScTeachingGrant {
-                    attempt,
-                    reredrive_prompt,
-                }));
-            }
-        }
-    };
-    observe_sc_teaching_decision(lifecycle, &bound.chain, &observed, decision)
+    if !raw_archived(&observed.facts.raw) {
+        observe_sc_teaching_decision(
+            lifecycle,
+            &bound.chain,
+            &observed,
+            ScTeachingDecision::NotRequested,
+        )
         .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
-    Ok(None)
+        return Ok(None);
+    }
+    // 资格判据零改动（typed 完备才授资格；失败源不可用不产生资格）。
+    let payload = match teaching_verdict(diagnostics, &[]) {
+        TeachingVerdict::NotEligible { .. } => {
+            observe_sc_teaching_decision(
+                lifecycle,
+                &bound.chain,
+                &observed,
+                ScTeachingDecision::Ineligible,
+            )
+            .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
+            return Ok(None);
+        }
+        TeachingVerdict::Eligible { payload } => payload,
+    };
+    run_sc_teaching_chain(
+        &mut *engine,
+        lifecycle,
+        bound,
+        &observed,
+        binding,
+        COMPILE_BUILDER_ID,
+        |source| {
+            prepare_compile_teaching_prompt(
+                &payload,
+                &observed.facts.repair_instructions,
+                design_requirement_ids,
+                source,
+            )
+        },
+        compile_typed_kinds(diagnostics),
+        instruction_digest,
+        detail,
+    )
 }
 
 /// IR 预检失败门：与 compile 同序；资格来自 `PreflightVerdict::to_teaching_verdict`。
@@ -503,84 +382,7 @@ pub(super) fn gate_ir_failure(
     let facts = ir_failure_facts(preflight, raw, compile_source, round);
     let observed = observe_sc_failure(lifecycle, &bound.chain, round, facts)
         .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
-    let decision = if !raw_archived(&observed.facts.raw) {
-        ScTeachingDecision::NotRequested
-    } else {
-        match preflight.to_teaching_verdict() {
-            TeachingVerdict::NotEligible { .. } => ScTeachingDecision::Ineligible,
-            TeachingVerdict::Eligible { .. } => {
-                let reredrive_prompt =
-                    build_preflight_ir_reredrive_prompt(preflight, design_requirement_ids);
-                let request = sc_teaching_failure_request(
-                    binding,
-                    sc_sha256(compile_source),
-                    vec![stable_code_kind("typed_ir_validation")],
-                    "build_preflight_ir_reredrive_prompt",
-                    sc_sha256(&preflight.presentation_reasons().join("\n")),
-                    &reredrive_prompt,
-                );
-                let (decision, attempt) =
-                    authorize_sc_teaching_reredrive(lifecycle, &mut *engine, &request)?;
-                observe_sc_teaching_decision(lifecycle, &bound.chain, &observed, decision)
-                    .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
-                return Ok(attempt.map(|attempt| ScTeachingGrant {
-                    attempt,
-                    reredrive_prompt,
-                }));
-            }
-        }
-    };
-    observe_sc_teaching_decision(lifecycle, &bound.chain, &observed, decision)
-        .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
-    Ok(None)
-}
-
-/// 结构门失败门：无独立资格判据（原行为：窗口 claim 即判定），raw 未归档
-/// 显式 NotRequested；revised source 只取 sealed revision ref + 预取摘要。
-#[allow(clippy::too_many_arguments)]
-#[allow(clippy::result_large_err)]
-pub(super) fn gate_structure_failure(
-    engine: &mut WorkspaceEngine,
-    lifecycle: &LifecycleStore,
-    bound: &ScBoundProviderRound,
-    previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
-    failure_source_sha256: String,
-    failure_source_bytes: u64,
-    failure: &PlanningCompileFailure,
-    structure_failures: &PlanningFailureSet,
-    binding: &ScTeachingChainBinding,
-    detail: &str,
-) -> Result<Option<ScTeachingGrant>, SingleCandidateProviderRunError> {
-    let requested_source_sha256 = failure_source_sha256.clone();
-    let (raw, round) = current_round_parts(&mut *engine, previous, detail)?;
-    let facts = structure_failure_facts(
-        failure,
-        structure_failures,
-        raw,
-        round,
-        failure_source_sha256,
-        failure_source_bytes,
-    );
-    let observed = observe_sc_failure(lifecycle, &bound.chain, round, facts)
-        .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
-    let grant = if raw_archived(&observed.facts.raw) {
-        let reredrive_prompt = author_structure_repair_prompt(failure);
-        let request = sc_teaching_failure_request(
-            binding,
-            requested_source_sha256,
-            vec![stable_code_kind(STRUCTURE_STABLE_CODE)],
-            "author_structure_repair_prompt",
-            sc_sha256(&reredrive_prompt),
-            &reredrive_prompt,
-        );
-        let (decision, attempt) = authorize_sc_teaching_reredrive(lifecycle, &mut *engine, &request)?;
-        observe_sc_teaching_decision(lifecycle, &bound.chain, &observed, decision)
-            .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
-        attempt.map(|attempt| ScTeachingGrant {
-            attempt,
-            reredrive_prompt,
-        })
-    } else {
+    if !raw_archived(&observed.facts.raw) {
         observe_sc_teaching_decision(
             lifecycle,
             &bound.chain,
@@ -588,9 +390,319 @@ pub(super) fn gate_structure_failure(
             ScTeachingDecision::NotRequested,
         )
         .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
-        None
+        return Ok(None);
+    }
+    match preflight.to_teaching_verdict() {
+        TeachingVerdict::NotEligible { .. } => {
+            observe_sc_teaching_decision(
+                lifecycle,
+                &bound.chain,
+                &observed,
+                ScTeachingDecision::Ineligible,
+            )
+            .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
+            Ok(None)
+        }
+        TeachingVerdict::Eligible { .. } => run_sc_teaching_chain(
+            &mut *engine,
+            lifecycle,
+            bound,
+            &observed,
+            binding,
+            IR_BUILDER_ID,
+            |source| prepare_ir_teaching_prompt(preflight, design_requirement_ids, source),
+            vec![stable_code_kind("typed_ir_validation")],
+            sc_sha256(&preflight.presentation_reasons().join("\n")),
+            detail,
+        ),
+    }
+}
+
+/// 结构门失败门：无独立资格判据（原行为：窗口 claim 即判定），raw 未归档
+/// 显式 NotRequested；revised source 只取 sealed canonical revision ref +
+/// 该 revision 的真实摘要/字节（split locator 冒充 ⇒ 拒绝）。
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::result_large_err)]
+pub(super) fn gate_structure_failure(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    bound: &ScBoundProviderRound,
+    previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
+    failure: &PlanningCompileFailure,
+    structure_failures: &PlanningFailureSet,
+    binding: &ScTeachingChainBinding,
+    detail: &str,
+) -> Result<Option<ScTeachingGrant>, SingleCandidateProviderRunError> {
+    let (raw, round) = current_round_parts(&mut *engine, previous, detail)?;
+    // 事实面的 source 必须是该轮 sealed 的 canonical revision 真值：缺 ref
+    // 或该 revision 不可读 ⇒ 显式 Missing（事件级
+    // `sc_failure_source_ref_missing`），绝不半截事实。
+    let source = match &failure.source_revision_ref {
+        Some(locator) => match structure_source_digest(lifecycle, &bound.chain.scope, locator) {
+            Ok((sha256, bytes)) => ScEvidenceRef::Available {
+                locator: locator.clone(),
+                sha256,
+                bytes,
+            },
+            Err(error) => ScEvidenceRef::Missing {
+                code: error.code,
+                detail: error.detail,
+                round_id: round.round_id.clone(),
+            },
+        },
+        None => ScEvidenceRef::Missing {
+            code: "sc_failure_source_ref_missing".to_string(),
+            detail: "结构失败缺少 source_revision_ref，不能借用 split locator 冒充 revision"
+                .to_string(),
+            round_id: round.round_id.clone(),
+        },
     };
-    Ok(grant)
+    let facts = structure_failure_facts(failure, structure_failures, raw, source);
+    let observed = observe_sc_failure(lifecycle, &bound.chain, round, facts)
+        .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
+    if !raw_archived(&observed.facts.raw) {
+        observe_sc_teaching_decision(
+            lifecycle,
+            &bound.chain,
+            &observed,
+            ScTeachingDecision::NotRequested,
+        )
+        .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
+        return Ok(None);
+    }
+    run_sc_teaching_chain(
+        &mut *engine,
+        lifecycle,
+        bound,
+        &observed,
+        binding,
+        STRUCTURE_BUILDER_ID,
+        |source| prepare_structure_teaching_prompt(failure, structure_failures, source),
+        vec![stable_code_kind(STRUCTURE_STABLE_CODE)],
+        // 指令摘要取 legacy 指令 body（与今日同文本 ⇒ 同值；不含 source 与
+        // typed 全因）。
+        sc_sha256(&legacy_author_structure_repair_body(failure)),
+        detail,
+    )
+}
+
+/// 三臂共用的教学链接线（唯一实现）：真实失败源解析 → 完整 prompt 装配 →
+/// 不可变落盘 + 严格读回 → 预算裁决 → 窗口请求（授权前复验失败源）→ 既有
+/// 窗口 claim → 真实判定写读 → 返回 grant。
+///
+/// 顺序不可换：任何 claim/启动之前，失败源、完整 prompt 与预算裁决必须已经
+/// durable 且读回核对过；预算拒绝 ⇒ 显式 `NotRequested`、零 claim、零发送、
+/// 零启动；失败源/渲染/审计失败 ⇒ 真实缺提示记录 + 显式 `NotRequested`，
+/// 再以稳定码上浮（终局由调用方的终局处理器组包——本函数不吞终局）。
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同既有先例）。
+fn run_sc_teaching_chain(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    bound: &ScBoundProviderRound,
+    observed: &ScObservedFailure,
+    binding: &ScTeachingChainBinding,
+    builder_id: &str,
+    prepare: impl FnOnce(
+        &ScResolvedTeachingSource,
+    ) -> Result<ScPreparedTeachingPrompt, ScTeachingPromptError>,
+    failure_typed_kinds: Vec<PlanningFailureKind>,
+    instruction_digest: String,
+    detail: &str,
+) -> Result<Option<ScTeachingGrant>, SingleCandidateProviderRunError> {
+    // 失败源输入只四个引用（不构造 `ScRoundEvidence`、不伪教学决定）。
+    let input = ScTeachingSourceInput {
+        identity: &observed.round,
+        failure_class: &observed.facts.failure_class,
+        raw: &observed.facts.raw,
+        source: &observed.facts.source,
+    };
+    let resolved = match resolve_sc_teaching_source(lifecycle, &bound.chain.scope, &input) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return Err(fail_sc_teaching_chain(
+                &mut *engine,
+                lifecycle,
+                &bound.chain,
+                observed,
+                builder_id,
+                &error.code,
+                &error.detail,
+                detail,
+            ));
+        }
+    };
+    let prepared = match prepare(&resolved) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return Err(fail_sc_teaching_chain(
+                &mut *engine,
+                lifecycle,
+                &bound.chain,
+                observed,
+                builder_id,
+                &error.code,
+                &error.detail,
+                detail,
+            ));
+        }
+    };
+    // prompt 审计：全文落盘 + 严格读回（全文只装配/落盘/读回这一次）。
+    let prompt_evidence = match audit_sc_teaching_prompt(
+        lifecycle,
+        &bound.chain,
+        &observed.round.round_id,
+        sc_teaching_target_ordinal(&observed.round),
+        &prepared,
+    ) {
+        Ok(evidence) => evidence,
+        Err(error) => {
+            return Err(fail_sc_teaching_chain(
+                &mut *engine,
+                lifecycle,
+                &bound.chain,
+                observed,
+                builder_id,
+                &error.code,
+                &error.detail,
+                detail,
+            ));
+        }
+    };
+    // 预算裁决：超限 ⇒ 全文已写已读（可审计）+ 显式 `NotRequested`（真实
+    // 未请求消费窗口——不是假 Denied），零 claim、零发送、零启动。
+    if let ScTeachingPromptBudgetVerdict::RejectedBudget {
+        required_bytes,
+        max_bytes,
+    } = &prepared.budget_verdict
+    {
+        return Err(reject_sc_teaching_budget(
+            &mut *engine,
+            lifecycle,
+            &bound.chain,
+            observed,
+            *required_bytes,
+            *max_bytes,
+            detail,
+        ));
+    }
+    let request = match sc_teaching_failure_request(
+        binding,
+        &resolved,
+        failure_typed_kinds,
+        &prompt_evidence,
+        instruction_digest,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            return Err(fail_sc_teaching_chain(
+                &mut *engine,
+                lifecycle,
+                &bound.chain,
+                observed,
+                builder_id,
+                &error.code,
+                &error.detail,
+                detail,
+            ));
+        }
+    };
+    // 授权前硬前置：请求引用的失败源必须与真实失败源一致（错配 ⇒ 零 claim）。
+    if let Err(error) =
+        verify_sc_teaching_request_sources(lifecycle, &bound.chain.scope, &input, &request)
+    {
+        return Err(fail_sc_teaching_chain(
+            &mut *engine,
+            lifecycle,
+            &bound.chain,
+            observed,
+            builder_id,
+            &error.code,
+            &error.detail,
+            detail,
+        ));
+    }
+    let (decision, attempt) = authorize_sc_teaching_reredrive(lifecycle, &mut *engine, &request)?;
+    observe_sc_teaching_decision(lifecycle, &bound.chain, observed, decision)
+        .map_err(|error| evidence_store_failure(&mut *engine, &error, detail))?;
+    Ok(attempt.map(|attempt| ScTeachingGrant {
+        attempt,
+        reredrive_prompt: prepared.text,
+        verify: ScTeachingStartVerify {
+            identity: observed.round.clone(),
+            failure_class: observed.facts.failure_class.clone(),
+            raw: observed.facts.raw.clone(),
+            source: observed.facts.source.clone(),
+            request,
+            prompt_evidence,
+        },
+    }))
+}
+
+/// 教学链失败的统一收口（真实未请求面）：先落**真实**的缺提示记录
+/// （`PromptUnavailable` + `Missing` 真实原因）与显式 `NotRequested` 判定
+/// （真实未请求消费窗口——不是假 Denied），再把带稳定码的错误上浮；终局由
+/// 调用方的终局处理器组包（本函数不吞终局、不静默降级）。
+#[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同既有先例）。
+fn fail_sc_teaching_chain(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+    observed: &ScObservedFailure,
+    builder_id: &str,
+    code: &str,
+    cause: &str,
+    original: &str,
+) -> SingleCandidateProviderRunError {
+    if let Err(error) = record_sc_prompt_unavailable(
+        lifecycle,
+        chain,
+        &observed.round.round_id,
+        sc_teaching_target_ordinal(&observed.round),
+        builder_id,
+        code,
+        cause,
+    ) {
+        return evidence_store_failure(engine, &error, original);
+    }
+    if let Err(error) = observe_sc_teaching_decision(
+        lifecycle,
+        chain,
+        observed,
+        ScTeachingDecision::NotRequested,
+    ) {
+        return evidence_store_failure(engine, &error, original);
+    }
+    SingleCandidateProviderRunError::Message(format!(
+        "{code}: {cause}；原始失败原因：{original}"
+    ))
+}
+
+/// 预算拒绝的收口：全文已写已读（可审计）⇒ 只补显式 `NotRequested` 判定
+/// （真实未请求消费窗口），零 claim、零发送、零启动。
+#[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同既有先例）。
+fn reject_sc_teaching_budget(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+    observed: &ScObservedFailure,
+    required_bytes: u64,
+    max_bytes: u64,
+    original: &str,
+) -> SingleCandidateProviderRunError {
+    if let Err(error) = observe_sc_teaching_decision(
+        lifecycle,
+        chain,
+        observed,
+        ScTeachingDecision::NotRequested,
+    ) {
+        return evidence_store_failure(engine, &error, original);
+    }
+    SingleCandidateProviderRunError::Message(format!(
+        "{SC_TEACHING_PROMPT_BUDGET_EXCEEDED}: required_bytes={required_bytes} \
+         max_bytes={max_bytes} round={}；原始失败原因：{original}",
+        observed.round.round_id
+    ))
 }
 
 /// 当前轮（raw + 轮身份）绑定：缺失按 Result 稳定码上浮（persist Failed +
@@ -637,32 +749,6 @@ fn round_source_ref(raw: &ScEvidenceRef, source: &str, round_id: &str) -> ScEvid
     }
 }
 
-fn failure_observed_key(round_id: &str) -> String {
-    format!("failureobserved/{round_id}")
-}
-
-fn teaching_decision_key(round_id: &str) -> String {
-    format!("teachingdecision/{round_id}")
-}
-
-/// store 边界错误的稳定构造（store 构造器私有；字段全 pub，与既有
-/// `sc_transport_error` 同形）。不新增码、不吞错。
-fn sc_failure_step_error(
-    code: &str,
-    step: &str,
-    round_id: Option<&str>,
-    detail: impl Into<String>,
-) -> ScFailureEvidenceError {
-    ScFailureEvidenceError {
-        code: code.to_string(),
-        step: step.to_string(),
-        round_id: round_id.map(str::to_string),
-        detail: detail.into(),
-        publication_incomplete: false,
-        verified_prefix: None,
-    }
-}
-
 /// 证据写读失败的统一收口：persist Failed + Message，保留 store code/step
 /// 与原失败原文（不吞原始原因、不新增启动）。
 #[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同既有先例）。
@@ -679,269 +765,18 @@ fn evidence_store_failure(
     ))
 }
 
-// ---------------------------------------------------------------------------
-// P10：终局（ChainTerminal）接线——真实 chain 历史 → 包输入。
-//
-// 唯一事实来源是已落盘的证据日志（RoundBound / FailureObserved）；启动状态
-// 只认实参观察或该轮真实 FailureObserved，缺证据一律 Unknown（绝不默认
-// NotStarted、绝不用 RoundBound 推 start）。
-// ---------------------------------------------------------------------------
+/// P10：终局（ChainTerminal）接线——独立子模块（P19d 在该子模块实现真实
+/// 组包与发布；本文件只留事实投影与三臂教学链接线）。
+#[path = "sc_failure_terminal.rs"]
+pub(super) mod sc_failure_terminal;
 
-/// 终局类：三类机械失败 + 教学中断（与包 `terminal_class` 同一字面量）。
-pub(super) const SC_TERMINAL_CLASS_COMPILE: &str = "compile";
-pub(super) const SC_TERMINAL_CLASS_IR_PREFLIGHT: &str = "ir_preflight";
-pub(super) const SC_TERMINAL_CLASS_STRUCTURE_GATE: &str = "structure_gate";
-pub(super) const SC_TERMINAL_CLASS_TEACHING_INTERRUPTED: &str = "teaching_interrupted";
-
-const SC_TERMINAL_STEP: &str = "finalize_sc_failure_chain";
-const SC_TERMINAL_UNKNOWN_CODE: &str = "sc_failure_launch_observation_unknown";
-const SC_TERMINAL_OUTPUT_MISSING_CODE: &str = "sc_failure_output_not_delivered";
-
-/// 终局结果：`Durable` = 已 append 并严格读回；`Prefix` = 日志损坏/写读失败，
-/// **未 append**，只带严格前缀与本地终局事实（P19d 以真实前缀组包）。
-#[derive(Debug)]
-pub(super) enum ScFailureTerminalOutcome {
-    Durable(ScFailureEvidenceRead),
-    Prefix {
-        read: ScFailureEvidenceRead,
-        terminal: ScLocalTerminal,
-    },
-}
-
-/// 终局 fold（规则 2-7 的同一实现，`Durable` 与 `Prefix` 共用，不写第二份）：
-/// 只投影 `read` 中的真实 entries 与调用方实参观察。
-fn terminal_facts(
-    read: &ScFailureEvidenceRead,
-    terminal_class: &str,
-    original_message: &str,
-    launch_observations: &[(String, ScRoundLaunchState)],
-) -> Result<ScLocalTerminal, ScFailureEvidenceError> {
-    let mut rounds: Vec<&ScRoundIdentity> = Vec::new();
-    let mut observed: Vec<&str> = Vec::new();
-    for entry in &read.entries {
-        match &entry.event {
-            ScFailureEvidenceEvent::RoundBound { round } => rounds.push(round),
-            ScFailureEvidenceEvent::FailureObserved { round_id, .. } => {
-                observed.push(round_id.as_str());
-            }
-            ScFailureEvidenceEvent::PromptPrepared { .. }
-            | ScFailureEvidenceEvent::PromptUnavailable { .. }
-            | ScFailureEvidenceEvent::TeachingDecision { .. }
-            | ScFailureEvidenceEvent::ChainTerminal { .. } => {}
-        }
-    }
-    // 契约是「仅机械失败后调用」：无 FailureObserved 是编程错误守卫，不是数据路径。
-    let last_failure_round_id = observed
-        .last()
-        .map(|round_id| (*round_id).to_string())
-        .ok_or_else(|| {
-            sc_failure_step_error(
-                "sc_failure_round_not_bound",
-                SC_TERMINAL_STEP,
-                None,
-                "finalize 调用前无机械失败观察",
-            )
-        })?;
-    let mut states: Vec<(String, ScRoundLaunchState)> = Vec::new();
-    let mut missing_evidence: Vec<ScMissingEvidence> = Vec::new();
-    let mut last_physical_round_id: Option<String> = None;
-    for round in &rounds {
-        let round_id = round.round_id.as_str();
-        // 实参观察优先；未命中但该轮已交付并产出机械失败 ⇒ Started；
-        // 其余（只落 RoundBound、无观察）⇒ Unknown——不合成 NotStarted。
-        let state = match launch_observations
-            .iter()
-            .find(|(observed_round, _)| observed_round.as_str() == round_id)
-            .map(|(_, state)| state.clone())
-        {
-            Some(state) => state,
-            None if observed.contains(&round_id) => ScRoundLaunchState::Started,
-            None => ScRoundLaunchState::Unknown,
-        };
-        if matches!(state, ScRoundLaunchState::Unknown) {
-            // Unknown 不写终局、不改等待：调用方据此先返回 typed Waiting。
-            return Err(sc_failure_step_error(
-                SC_TERMINAL_UNKNOWN_CODE,
-                SC_TERMINAL_STEP,
-                Some(round_id),
-                "启动观察不可确认（无实际 launch 观察，且无该轮机械失败事实）",
-            ));
-        }
-        if matches!(state, ScRoundLaunchState::Started) {
-            last_physical_round_id = Some(round_id.to_string());
-            if !observed.contains(&round_id) {
-                // 真实 cause 由调用方给（P10 只投影，不捏造）。
-                missing_evidence.push(ScMissingEvidence {
-                    round_id: round_id.to_string(),
-                    kind: "provider_output".to_string(),
-                    code: SC_TERMINAL_OUTPUT_MISSING_CODE.to_string(),
-                    detail: original_message.to_string(),
-                    locator: None,
-                });
-            }
-        }
-        states.push((round_id.to_string(), state));
-    }
-    let completeness = if missing_evidence.is_empty() {
-        ScPackageCompleteness::Complete
-    } else {
-        ScPackageCompleteness::Incomplete
-    };
-    Ok(ScLocalTerminal {
-        last_failure_round_id,
-        last_physical_round_id,
-        terminal_class: terminal_class.to_string(),
-        terminal_reason: original_message.to_string(),
-        launch_observations: states,
-        completeness,
-        missing_evidence,
-    })
-}
-
-/// 终局事件（durable 追加用）：字段与 `ScLocalTerminal` 一一对应，取所有权零克隆。
-fn terminal_event(terminal: ScLocalTerminal) -> ScFailureEvidenceEvent {
-    ScFailureEvidenceEvent::ChainTerminal {
-        last_failure_round_id: terminal.last_failure_round_id,
-        last_physical_round_id: terminal.last_physical_round_id,
-        terminal_class: terminal.terminal_class,
-        terminal_reason: terminal.terminal_reason,
-        launch_observations: terminal.launch_observations,
-        completeness: terminal.completeness,
-        missing_evidence: terminal.missing_evidence,
-    }
-}
-
-/// 组终局并落盘：先严格读（坏行 ⇒ 取已验证前缀组 `Prefix`，**不 append**）→
-/// fold → append → 再严格读 ⇒ `Durable`。同槽异文冲突原样上浮（既有终局成立）。
-#[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同既有先例）。
-pub(super) fn finalize_sc_failure_chain(
-    lifecycle: &LifecycleStore,
-    chain: &ScFailureChainIdentity,
-    terminal_class: &str,
-    original_message: &str,
-    launch_observations: Vec<(String, ScRoundLaunchState)>,
-) -> Result<ScFailureTerminalOutcome, ScFailureEvidenceError> {
-    let read = match lifecycle.read_sc_failure_evidence(chain) {
-        Ok(read) => read,
-        Err(mut error) => {
-            // 有严格前缀 ⇒ Prefix；无前缀（目录/session 不可读）⇒ 原错上浮，
-            // 没有真实前缀可作包成员，绝不合成条目、绝不改坏日志。
-            let Some(prefix) = error.verified_prefix.take() else {
-                return Err(error);
-            };
-            let mut terminal =
-                terminal_facts(&prefix, terminal_class, original_message, &launch_observations)?;
-            // 坏日志路径恒 Incomplete：缺项沿用 store 原 code/detail，不 hardcode 新码。
-            terminal.completeness = ScPackageCompleteness::Incomplete;
-            let round_id = prefix
-                .entries
-                .iter()
-                .rev()
-                .find_map(|entry| match &entry.event {
-                    ScFailureEvidenceEvent::RoundBound { round } => Some(round.round_id.clone()),
-                    ScFailureEvidenceEvent::FailureObserved { round_id, .. } => {
-                        Some(round_id.clone())
-                    }
-                    _ => None,
-                })
-                .unwrap_or_else(|| terminal.last_failure_round_id.clone());
-            terminal.missing_evidence.push(ScMissingEvidence {
-                round_id,
-                kind: "evidence_log".to_string(),
-                code: error.code,
-                detail: error.detail,
-                locator: Some(sc_failure_evidence_log_ref(chain)?),
-            });
-            return Ok(ScFailureTerminalOutcome::Prefix {
-                read: *prefix,
-                terminal,
-            });
-        }
-    };
-    let terminal = terminal_facts(&read, terminal_class, original_message, &launch_observations)?;
-    lifecycle.append_sc_failure_evidence(chain, &terminal_event(terminal))?;
-    let read = lifecycle.read_sc_failure_evidence(chain)?;
-    Ok(ScFailureTerminalOutcome::Durable(read))
-}
-
-/// 唯一终局出口：`Durable`/`Prefix` ⇒ persist Failed + Message（原始失败原文；
-/// P19d 在 `Ok` 分支消费 outcome 组包/发布，调用点不动）；`Unknown` ⇒ **先于
-/// persist Failed** 返回 typed Waiting（既有 CAS 收口，重入复用同一 recovery_id）。
-///
-/// `AlreadyFinished` 不是 Waiting（上层同属 generic Failed）：这里不再用它伪装
-/// 等待，CAS 失败即真实 store 错。
-#[allow(clippy::result_large_err)] // 运行收尾的唯一 typed 出口（同既有先例）。
-pub(super) async fn terminal_exit_error(
-    engine: &mut WorkspaceEngine,
-    lifecycle: &LifecycleStore,
-    chain: &ScFailureChainIdentity,
-    terminal_class: &str,
-    launch_observations: Vec<(String, ScRoundLaunchState)>,
-    original_message: String,
-) -> SingleCandidateProviderRunError {
-    match finalize_sc_failure_chain(
-        lifecycle,
-        chain,
-        terminal_class,
-        &original_message,
-        launch_observations,
-    ) {
-        Ok(_terminal) => {
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
-            );
-            SingleCandidateProviderRunError::Message(original_message)
-        }
-        Err(error) if error.code == SC_TERMINAL_UNKNOWN_CODE => {
-            // 未知启动观察：先返回等待，零 Failed。
-            let reason_code = error.code;
-            match engine
-                .persist_single_candidate_author_superseded_wait(reason_code.as_str())
-                .await
-            {
-                Ok(recovery) => SingleCandidateProviderRunError::NativeSupersededWaiting {
-                    reason_code,
-                    superseded_native_session_id: recovery.superseded_native_session_id.clone(),
-                    recovery_id: recovery.recovery_id,
-                },
-                Err(message) => SingleCandidateProviderRunError::Message(format!(
-                    "persist single candidate author superseded wait failed: {message}"
-                )),
-            }
-        }
-        Err(error) => evidence_store_failure(engine, &error, &original_message),
-    }
-}
-
-/// 教学中断轮的真实启动观察：attempt 键命中且为 actual launch（`started` 与
-/// provider/started_at 齐备）⇒ `Started`；其余（无 attempt、缺条目、会话不可读）
-/// ⇒ `Unknown`——不判 `NotStarted`（本片不合成该值）。
-pub(super) fn teaching_launch_observations(
-    lifecycle: &LifecycleStore,
-    session_id: &str,
-    round: &ScRoundIdentity,
-    attempt: Option<&ScTeachingAttemptRef>,
-) -> Vec<(String, ScRoundLaunchState)> {
-    let state = match attempt {
-        None => ScRoundLaunchState::Unknown,
-        Some(attempt) => match lifecycle.get_workspace_session(session_id) {
-            Ok(record) => {
-                let started = record.provider_start_ledger.iter().any(|entry| {
-                    entry.provider_attempt_key.as_deref() == Some(attempt.attempt_key.as_str())
-                        && entry.is_actual_launch_observation()
-                });
-                if started {
-                    ScRoundLaunchState::Started
-                } else {
-                    ScRoundLaunchState::Unknown
-                }
-            }
-            // 会话不可读：启动与否不可确认，不猜。
-            Err(_) => ScRoundLaunchState::Unknown,
-        },
-    };
-    vec![(round.round_id.clone(), state)]
-}
+/// 终局面的窄再导出：既有调用点（transport 与 run/single_candidate）按原
+/// 路径取用；真实组包/发布在子模块内实现，不在本文件复制第二份。
+pub(super) use sc_failure_terminal::{
+    SC_TERMINAL_CLASS_COMPILE, SC_TERMINAL_CLASS_IR_PREFLIGHT, SC_TERMINAL_CLASS_STRUCTURE_GATE,
+    SC_TERMINAL_CLASS_TEACHING_INTERRUPTED, ScFailureTerminalOutcome, finalize_sc_failure_chain,
+    teaching_launch_observations, terminal_exit_error,
+};
 
 #[cfg(test)]
 #[path = "sc_failure_evidence_tests/adapter_facts.rs"]
