@@ -279,8 +279,8 @@ impl LifecycleStore {
         // 换正文同样冲突，且冲突前不落正文文件、不改日志）。
         let mut body_conflict = false;
         for entry in &read.entries {
-            let ScFailureEvidenceEvent::PromptPrepared { evidence }
-            | ScFailureEvidenceEvent::PromptUnavailable { evidence } = &entry.event
+            let (ScFailureEvidenceEvent::PromptPrepared { evidence }
+            | ScFailureEvidenceEvent::PromptUnavailable { evidence }) = &entry.event
             else {
                 continue;
             };
