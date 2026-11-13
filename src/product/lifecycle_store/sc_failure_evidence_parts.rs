@@ -5,6 +5,7 @@
 //! 私有子模块：`use super::*` 取同域私有项，不新增对外接口、不改 wire。
 
 use super::*;
+use crate::product::work_item_plan_source_store::{SourceStoreScope, WorkItemPlanSourceStore};
 
 /// 事件准入：round 必须先 RoundBound；raw/source locator 必须绑定该 round。
 impl LifecycleStore {
@@ -29,7 +30,11 @@ impl LifecycleStore {
                 Ok(())
             }
             ScFailureEvidenceEvent::FailureObserved {
-                round_id, raw, source, ..
+                round_id,
+                failure_class,
+                raw,
+                source,
+                ..
             } => {
                 let bound = sc_failure_bound_round(read, round_id).ok_or_else(|| {
                     round_not_bound_error(step, Some(round_id.clone()), "该 round 尚未 RoundBound")
@@ -38,11 +43,50 @@ impl LifecycleStore {
                     &bound.workspace_session_id,
                     bound.role_run_seq,
                 );
-                for (label, reference) in [("raw", raw), ("source", source)] {
-                    if let ScEvidenceRef::Available { locator, .. } = reference
-                        && locator != &expected
-                    {
-                        return Err(locator_invalid_error(step, Some(round_id.clone()), format!("{label} locator 与 round 绑定不符")));
+                // raw 一律是本轮 split locator（不扩 raw 资格）。
+                if let ScEvidenceRef::Available { locator, .. } = raw
+                    && locator != &expected
+                {
+                    return Err(locator_invalid_error(
+                        step,
+                        Some(round_id.clone()),
+                        "raw locator 与 round 绑定不符",
+                    ));
+                }
+                // source 按 failure_class 分派（typed match，不解析失败文本）：
+                match failure_class {
+                    Some(ScFailureClass::StructureGate) => {
+                        // 结构门失败针对自身 canonical revision：source 必须是本 plan
+                        // scope 的 canonical source revision ref，且真实 revision 的
+                        // hash/bytes 与声明一致；Missing 仍保留具体理由。
+                        if let ScEvidenceRef::Available {
+                            locator,
+                            sha256,
+                            bytes,
+                        } = source
+                        {
+                            self.sc_failure_validate_structure_source(
+                                chain,
+                                locator,
+                                sha256,
+                                *bytes,
+                                round_id,
+                                step,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        // compile / IR：source 仍必须是本轮 split locator（normalized
+                        // digest 域，与 raw 正文不同域，store 不重算该域摘要）。
+                        if let ScEvidenceRef::Available { locator, .. } = source
+                            && locator != &expected
+                        {
+                            return Err(locator_invalid_error(
+                                step,
+                                Some(round_id.clone()),
+                                "source locator 与 round 绑定不符",
+                            ));
+                        }
                     }
                 }
                 Ok(())
@@ -85,6 +129,48 @@ impl LifecycleStore {
                 Ok(())
             }
         }
+    }
+    /// 结构门失败的 source：canonical source revision ref 必须落在本 chain 的 plan
+    /// scope 内，且真实 revision 的 hash/bytes 与声明一致——真读 SourceStore（不是
+    /// 只校验 ref 格式合法）。
+    fn sc_failure_validate_structure_source(
+        &self,
+        chain: &ScFailureChainIdentity,
+        locator: &str,
+        sha256: &str,
+        bytes: u64,
+        round_id: &str,
+        step: &str,
+    ) -> Result<(), ScFailureEvidenceError> {
+        let scope = SourceStoreScope {
+            project_id: chain.scope.project_id.clone(),
+            issue_id: chain.scope.issue_id.clone(),
+            plan_id: chain.scope.plan_id.clone(),
+        };
+        let revision = WorkItemPlanSourceStore::new(self.app_paths())
+            .get_source_revision(&scope, locator)
+            .map_err(|failure| {
+                locator_invalid_error(
+                    step,
+                    Some(round_id.to_string()),
+                    format!("结构门 source revision 不可核验: {failure:?}"),
+                )
+            })?;
+        if revision.source_revision_hash != sha256 {
+            return Err(locator_invalid_error(
+                step,
+                Some(round_id.to_string()),
+                "结构门 source 摘要与真实 revision 不符",
+            ));
+        }
+        if revision.source.len() as u64 != bytes {
+            return Err(locator_invalid_error(
+                step,
+                Some(round_id.to_string()),
+                "结构门 source bytes 与真实 revision 不符",
+            ));
+        }
+        Ok(())
     }
 }
 
