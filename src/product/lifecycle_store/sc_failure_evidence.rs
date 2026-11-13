@@ -65,6 +65,7 @@ const CODE_IO: &str = "sc_failure_io";
 const CODE_LOCATOR_INVALID: &str = "sc_failure_locator_invalid";
 const CODE_LOG_CORRUPT: &str = "sc_failure_log_corrupt";
 const CODE_LOG_SEQUENCE_GAP: &str = "sc_failure_log_sequence_gap";
+const CODE_PROMPT_DISPOSITION_INVALID: &str = "sc_failure_prompt_disposition_invalid";
 const CODE_PROMPT_DIGEST_MISMATCH: &str = "sc_failure_prompt_digest_mismatch";
 const CODE_PROMPT_MISSING: &str = "sc_failure_prompt_missing";
 const CODE_RAW_MISSING: &str = "sc_failure_raw_missing";
@@ -259,6 +260,16 @@ impl LifecycleStore {
         disposition: ScPromptDisposition,
     ) -> Result<ScTeachingPromptEvidence, ScFailureEvidenceError> {
         const STEP: &str = "put_sc_teaching_prompt";
+        // 处置契约最前：Unavailable 不是 put 的合法处置（缺提示只能走 append 的
+        // PromptUnavailable + Missing 真实原因）——此处不需 round 绑定、不建目录、
+        // 不取 lease、不写盘。
+        if matches!(disposition, ScPromptDisposition::Unavailable) {
+            return Err(prompt_disposition_invalid_error(
+                STEP,
+                Some(failed_round_id.to_string()),
+                "Unavailable 不是 put 的合法处置；缺提示请用 append 的 PromptUnavailable + Missing 原因",
+            ));
+        }
         let session = self.sc_failure_session(chain, STEP)?;
         let scope = self.sc_failure_entity_scope(&session, STEP)?;
         self.sc_failure_live_admission(&session, STEP)?;
@@ -636,10 +647,18 @@ impl LifecycleStore {
                 }
                 Ok(())
             }
-            ScFailureEvidenceEvent::PromptPrepared { evidence }
-            | ScFailureEvidenceEvent::PromptUnavailable { evidence } => {
-                if sc_failure_bound_round(read, &evidence.failed_round_id).is_none() {
-                    return Err(round_not_bound_error(step, Some(evidence.failed_round_id.clone()), "教学提示的失败 round 尚未 RoundBound"));
+            ScFailureEvidenceEvent::PromptPrepared { evidence } => {
+                sc_failure_prompt_round_bound(read, evidence, step)?;
+                Ok(())
+            }
+            ScFailureEvidenceEvent::PromptUnavailable { evidence } => {
+                sc_failure_prompt_round_bound(read, evidence, step)?;
+                if matches!(evidence.prompt, ScEvidenceRef::Available { .. }) {
+                    return Err(prompt_disposition_invalid_error(
+                        step,
+                        Some(evidence.failed_round_id.clone()),
+                        "Unavailable 的教学提示必须带 Missing 真实原因，不得带 Available 正文",
+                    ));
                 }
                 Ok(())
             }
@@ -713,6 +732,22 @@ fn sc_failure_disposition_key(disposition: &ScPromptDisposition) -> &'static str
         ScPromptDisposition::RejectedBudget => "rejected_budget",
         ScPromptDisposition::Unavailable => "unavailable",
     }
+}
+
+/// 教学提示的失败 round 必须已绑定（PromptPrepared / PromptUnavailable 共用）。
+fn sc_failure_prompt_round_bound(
+    read: &ScFailureEvidenceRead,
+    evidence: &ScTeachingPromptEvidence,
+    step: &str,
+) -> Result<(), ScFailureEvidenceError> {
+    if sc_failure_bound_round(read, &evidence.failed_round_id).is_none() {
+        return Err(round_not_bound_error(
+            step,
+            Some(evidence.failed_round_id.clone()),
+            "教学提示的失败 round 尚未 RoundBound",
+        ));
+    }
+    Ok(())
 }
 
 fn sc_failure_bound_round<'a>(
@@ -802,12 +837,13 @@ fn read_sc_failure_log(
         if line.is_empty() {
             continue;
         }
-        let text = std::str::from_utf8(line).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, &entries, &bytes[..verified_bytes], format!("证据日志行不是 UTF-8: {failure}"), ))?;
-        let entry: ScFailureEvidenceEntry = serde_json::from_str(text).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, &entries, &bytes[..verified_bytes], format!("证据日志行不是合法条目: {failure}"), ))?;
+        let text = std::str::from_utf8(line).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, chain, &entries, &bytes[..verified_bytes], format!("证据日志行不是 UTF-8: {failure}"), ))?;
+        let entry: ScFailureEvidenceEntry = serde_json::from_str(text).map_err(|failure| sc_failure_log_failure( CODE_LOG_CORRUPT, step, chain, &entries, &bytes[..verified_bytes], format!("证据日志行不是合法条目: {failure}"), ))?;
         if entry.schema_version != SC_FAILURE_EVIDENCE_SCHEMA_VERSION {
             return Err(sc_failure_log_failure(
                 CODE_LOG_CORRUPT,
                 step,
+                chain,
                 &entries,
                 &bytes[..verified_bytes],
                 format!(
@@ -820,6 +856,7 @@ fn read_sc_failure_log(
             return Err(sc_failure_log_failure(
                 CODE_LOG_SEQUENCE_GAP,
                 step,
+                chain,
                 &entries,
                 &bytes[..verified_bytes],
                 format!("证据日志序号断档: 期望 {expected_seq}, 实际 {}", entry.entry_seq),
@@ -829,6 +866,7 @@ fn read_sc_failure_log(
             return Err(sc_failure_log_failure(
                 CODE_SCOPE_MISMATCH,
                 step,
+                chain,
                 &entries,
                 &bytes[..verified_bytes],
                 "证据日志条目属于其他 chain（跨 scope 注入）".to_string(),
@@ -922,15 +960,18 @@ fn write_sc_failure_prompt_file(
     Ok(())
 }
 
-/// 日志类错误的统一形状：带上已验证前缀（坏行/断号之后的行不被跳行吞下）。
+/// 日志类错误的统一形状：带上已验证前缀（坏行/断号之后的行不被跳行吞下）与具体
+/// missing 项——round 不可知时不伪 round（"unknown"），locator 只给受控的内部
+/// 相对 ref（本 chain 的日志），code/detail 沿用原故障。
 fn sc_failure_log_failure(
     code: &str,
     step: &str,
+    chain: &ScFailureChainIdentity,
     entries: &[ScFailureEvidenceEntry],
     verified_bytes: &[u8],
     detail: String,
 ) -> ScFailureEvidenceError {
-    let mut failure = error(code, step, None, detail, true);
+    let mut failure = error(code, step, None, detail.clone(), true);
     failure.verified_prefix = Some(Box::new(ScFailureEvidenceRead {
         evidence_through_entry_key: entries
             .last()
@@ -938,9 +979,36 @@ fn sc_failure_log_failure(
             .unwrap_or_default(),
         entries: entries.to_vec(),
         verified_prefix_bytes: verified_bytes.to_vec(),
-        missing_evidence: Vec::new(),
+        missing_evidence: vec![ScMissingEvidence {
+            round_id: "unknown".to_string(),
+            kind: "evidence_log".to_string(),
+            code: code.to_string(),
+            detail,
+            locator: sc_failure_evidence_log_ref(chain).ok(),
+        }],
     }));
     failure
+}
+
+/// 证据日志的受控内部相对 ref（Plan 冻结名 `sc_failure_evidence_log_ref`）：
+/// `sc-failure-evidence/v1/{session_id}/{chain_id}/rounds.jsonl`——相对 workspace
+/// timelines 根，不是绝对路径；纯函数、无 I/O、不扩 DTO。下一 schema 片复用同一
+/// helper，不另立第二格式。
+pub(crate) fn sc_failure_evidence_log_ref(
+    identity: &ScFailureChainIdentity,
+) -> Result<String, ScFailureEvidenceError> {
+    let session_id = identity.scope.session_id.trim();
+    let chain_id = identity.chain_id.trim();
+    if session_id.is_empty() || chain_id.is_empty() {
+        return Err(locator_invalid_error(
+            "sc_failure_evidence_log_ref",
+            None,
+            "chain 身份缺失（session_id / chain_id），无法构造日志 ref",
+        ));
+    }
+    Ok(format!(
+        "{SC_FAILURE_EVIDENCE_DIR}/v1/{session_id}/{chain_id}/{SC_FAILURE_EVIDENCE_LOG}"
+    ))
 }
 
 /// `CODE_CHAIN_INVALID` 的统一构造（`publication_incomplete = false`）。
@@ -973,6 +1041,15 @@ fn locator_invalid_error(
     detail: impl Into<String>,
 ) -> ScFailureEvidenceError {
     error(CODE_LOCATOR_INVALID, step, round_id, detail, false)
+}
+
+/// `CODE_PROMPT_DISPOSITION_INVALID` 的统一构造（带 round 归属，`publication_incomplete = false`）。
+fn prompt_disposition_invalid_error(
+    step: &str,
+    round_id: Option<String>,
+    detail: impl Into<String>,
+) -> ScFailureEvidenceError {
+    error(CODE_PROMPT_DISPOSITION_INVALID, step, round_id, detail, false)
 }
 
 /// `CODE_PROMPT_DIGEST_MISMATCH` 的统一构造（`publication_incomplete = true`）。
@@ -1058,6 +1135,9 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/sc_failure_evidence_boundaries.rs"]
 mod boundary_tests;
+#[cfg(test)]
+#[path = "tests/sc_failure_evidence_prompt_contract.rs"]
+mod prompt_contract_tests;
 #[cfg(test)]
 #[path = "tests/sc_failure_round_lookup.rs"]
 mod round_lookup_tests;
