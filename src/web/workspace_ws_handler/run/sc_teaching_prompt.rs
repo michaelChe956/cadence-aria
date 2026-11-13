@@ -162,7 +162,7 @@ fn source_metadata(source: &ScResolvedTeachingSource) -> ScTeachingSourceMetadat
         source_ref: &source.failure_source_ref,
         sha256: &source.sha256,
         bytes: source.bytes,
-        origin: source.origin,
+        origin: source.origin.clone(),
     }
 }
 
