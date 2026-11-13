@@ -1038,6 +1038,9 @@ mod boundary_tests;
 #[path = "tests/sc_failure_evidence_prompt_contract.rs"]
 mod prompt_contract_tests;
 #[cfg(test)]
+#[path = "tests/sc_failure_evidence_teaching_decision.rs"]
+mod teaching_decision_tests;
+#[cfg(test)]
 #[path = "tests/sc_failure_round_lookup.rs"]
 mod round_lookup_tests;
 #[path = "sc_failure_evidence_lookup.rs"]
