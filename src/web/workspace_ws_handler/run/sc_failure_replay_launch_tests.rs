@@ -62,13 +62,13 @@ fn classifier_waiting_when_audited_provider_start_exists_for_same_seq() {
 
     match classify(&lifecycle, &scope, None, 0) {
         ScRoundEntry::Waiting {
-            bound: replay,
+            round: replay,
             reason_code,
             detail,
         } => {
             assert_eq!(reason_code, SC_ROUND_LAUNCH_UNKNOWN);
             assert!(!detail.is_empty());
-            assert_eq!(replay.round.role_run_seq, bound.round.role_run_seq);
+            assert_eq!(replay.role_run_seq, bound.round.role_run_seq);
         }
         _ => panic!("audited start without delivery must classify Waiting"),
     }
@@ -169,13 +169,15 @@ fn teaching_round_classifies_ready_completed_and_waiting() {
     // completed ⇒ Completed（逐字 raw），仍零 start。
     let raw = "教学轮完整修订版：中文正文";
     close_sc_split_round(&lifecycle, &teaching, "teaching prompt", raw).expect("strict close");
+    // 重放同一教学轮（ordinal 1）：`previous` 仍是原轮（教学轮序号由当前轮推进，
+    // 传教学轮自己会推进到 ordinal 2 = 新物理轮，不是重放）。
     let previous_teaching = (
         ScEvidenceRef::Available {
             locator: String::new(),
             sha256: String::new(),
             bytes: raw.len() as u64,
         },
-        teaching.round.clone(),
+        original.round.clone(),
     );
     match begin_sc_teaching_round(
         &lifecycle,
@@ -192,6 +194,7 @@ fn teaching_round_classifies_ready_completed_and_waiting() {
     assert_eq!(actual_starts(&lifecycle, &scope.session_id), 0);
 
     // audited start + no delivery ⇒ Waiting（不落 Failed、不 err）。
+    // ordinal 2 = 教学轮(1) 的下一轮：用教学轮身份推进入参，不是再重放 ordinal 1。
     let third = match begin_sc_failure_round(
         &lifecycle,
         &original.chain.scope,
@@ -199,7 +202,7 @@ fn teaching_round_classifies_ready_completed_and_waiting() {
         Some(&original.chain),
         NODE_ID,
         &ProviderName::Fake,
-        previous_teaching.1.round_ordinal + 1,
+        teaching.round.round_ordinal + 1,
     )
     .expect("ordinal 2 binds")
     {

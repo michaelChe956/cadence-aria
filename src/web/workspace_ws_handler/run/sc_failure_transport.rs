@@ -70,8 +70,12 @@ pub(in crate::web::workspace_ws_handler::run) enum ScRoundEntry {
     },
     /// 启动事实不能证明「尚未启动」（已有 provider_start，或 run/审计读不出）：
     /// 走真实 CAS 等待，不得第二 start、不得落 Failed/A4 终局。
+    ///
+    /// 只携轮身份（来自 durable RoundBound）：run 上下文恢复失败时**没有**
+    /// `PlanSplitRunContext`，此处不得伪造 context、不得新 seq——身份仍足以
+    /// 让等待收口与诊断引用真实轮。
     Waiting {
-        bound: ScBoundProviderRound,
+        round: ScRoundIdentity,
         reason_code: &'static str,
         detail: String,
     },
@@ -312,7 +316,7 @@ fn sc_waiting_round(
     detail: impl Into<String>,
 ) -> ScRoundEntry {
     ScRoundEntry::Waiting {
-        bound,
+        round: bound.round,
         reason_code,
         detail: detail.into(),
     }
@@ -373,23 +377,26 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_failure_round(
         };
         // 恢复既有物理 run 的上下文（核真 session/project/issue/author provider/
         // run 元数据；不新分配 role_run_seq；封装字段仍 private）。
-        let split =
-            crate::web::workspace_ws_handler::run::gateway_start::plan_split_run_for_handle(
+        // 恢复失败（run.json 缺失/损坏/身份不符）不是「可启动」：既没有 context，
+        // 也不能证明未启动 ⇒ 无 bound 的可见 Waiting（不伪造 context、不新 seq、
+        // 不落 Failed、零 start）。
+        let split = match crate::web::workspace_ws_handler::run::gateway_start::
+            plan_split_run_for_handle(
                 lifecycle,
                 &scope.project_id,
                 &scope.issue_id,
                 provider,
                 handle,
-            )
-            .map_err(|message| {
-                sc_transport_error(
-                    "sc_failure_round_recovery_failed",
-                    STEP,
-                    Some(round.round_id.clone()),
-                    message,
-                    false,
-                )
-            })?;
+            ) {
+            Ok(split) => split,
+            Err(message) => {
+                return Ok(ScRoundEntry::Waiting {
+                    round,
+                    reason_code: SC_ROUND_LAUNCH_STATE_UNAVAILABLE,
+                    detail: format!("重放轮 run 上下文不可恢复（{message}）"),
+                });
+            }
+        };
         // replay：同一契约身份只复用既有 handle，启动分类必须成立才允许 start。
         return classify_sc_round_launch(lifecycle, ScBoundProviderRound { chain, round, split });
     }

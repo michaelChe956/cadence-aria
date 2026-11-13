@@ -411,7 +411,7 @@ pub(in crate::web::workspace_ws_handler::run) async fn wait_sc_author_launch(
 /// 等待。同一等待已落盘时复用真实 record（不刷新 recovery_id、不重复 CAS）。
 pub(in crate::web::workspace_ws_handler::run) async fn wait_sc_round_launch(
     engine: &mut WorkspaceEngine,
-    bound: &ScBoundProviderRound,
+    round: &ScRoundIdentity,
     reason_code: &'static str,
     detail: &str,
 ) -> SingleCandidateProviderRunError {
@@ -438,7 +438,7 @@ pub(in crate::web::workspace_ws_handler::run) async fn wait_sc_round_launch(
         // CAS 失败：真实持久化错误上浮（不造「已 Waiting」、不落 Failed、不启动）。
         Err(error) => SingleCandidateProviderRunError::Message(format!(
             "{reason_code}: 等待收口持久化失败（{error}）；round={}；{detail}",
-            bound.round.round_id
+            round.round_id
         )),
     }
 }
@@ -489,9 +489,9 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_sc_teaching_entry(
             raw,
         } => Ok(replayed_sc_round_delivery(raw_text, raw, bound.round)),
         ScRoundEntry::Waiting {
-            bound,
+            round,
             reason_code,
             detail,
-        } => Err(wait_sc_round_launch(engine, &bound, reason_code, &detail).await),
+        } => Err(wait_sc_round_launch(engine, &round, reason_code, &detail).await),
     }
 }

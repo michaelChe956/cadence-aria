@@ -710,13 +710,13 @@ pub(crate) async fn run_single_candidate_author(
             raw,
         } => (bound, Some((raw_text, raw))),
         sc_failure_transport::ScRoundEntry::Waiting {
-            bound,
+            round,
             reason_code,
             detail,
         } => {
             return Err(sc_failure_round_entry::wait_sc_round_launch(
                 engine,
-                &bound,
+                &round,
                 reason_code,
                 &detail,
             )
