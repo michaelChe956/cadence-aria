@@ -638,3 +638,237 @@ fn previous_round_section_degrades_when_mechanical_report_unavailable() {
         );
     }
 }
+
+// ============ B2：前轮 reviewer 投影同源（REQ-WSC-12 窄例外，design §3） ============
+
+use crate::product::work_item_plan_policy::FindingClassHint;
+use crate::web::workspace_ws_types::review::ReviewFindingDisposition;
+
+/// B2 夹具：与 `previous_finding` 同形状，severity / category 可调、
+/// class_hint 恒 Repairable——「命中窄例外」与「同轴不命中」对照组共用。
+fn repairable_hint_finding(
+    severity: ReviewFindingSeverity,
+    category: Option<ReviewFindingCategory>,
+    message: &str,
+    code: &str,
+    action: &str,
+) -> ReviewFinding {
+    let contract_field = format!("plan_preflight.{code}");
+    let mut finding = previous_finding(message, Some(&contract_field), action);
+    finding.severity = severity;
+    finding.category = category;
+    finding.class_hint = Some(FindingClassHint::Repairable);
+    finding
+}
+
+/// 与 `previous_round_replay` 内部同形状的上一轮 verdict（B2 在夹具外持有
+/// 同一份 raw 做投影对照）。
+fn replay_verdict(findings: Vec<ReviewFinding>) -> ReviewVerdict {
+    ReviewVerdict {
+        verdict: ReviewVerdictType::Revise,
+        comments: "previous round revise".to_string(),
+        summary: "previous round revise".to_string(),
+        findings,
+        review_gate: ReviewGate::RequiresRevision,
+        work_item_plan_review: None,
+        structured_output_diagnostic: None,
+    }
+}
+
+/// B2：命中窄例外的建议级非契约项（Suggestion + Completeness + Repairable +
+/// disposition 缺失 + Revise 轮 + 无诊断/无 owner 字段）MUST 在分类前先经
+/// 同一会话有效视图投影为 advisory ⇒ 不进入驱动返修的前轮清单（既不进
+/// 待办区也不进已关闭区）；真必修项仍进待办区。
+#[test]
+fn previous_round_section_excludes_narrow_exception_suggestion_findings() {
+    let replay = previous_round_replay(
+        "previous_round_narrow_exception_excluded",
+        vec![
+            mechanical_finding("acceptance_missing", "mechanical: acceptance missing"),
+            mechanical_finding("completeness_gap_wi_a", "mechanical: completeness gap"),
+        ],
+        vec![
+            previous_finding(
+                "本 Work Item 验收标准缺口",
+                Some("plan_preflight.acceptance_missing"),
+                "补齐验收标准",
+            ),
+            repairable_hint_finding(
+                ReviewFindingSeverity::Suggestion,
+                Some(ReviewFindingCategory::Completeness),
+                "wi-a 完备度说明缺口",
+                "completeness_gap_wi_a",
+                "补充完备度说明",
+            ),
+        ],
+    );
+    let prompt = replay
+        .engine
+        .build_work_item_plan_review_input()
+        .expect("replay review input")
+        .prompt;
+    let payload = previous_round_payload(&prompt);
+    let unresolved = zone(&payload, "unresolved_findings");
+    assert_eq!(
+        unresolved.len(),
+        1,
+        "命中窄例外的建议级 finding 不得进入待办区: {payload}"
+    );
+    assert_eq!(unresolved[0]["content_identity"], "acceptance_missing");
+    assert!(
+        zone(&payload, "resolved_findings").is_empty(),
+        "窄例外项不是「本轮已关闭」，不得进已关闭区: {payload}"
+    );
+    assert_eq!(payload["duplicate_count"], 0, "{payload}");
+}
+
+/// B2 同源验收：前轮清单呈现的待办集合 == 同一会话有效视图（live
+/// `finalize_review_verdict` 套用的同一 `apply_sc_effective_review_verdict`）
+/// 投影后的 actionable 集合——同一谓词、同一投影、逐 finding 一致。
+#[test]
+fn previous_round_section_agrees_with_session_effective_view() {
+    let findings = vec![
+        // 命中窄例外：Suggestion + Completeness + Repairable + disposition 缺失。
+        repairable_hint_finding(
+            ReviewFindingSeverity::Suggestion,
+            Some(ReviewFindingCategory::Completeness),
+            "wi-a 完备度建议（命中窄例外）",
+            "completeness_suggestion",
+            "补充完备度说明",
+        ),
+        // 不命中：契约类 category 保持 fail-closed。
+        repairable_hint_finding(
+            ReviewFindingSeverity::Suggestion,
+            Some(ReviewFindingCategory::ContractGap),
+            "wi-a 契约能力缺口",
+            "contract_gap",
+            "补齐输出能力",
+        ),
+        // 不命中：severity=must_fix 维持既有分类行为。
+        repairable_hint_finding(
+            ReviewFindingSeverity::MustFix,
+            Some(ReviewFindingCategory::Completeness),
+            "wi-a 完备度必修缺口",
+            "completeness_must_fix",
+            "补齐完备度事实",
+        ),
+    ];
+    let replay = previous_round_replay(
+        "previous_round_effective_view_agreement",
+        vec![
+            mechanical_finding("completeness_suggestion", "mechanical: completeness"),
+            mechanical_finding("contract_gap", "mechanical: contract gap"),
+            mechanical_finding("completeness_must_fix", "mechanical: must fix"),
+        ],
+        findings.clone(),
+    );
+    let projected = replay
+        .engine
+        .apply_sc_effective_review_verdict(replay_verdict(findings));
+    assert_eq!(
+        projected.findings[0].disposition,
+        Some(ReviewFindingDisposition::Advisory),
+        "窄例外命中项在有效视图投影为 advisory"
+    );
+    assert!(
+        projected.findings[1..]
+            .iter()
+            .all(|finding| finding.disposition.is_none()),
+        "未命中项不得被投影降级"
+    );
+    assert!(matches!(projected.verdict, ReviewVerdictType::Revise));
+    let prompt = replay
+        .engine
+        .build_work_item_plan_review_input()
+        .expect("replay review input")
+        .prompt;
+    let payload = previous_round_payload(&prompt);
+    let presented: BTreeSet<&str> = zone(&payload, "unresolved_findings")
+        .iter()
+        .map(|entry| entry["content_identity"].as_str().expect("identity"))
+        .collect();
+    let effective_set: BTreeSet<&str> = projected
+        .findings
+        .iter()
+        .filter(|finding| finding.is_actionable())
+        .filter_map(|finding| {
+            finding
+                .contract_field
+                .as_deref()?
+                .strip_prefix("plan_preflight.")
+        })
+        .collect();
+    assert_eq!(
+        presented, effective_set,
+        "前轮清单呈现集合 == 会话有效视图 actionable 集合: {payload}"
+    );
+    assert_eq!(effective_set.len(), 2, "窄例外命中项不在有效 actionable 集合");
+    assert!(
+        zone(&payload, "resolved_findings").is_empty(),
+        "三个身份都在本轮机械报告 ⇒ 无已关闭区: {payload}"
+    );
+}
+
+/// B2 不变量：窄例外之外的 fixture，投影是严格无操作 ⇒ D6 求交/去重/分区
+/// 与改前口径逐字一致（分区内容、指纹与计数不变）。
+#[test]
+fn previous_round_section_unchanged_for_findings_outside_narrow_exception() {
+    let contract_suggestion = repairable_hint_finding(
+        ReviewFindingSeverity::Suggestion,
+        Some(ReviewFindingCategory::ContractGap),
+        "wi-a 契约能力缺口（建议级也不降级）",
+        "capability_gap",
+        "补齐输出能力",
+    );
+    let must_fix_open = previous_finding(
+        "本 Work Item 验收标准缺口",
+        Some("plan_preflight.acceptance_missing"),
+        "补齐验收标准",
+    );
+    let replay = previous_round_replay(
+        "previous_round_outside_narrow_exception",
+        vec![
+            mechanical_finding("capability_gap", "mechanical: capability gap"),
+            mechanical_finding("acceptance_missing", "mechanical: acceptance missing"),
+        ],
+        vec![contract_suggestion.clone(), must_fix_open.clone()],
+    );
+    let projected = replay.engine.apply_sc_effective_review_verdict(replay_verdict(vec![
+        contract_suggestion,
+        must_fix_open,
+    ]));
+    assert!(
+        projected
+            .findings
+            .iter()
+            .all(|finding| finding.disposition.is_none()),
+        "例外外 finding 不得被投影降级"
+    );
+    let prompt = replay
+        .engine
+        .build_work_item_plan_review_input()
+        .expect("replay review input")
+        .prompt;
+    let payload = previous_round_payload(&prompt);
+    let unresolved = zone(&payload, "unresolved_findings");
+    assert_eq!(unresolved.len(), 2, "{payload}");
+    assert_eq!(unresolved[0]["content_identity"], "capability_gap");
+    assert_eq!(unresolved[0]["contract_field"], "plan_preflight.capability_gap");
+    assert_eq!(unresolved[0]["required_action"], "补齐输出能力");
+    assert_eq!(unresolved[1]["content_identity"], "acceptance_missing");
+    assert_eq!(unresolved[1]["required_action"], "补齐验收标准");
+    // classify 的 class 未被投影改变 ⇒ 指纹与改前逐字同源。
+    let (expected_fp, _) = FindingFingerprint::identity_for_finding(
+        Some(ReviewFindingCategory::ContractGap),
+        FindingClass::Repairable,
+        "wi-a 契约能力缺口（建议级也不降级）",
+        Some("plan_preflight.capability_gap"),
+    );
+    assert_eq!(
+        unresolved[0]["fingerprint"].as_str(),
+        Some(expected_fp.0.as_str())
+    );
+    assert!(zone(&payload, "resolved_findings").is_empty(), "{payload}");
+    assert_eq!(payload["duplicate_count"], 0, "{payload}");
+    assert_eq!(payload["mechanical_report_available"], true, "{payload}");
+}
