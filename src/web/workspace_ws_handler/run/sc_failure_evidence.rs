@@ -773,9 +773,7 @@ pub(super) mod sc_failure_terminal;
 /// 终局面的窄再导出：既有调用点（transport 与 run/single_candidate）按原
 /// 路径取用；真实组包/发布在子模块内实现，不在本文件复制第二份。
 pub(super) use sc_failure_terminal::{
-    SC_TERMINAL_CLASS_COMPILE, SC_TERMINAL_CLASS_IR_PREFLIGHT, SC_TERMINAL_CLASS_STRUCTURE_GATE,
-    SC_TERMINAL_CLASS_TEACHING_INTERRUPTED, ScFailureTerminalOutcome, finalize_sc_failure_chain,
-    teaching_launch_observations, terminal_exit_error,
+    SC_TERMINAL_CLASS_TEACHING_INTERRUPTED, teaching_launch_observations, terminal_exit_error,
 };
 
 #[cfg(test)]

@@ -39,17 +39,9 @@ pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_failure_t
 // 走既有 CAS）的 run 级路径登记。实现文件为 `run/sc_failure_round_entry.rs`；
 // 模块本体声明在 single_candidate.rs 内（与 P01 transport 同形）。
 pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_failure_round_entry;
-// P09：SC 失败证据 blocking reasons 的 run 级路径登记。实现文件为
-// `run/sc_failure_evidence.rs`；模块本体声明在 single_candidate.rs 内。
-pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_failure_evidence;
 // P20：SC 失败 source resolver 的 run 级路径登记。实现文件为
 // `run/sc_teaching_source.rs`；模块本体声明在 single_candidate.rs 内。
 pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_teaching_source;
-// P22：SC 教学重驱 prompt facade 的 run 级路径登记。实现文件为
-// `run/sc_teaching_prompt.rs`；模块本体声明在 single_candidate.rs 内——
-// 窄再导出模块本身（调用点在 single_candidate 子树内，facade 项用
-// `pub(super)` 可见性即可）。
-pub(in crate::web::workspace_ws_handler::run) use single_candidate::sc_teaching_prompt;
 #[path = "run/single_candidate_structure_reredrive.rs"]
 mod single_candidate_structure_reredrive;
 pub(crate) use provider_run::{
