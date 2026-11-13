@@ -1,12 +1,23 @@
 import { ChevronDown, ChevronRight, FileText, GitCompare } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  ScEvidenceRef,
+  ScFailureRepairPackage,
+  WorkItemPlanArtifactVersion,
+} from "../../api/types";
 import type { ArtifactVersionSummary } from "../../state/workspace-ws-store";
 import { MonacoDiffViewer } from "../shared/MonacoDiffViewer";
 import { MonacoViewer } from "../shared/MonacoViewer";
+import { workItemPlanArtifactLabel } from "../workspace/work-item-plan-projection-artifacts";
 import { REVIEW_VERDICT_LABELS } from "./review-verdict-labels";
 
 interface ArtifactPaneProps {
   artifactVersions: ArtifactVersionSummary[];
+  /**
+   * 已发布版本的结构化投影（driver/observer 同源）。只用于把 markdown rail 里
+   * 缺失的 SC 失败修复包版本补齐——包恒 is_current=false，绝不替换普通产物。
+   */
+  structuredVersions?: WorkItemPlanArtifactVersion[];
   artifact: string | null;
   sessionId?: string | null;
   artifactContentCache?: Record<number, string>;
@@ -17,6 +28,7 @@ interface ArtifactPaneProps {
 
 export function ArtifactPane({
   artifactVersions,
+  structuredVersions,
   artifact,
   sessionId = null,
   artifactContentCache = {},
@@ -25,8 +37,8 @@ export function ArtifactPane({
   className = "",
 }: ArtifactPaneProps) {
   const sortedVersions = useMemo(
-    () => [...artifactVersions].sort((left, right) => left.version - right.version),
-    [artifactVersions],
+    () => mergeRailVersions(artifactVersions, structuredVersions),
+    [artifactVersions, structuredVersions],
   );
   const latestVersion = sortedVersions.at(-1) ?? null;
   const [selectedVersion, setSelectedVersion] = useState<number | null>(
@@ -51,28 +63,35 @@ export function ArtifactPane({
   const selected =
     sortedVersions.find((version) => version.version === selectedVersion) ?? latestVersion;
   const previous = previousVersion(sortedVersions, selected?.version ?? null);
+  const selectedPackage = scFailurePackageOf(selected);
+  const previousPackage = scFailurePackageOf(previous);
+  const diffAvailable = Boolean(
+    selected && previous && !selectedPackage && !previousPackage,
+  );
   const selectedKey = selected ? versionContentKey(currentSessionId, selected.version) : null;
   const previousKey = previous ? versionContentKey(currentSessionId, previous.version) : null;
-  const selectedMarkdown = selected
-    ? contentForVersion(
-        selected,
-        currentSessionId,
-        artifactContentCache,
-        loadedContent,
-        sessionRef.current,
-        ignoredCacheRef.current,
-      )
-    : null;
-  const previousMarkdown = previous
-    ? contentForVersion(
-        previous,
-        currentSessionId,
-        artifactContentCache,
-        loadedContent,
-        sessionRef.current,
-        ignoredCacheRef.current,
-      )
-    : null;
+  const selectedMarkdown =
+    selected && !selectedPackage
+      ? contentForVersion(
+          selected,
+          currentSessionId,
+          artifactContentCache,
+          loadedContent,
+          sessionRef.current,
+          ignoredCacheRef.current,
+        )
+      : null;
+  const previousMarkdown =
+    previous && !previousPackage
+      ? contentForVersion(
+          previous,
+          currentSessionId,
+          artifactContentCache,
+          loadedContent,
+          sessionRef.current,
+          ignoredCacheRef.current,
+        )
+      : null;
   const markdown = selectedMarkdown ?? artifact ?? "等待 Artifact";
   const selectedError = selectedKey ? loadErrors[selectedKey] : undefined;
   const previousError = previousKey ? loadErrors[previousKey] : undefined;
@@ -97,8 +116,12 @@ export function ArtifactPane({
   }, [sessionId]);
 
   const ensureVersionLoaded = useCallback(
-    (version: ArtifactVersionSummary | null) => {
+    (version: WorkItemPlanArtifactVersion | null) => {
       if (!version) {
+        return;
+      }
+      // SC 失败修复包没有 markdown 正文：只读呈现包本身，绝不为它发全文请求。
+      if (scFailurePackageOf(version)) {
         return;
       }
       const key = versionContentKey(currentSessionId, version.version);
@@ -220,7 +243,7 @@ export function ArtifactPane({
               {sortedVersions.length > 0 ? (
                 sortedVersions.map((version) => (
                   <option key={version.version} value={version.version}>
-                    v{version.version}
+                    {railVersionLabel(version)}
                   </option>
                 ))
               ) : (
@@ -243,7 +266,7 @@ export function ArtifactPane({
           <button
             type="button"
             onClick={() => setShowDiff((value) => !value)}
-            disabled={!previous || !selected}
+            disabled={!diffAvailable}
             className="inline-flex h-8 items-center gap-2 rounded-md border border-[var(--aria-line)] bg-white px-3 text-xs font-semibold text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)] disabled:opacity-50"
           >
             <GitCompare className="h-3.5 w-3.5" />
@@ -261,7 +284,9 @@ export function ArtifactPane({
       </div>
 
       <div className="min-h-0 flex-1 p-3">
-        {showDiff && selected && previous ? (
+        {selectedPackage ? (
+          <ScFailureRepairPackageView payload={selectedPackage} />
+        ) : showDiff && selected && previous && !previousPackage ? (
           <div data-testid="artifact-diff" className="h-full min-h-0">
             {selectedError || previousError ? (
               <ArtifactLoadError
@@ -294,6 +319,85 @@ export function ArtifactPane({
       </div>
     </aside>
   );
+}
+
+/**
+ * SC 失败修复包只读视图（A4 payload）：先给真实的完整/不完整判定与关键字段，
+ * 再给包全文 JSON。没有任何动作位——不下载、不重试、不发请求。
+ */
+function ScFailureRepairPackageView({ payload }: { payload: ScFailureRepairPackage }) {
+  const complete = payload.completeness === "complete";
+  return (
+    <div
+      data-testid="sc-failure-repair-package-view"
+      className="flex h-full min-h-0 flex-col gap-3 overflow-auto"
+    >
+      <div className="aria-card-clay flex flex-col gap-2 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-semibold text-[var(--aria-ink)]">
+            {workItemPlanArtifactLabel({ type: "sc_failure_repair_package", payload })}
+          </span>
+          <span className="aria-chip border-[var(--aria-line-strong)] text-[var(--aria-ink-muted)]">
+            {complete ? "证据完整" : "证据不完整"}
+          </span>
+        </div>
+        <dl className="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs text-[var(--aria-ink-muted)]">
+          <dt>终止类别</dt>
+          <dd className="text-[var(--aria-ink)]">{payload.terminal_class}</dd>
+          <dt>终止原因</dt>
+          <dd className="text-[var(--aria-ink)]">{payload.terminal_reason}</dd>
+          <dt>失败链</dt>
+          <dd className="aria-mono break-all">{payload.chain_id}</dd>
+          <dt>轮次数</dt>
+          <dd className="text-[var(--aria-ink)]">{payload.rounds.length}</dd>
+          <dt>缺失证据</dt>
+          <dd className="text-[var(--aria-ink)]">{payload.missing_evidence.length}</dd>
+          <dt>末次提供者输出</dt>
+          <dd className="aria-mono break-all">{evidenceRefText(payload.last_provider_output)}</dd>
+          <dt>末次失败源</dt>
+          <dd className="aria-mono break-all">
+            {payload.last_failure_source.source_round_id} ·{" "}
+            {evidenceRefText(payload.last_failure_source.source)}
+          </dd>
+          <dt>证据日志</dt>
+          <dd className="aria-mono break-all">{payload.evidence_log_ref}</dd>
+          <dt>证据摘要</dt>
+          <dd className="aria-mono break-all">{payload.evidence_digest}</dd>
+        </dl>
+        {payload.missing_evidence.length > 0 ? (
+          <ul className="flex flex-col gap-1 text-xs text-[var(--aria-ink-muted)]">
+            {payload.missing_evidence.map((missing) => (
+              <li key={`${missing.round_id}:${missing.kind}:${missing.code}`}>
+                {missing.round_id} · {missing.kind} · {missing.code} · {missing.detail}
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        <ul className="flex flex-col gap-1 text-xs text-[var(--aria-ink-muted)]">
+          {payload.rounds.map((round) => (
+            <li key={round.identity.round_id}>
+              {round.identity.round_id} · {round.failure_class ?? "未分类失败"} ·{" "}
+              {round.blocking_reasons.length > 0
+                ? round.blocking_reasons.join("；")
+                : "无阻断原因"}
+            </li>
+          ))}
+        </ul>
+      </div>
+      <pre
+        data-testid="sc-failure-repair-package-json"
+        className="aria-mono overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] p-3 text-xs text-[var(--aria-ink)]"
+      >
+        {JSON.stringify(payload, null, 2)}
+      </pre>
+    </div>
+  );
+}
+
+function evidenceRefText(reference: ScEvidenceRef): string {
+  return reference.status === "available"
+    ? `${reference.status} · ${reference.locator} · ${reference.bytes}B`
+    : `${reference.status} · ${reference.code} · ${reference.detail}`;
 }
 
 function ArtifactLoading({ version }: { version: number }) {
@@ -379,4 +483,49 @@ function previousVersion(versions: ArtifactVersionSummary[], selectedVersion: nu
   }
   const index = versions.findIndex((version) => version.version === selectedVersion);
   return index > 0 ? versions[index - 1] : null;
+}
+
+/**
+ * 版本轨（rail）= 既有 markdown 版本摘要 ∪ 结构化投影里缺失的 SC 失败修复包版本。
+ * 只补包版本：其它结构化变体仍由既有产物面板呈现，不挤进 markdown 轨。
+ */
+function mergeRailVersions(
+  artifactVersions: ArtifactVersionSummary[],
+  structuredVersions: WorkItemPlanArtifactVersion[] | undefined,
+): WorkItemPlanArtifactVersion[] {
+  const merged = new Map<number, WorkItemPlanArtifactVersion>();
+  for (const version of artifactVersions) {
+    merged.set(version.version, { ...version });
+  }
+  for (const version of structuredVersions ?? []) {
+    if (!scFailurePackageOf(version)) {
+      continue;
+    }
+    const existing = merged.get(version.version);
+    merged.set(version.version, {
+      ...version,
+      ...existing,
+      markdown: existing?.markdown ?? version.markdown,
+      artifact: version.artifact,
+    });
+  }
+  return [...merged.values()].sort((left, right) => left.version - right.version);
+}
+
+function scFailurePackageOf(
+  version: WorkItemPlanArtifactVersion | null | undefined,
+): ScFailureRepairPackage | null {
+  const artifact = version?.artifact;
+  if (!artifact || artifact.type !== "sc_failure_repair_package") {
+    return null;
+  }
+  return artifact.payload;
+}
+
+function railVersionLabel(version: WorkItemPlanArtifactVersion): string {
+  const artifact = version.artifact;
+  if (artifact?.type === "sc_failure_repair_package") {
+    return `v${version.version} · ${workItemPlanArtifactLabel(artifact)}`;
+  }
+  return `v${version.version}`;
 }

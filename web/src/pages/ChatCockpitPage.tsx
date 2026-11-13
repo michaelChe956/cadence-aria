@@ -1263,6 +1263,7 @@ export function ChatCockpitPage({
           {drilldownView === "artifact" && isArtifactReviewSession ? (
             <ArtifactReviewPanel
               artifactVersions={selectedState?.artifactVersions ?? []}
+              structuredVersions={selectedState?.workItemPlanArtifactVersions ?? []}
               artifact={selectedState?.artifact ?? null}
               sessionId={isCurrentSession ? sessionId : null}
               artifactContentCache={artifactContentCacheValues}

@@ -1,10 +1,13 @@
 import { PanelRightClose } from "lucide-react";
 import type { ReactNode } from "react";
+import type { WorkItemPlanArtifactVersion } from "../../api/types";
 import type { ArtifactVersionSummary } from "../../state/workspace-ws-store";
 import { ArtifactPane } from "./ArtifactPane";
 
 interface ArtifactReviewPanelProps {
   artifactVersions: ArtifactVersionSummary[];
+  /** 已发布版本的结构化投影（driver/observer 同源）；透传给 ArtifactPane 补齐包版本。 */
+  structuredVersions?: WorkItemPlanArtifactVersion[];
   artifact: string | null;
   sessionId?: string | null;
   artifactContentCache?: Record<number, string>;
@@ -25,6 +28,7 @@ interface ArtifactReviewPanelProps {
  */
 export function ArtifactReviewPanel({
   artifactVersions,
+  structuredVersions,
   artifact,
   sessionId = null,
   artifactContentCache = {},
@@ -79,6 +83,7 @@ export function ArtifactReviewPanel({
       <div className="min-h-0 flex-1">
         <ArtifactPane
           artifactVersions={artifactVersions}
+          structuredVersions={structuredVersions}
           artifact={artifact}
           sessionId={sessionId}
           artifactContentCache={artifactContentCache}
