@@ -855,6 +855,13 @@ async fn post_install_version_falls_back_to_absolute_path_probe() {
 /// ⇒ 探测必然 127 ⇒ 必须提示）。
 #[tokio::test]
 async fn kimi_install_result_carries_path_hint() {
+    // 该用例会触发 overlay 登记 ⇒ 必须持全局锁并在结束时清空，避免污染
+    // 并行的 overlay 断言用例。
+    let _lock = crate::cross_cutting::path_overlay::overlay_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    crate::cross_cutting::path_overlay::clear();
+
     let root = tempdir().expect("root");
     let home = root.path().join("home");
     let kimi_bin = home.join(".kimi-code").join("bin");
@@ -893,4 +900,66 @@ async fn kimi_install_result_carries_path_hint() {
         hint.contains(".kimi-code/bin"),
         "path_hint 必须点名 ~/.kimi-code/bin: {hint}"
     );
+    crate::cross_cutting::path_overlay::clear();
 }
+
+/// 已安装但**不在 PATH 上** ⇒ 从已安装包的真实路径反推 npm 前缀（2.10②）：
+/// 更新必须装回被更新对象所在的前缀，不得改装到别处（否则「更新装到 A、
+/// 用户跑的还是 B」——2026-09-09 老 bug）。
+#[tokio::test]
+async fn update_targets_existing_install_that_is_not_on_path() {
+    struct StubProbe {
+        prefix: Option<PathBuf>,
+    }
+
+    #[async_trait::async_trait]
+    impl NpmGlobalPrefixProbe for StubProbe {
+        async fn npm_global_prefix(&self) -> Option<PathBuf> {
+            self.prefix.clone()
+        }
+    }
+
+    let root = tempdir().expect("root");
+    // npm 自己的全局前缀（bin 在 PATH 上，但**没有**装这个包）。
+    let npm_global = root.path().join("npm-global");
+    std::fs::create_dir_all(npm_global.join("bin")).expect("npm global bin");
+    // 已有安装在兜底前缀里（其 bin **不在** PATH 上 ⇒ 属「已装但不在 PATH
+    // 上」）。
+    let existing = root.path().join("fallback");
+    std::fs::create_dir_all(
+        existing
+            .join("lib")
+            .join("node_modules")
+            .join("@openai")
+            .join("codex"),
+    )
+    .expect("package dir");
+    let fallback = existing.clone();
+
+    let mut execution = execution(
+        root.path(),
+        ScriptedRunner::new(vec![success("added 1 package")], Duration::ZERO),
+        SpyProber::new(Some("1.0.0")),
+    );
+    execution.path_value = Some(format!(
+        "{}:{}",
+        root.path().join("empty-bin").display(),
+        npm_global.join("bin").display()
+    ));
+    execution.npm_prefix = fallback.clone();
+    execution.npm_prefix_probe = Some(Arc::new(StubProbe {
+        prefix: Some(npm_global.clone()),
+    }));
+
+    let row = row_for_wire("codex").expect("codex row");
+    let resolved = execution
+        .resolve_effective_prefix(row, execution.path_value.as_deref())
+        .await;
+
+    assert_eq!(
+        resolved,
+        existing,
+        "已安装但不在 PATH 上 ⇒ 必须反推回它所在的前缀，不得改装到别处"
+    );
+}
+
