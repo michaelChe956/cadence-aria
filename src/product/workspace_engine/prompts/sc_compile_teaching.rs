@@ -22,9 +22,12 @@ use crate::product::work_item_plan_compiler::{
     IrFault, IrFaultKind, IrFaultLocator, LoweringFault,
 };
 
-/// A1（REQ-WSC-32）：parse 诊断事实块的有界投影预算（UTF-8 字节）——只
-/// 约束新增的 parse 事实块（多行：首行三段逐字 + field/example 行），超限
-/// 整条省略不切半；旧 lowering/IR/registered IDs 与单行呈现原文不在此列。
+/// A1（REQ-WSC-32）：parse 诊断事实块的有界投影**字节**预算（UTF-8）——
+/// 只约束新增的 parse 事实块（多行：首行三段逐字 + field/example 行），
+/// 超限整条省略不切半；旧 lowering/IR/registered IDs 与单行呈现原文不在
+/// 此列。逐条**条数**另有与契约修复指令单点同源的
+/// `MAX_AUTOREPAIR_INSTRUCTION_LINES` 上限（见渲染处），本预算只兜上限内
+/// 条目的体积。
 const MAX_PARSE_FACT_BLOCK_BYTES: usize = 32_000;
 
 /// Task 4（MODIFIED REQ-WSC-09）：教学重驱 prompt 的 typed 事实载体。
@@ -95,8 +98,15 @@ fn render_teaching_reredrive_prompt(
     if !facts.parse_reasons.is_empty() {
         prompt.push_str("\n具体失败原因:\n");
         // A1（REQ-WSC-32）：仅新增的 parse 事实块（多行：首行逐字三段 +
-        // field/example 行）受 ≤32,000 B 预算约束——整条省略、顺序稳定、
-        // 显式记账；单行呈现原文（IR 预检 failure_reasons 等旧材料）不截断。
+        // field/example 行）受有界投影约束——整条省略、顺序稳定、显式记账；
+        // 单行呈现原文（IR 预检 failure_reasons 等旧材料）不截断。双重界：
+        // ① 逐条条数与契约修复指令单点同源
+        // MAX_AUTOREPAIR_INSTRUCTION_LINES——owner 可见 prompt 不得另写一套
+        // 阈值（Important-1 同族缺陷：指令面已按上限截断、计数收口的超限
+        // 条目，不得经事实块的 field/行号行再无界透传）；② 字节预算
+        // MAX_PARSE_FACT_BLOCK_BYTES 兜住上限内条目的体积。
+        let max_fact_entries =
+            crate::product::workspace_engine::contract_autorepair::MAX_AUTOREPAIR_INSTRUCTION_LINES;
         let mut fact_block_bytes = 0usize;
         let mut total = 0usize;
         let mut shown = 0usize;
@@ -109,6 +119,10 @@ fn render_teaching_reredrive_prompt(
                 continue;
             }
             total += 1;
+            if shown >= max_fact_entries {
+                omitted += 1;
+                continue;
+            }
             // "- " 前缀 + 块本体 + 换行 = 该块在 prompt 中的 UTF-8 字节数。
             let rendered_bytes = reason.len() + "- ".len() + 1;
             if fact_block_bytes + rendered_bytes > MAX_PARSE_FACT_BLOCK_BYTES {
@@ -123,7 +137,7 @@ fn render_teaching_reredrive_prompt(
         }
         if omitted > 0 {
             prompt.push_str(&format!(
-                "- parse 事实块预算 {MAX_PARSE_FACT_BLOCK_BYTES} B 已超出:共 {total} 条 / 呈现 {shown} 条 / 省略 {omitted} 条(整条省略,不切半条诊断)。\n"
+                "- parse 事实块有界投影收口:共 {total} 条 / 呈现 {shown} 条 / 省略 {omitted} 条(整条省略,不切半条诊断;逐条上限 {max_fact_entries} 条与契约修复指令同源,字节预算 {MAX_PARSE_FACT_BLOCK_BYTES} B)。\n"
             ));
         }
         // r41 B1(诊断增强):unknown_structured_key 类失败附「合法 section/key
@@ -410,39 +424,77 @@ mod reredrive_prompt_tests {
         assert!(!prompt.contains("省略"), "预算内不得出现省略记账: {prompt}");
     }
 
-    /// A1：事实块超预算 ⇒ 整条省略 + 显式记账（总数/呈现数/省略数），顺序
-    /// 稳定，不切半条（被省略条目的任何片段都不得出现）。
+    /// A1：事实块超**条数上限**（与契约修复指令单点同源
+    /// `MAX_AUTOREPAIR_INSTRUCTION_LINES`）⇒ 超限条目整条省略 + 显式记账
+    ///（总数/呈现数/省略数），顺序稳定，不切半条（被省略条目的任何片段
+    /// 都不得出现）。Important-1 同族护栏：指令面已按上限收口的超限条目，
+    /// 不得经事实块的 field/首行再透传进同一 owner 可见 prompt。
     #[test]
-    fn parse_fact_block_over_budget_omits_whole_entries_and_reports_counts() {
-        // 每块固定 380 B ⇒ 渲染 383 B/条；32,000 B 预算内恰容 83 条
-        //（83×383=31,789；84×383=32,172 超出）。
-        let parse_reasons: Vec<String> = (0..100)
+    fn parse_fact_block_over_entry_cap_omits_whole_entries_and_reports_counts() {
+        use crate::product::workspace_engine::contract_autorepair::MAX_AUTOREPAIR_INSTRUCTION_LINES;
+        // 6 条小事实块（字节预算不介入）：条数上限 ⇒ 呈现前 4、省略后 2。
+        let parse_reasons: Vec<String> = (0..6)
+            .map(|index| {
+                format!(
+                    "missing_section:{index:03}:m\n  缺失字段: f{index:03}\n  正确形状: - f{index:03}: value"
+                )
+            })
+            .collect();
+        let prompt = plain_prompt(&parse_reasons, &[]);
+        assert!(
+            prompt.contains(&format!(
+                "共 6 条 / 呈现 {MAX_AUTOREPAIR_INSTRUCTION_LINES} 条 / 省略 {} 条",
+                6 - MAX_AUTOREPAIR_INSTRUCTION_LINES
+            )),
+            "超条数上限必须显式记账总数/呈现数/省略数: {prompt}"
+        );
+        assert!(
+            prompt.contains("缺失字段: f003") && prompt.contains("missing_section:003:"),
+            "上限内末条完整在场: {prompt}"
+        );
+        // 整条省略：第 5 条（0-based 04）的任何片段（首行/field/形状）不得出现。
+        assert!(
+            !prompt.contains("f004"),
+            "被省略条目不得残留半条片段: {prompt}"
+        );
+        assert!(
+            !prompt.contains("missing_section:004:"),
+            "被省略条目的首行一并省略: {prompt}"
+        );
+        // 呈现顺序稳定。
+        let first = prompt.find("f000").expect("首条必须在场");
+        let last = prompt.find("f003").expect("上限内末条必须在场");
+        assert!(first < last, "呈现顺序必须稳定");
+    }
+
+    /// A1：事实块超**字节预算**（上限内条目体积超 32,000 B）⇒ 同样整条
+    /// 省略 + 显式记账；条数上限不介入时计数由字节预算决定。
+    #[test]
+    fn parse_fact_block_over_byte_budget_omits_whole_entries_and_reports_counts() {
+        // 每块固定 12,000 B ⇒ 渲染 12,003 B/条；32,000 B 预算内恰容 2 条
+        //（2×12,003=24,006；3×12,003=36,009 超出），条数上限（4）不介入。
+        let parse_reasons: Vec<String> = (0..3)
             .map(|index| {
                 let mut block = format!(
                     "missing_section:{index:03}:m\n  缺失字段: f{index:03}\n  正确形状: - f{index:03}: value"
                 );
-                block.push_str(&"x".repeat(380 - block.len()));
+                block.push_str(&"x".repeat(12_000 - block.len()));
                 block
             })
             .collect();
         let prompt = plain_prompt(&parse_reasons, &[]);
         assert!(
-            prompt.contains("共 100 条 / 呈现 83 条 / 省略 17 条"),
-            "超预算必须显式记账总数/呈现数/省略数: {prompt}"
+            prompt.contains("共 3 条 / 呈现 2 条 / 省略 1 条"),
+            "超字节预算必须显式记账总数/呈现数/省略数: {prompt}"
         );
-        // 整条省略：第 84 条（0-based 83）的任何片段（首行/field/形状）不得出现。
         assert!(
-            !prompt.contains("f083"),
+            !prompt.contains("f002"),
             "被省略条目不得残留半条片段: {prompt}"
         );
         assert!(
-            !prompt.contains("missing_section:083:"),
-            "被省略条目的首行一并省略: {prompt}"
+            prompt.contains("缺失字段: f000") && prompt.contains("缺失字段: f001"),
+            "预算内条目完整在场: {prompt}"
         );
-        // 预算内条目完整在场且顺序稳定。
-        let first = prompt.find("f000").expect("首条必须在场");
-        let last = prompt.find("f082").expect("预算内末条必须在场");
-        assert!(first < last, "呈现顺序必须稳定");
     }
 
     /// A1：单条超大（自身即超 32,000 B）也整条省略，不得切半；其余小条
