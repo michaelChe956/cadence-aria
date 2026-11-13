@@ -252,37 +252,6 @@ pub(in crate::web::workspace_ws_handler::run) async fn terminal_exit_error(
     }
 }
 
-/// 教学链门结果的终局收口：`Ok` 原样返回；`Err` ⇒ 交终局处理器组包（判定与
-/// 缺提示记录已 durable——不只丢一条 Message 丢掉终局）。错误原因取既有
-/// `Message` 载荷逐字（原始失败原因不丢），其余变体按 Debug 呈现（该错误
-/// 类型无 Display）。
-pub(in crate::web::workspace_ws_handler::run) async fn sc_teaching_terminal_grant<T>(
-    engine: &mut WorkspaceEngine,
-    lifecycle: &LifecycleStore,
-    chain: &ScFailureChainIdentity,
-    terminal_class: &str,
-    outcome: Result<T, SingleCandidateProviderRunError>,
-) -> Result<T, SingleCandidateProviderRunError> {
-    match outcome {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            let reason = match &error {
-                SingleCandidateProviderRunError::Message(message) => message.clone(),
-                other => format!("{other:?}"),
-            };
-            Err(terminal_exit_error(
-                engine,
-                lifecycle,
-                chain,
-                terminal_class,
-                Vec::new(),
-                reason,
-            )
-            .await)
-        }
-    }
-}
-
 /// 教学中断轮的真实启动观察：attempt 键命中且为 actual launch（`started` 与
 /// provider/started_at 齐备）⇒ `Started`；其余（无 attempt、缺条目、会话不可读）
 /// ⇒ `Unknown`——不判 `NotStarted`（本片不合成该值）。

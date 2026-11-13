@@ -152,8 +152,11 @@ use single_candidate_structure_reredrive::{
 // `sc_failure_evidence::sc_failure_terminal` 子模块内实现，本层只取用出口。
 use sc_failure_evidence::sc_failure_terminal::{
     SC_TERMINAL_CLASS_COMPILE, SC_TERMINAL_CLASS_IR_PREFLIGHT, SC_TERMINAL_CLASS_STRUCTURE_GATE,
-    sc_teaching_terminal_grant, terminal_exit_error,
+    terminal_exit_error,
 };
+// 门结果的终局收口（三臂共用一份）：失败源/预算/审计失败 ⇒ 交终局处理器
+// 组包（判定与缺提示记录已 durable），不在主文件重复终局逻辑。
+use sc_teaching_audit::sc_teaching_terminal_grant;
 // Task 4：`is_teachable_parse_failure` 判据已由 `teaching_verdict` 接管；
 // IR 重驱 prompt 的构造已下沉 P22 facade（生产与测试同一入口，旧 builder
 // 别名不再保名）。

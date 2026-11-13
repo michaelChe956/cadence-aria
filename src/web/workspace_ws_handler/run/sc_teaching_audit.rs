@@ -13,11 +13,13 @@
 //!
 //! 全文只装配一次、只落一次、只读一次：本模块不重建正文、不截断、不裁剪。
 use super::sc_teaching_prompt::{ScPreparedTeachingPrompt, ScTeachingPromptBudgetVerdict};
+use super::SingleCandidateProviderRunError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceEntry, ScFailureEvidenceError, ScFailureEvidenceEvent,
     ScFailureEvidenceRead,
 };
+use crate::product::workspace_engine::WorkspaceEngine;
 use crate::web::workspace_ws_types::{
     ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScPromptDisposition, ScRoundEvidence,
     ScRoundIdentity, ScRoundLaunchState, ScTeachingDecision, ScTeachingPromptEvidence,
@@ -259,6 +261,39 @@ fn project_sc_round_evidence(
         prompts,
         teaching_decision: decision,
     })
+}
+
+/// 教学链门结果的终局收口（三臂共用一份）：`Ok` 原样返回；`Err` ⇒ 交终局
+/// 处理器组包（失败源/预算/审计失败时判定与缺提示记录已 durable——不只丢
+/// 一条 Message 丢掉终局）。错误原因取既有 `Message` 载荷逐字（原始失败
+/// 原因不丢），其余变体按 Debug 呈现（该错误类型无 Display）。
+pub(super) async fn sc_teaching_terminal_grant<T>(
+    engine: &mut WorkspaceEngine,
+    lifecycle: &LifecycleStore,
+    chain: &ScFailureChainIdentity,
+    terminal_class: &str,
+    outcome: Result<T, SingleCandidateProviderRunError>,
+) -> Result<T, SingleCandidateProviderRunError> {
+    match outcome {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let reason = match &error {
+                SingleCandidateProviderRunError::Message(message) => message.clone(),
+                other => format!("{other:?}"),
+            };
+            Err(
+                super::sc_failure_evidence::sc_failure_terminal::terminal_exit_error(
+                    engine,
+                    lifecycle,
+                    chain,
+                    terminal_class,
+                    Vec::new(),
+                    reason,
+                )
+                .await,
+            )
+        }
+    }
 }
 
 /// FailureObserved 行的逻辑槽位键。
