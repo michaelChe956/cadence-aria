@@ -217,10 +217,27 @@ impl ProviderInstallRunner {
     }
 }
 
+/// 装完核验结果（2.8 三重验证）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostInstallProbeOutcome {
+    /// 装后探测到的版本（**只**回填 `installed_version`，不写 capability、
+    /// 不触发核验探针 —— REQ-PCI-02「已装但探针未过」的语义不变）。
+    pub installed_version: Option<String>,
+    /// 真实命令是否跑通（`--version` 不可作为唯一依据：实测
+    /// `codegraph --version` 在平台 bundle 缺失时仍返回 1.6.2 / exit 0）。
+    pub real_command_ok: bool,
+}
+
 /// 装完重探 seam（REQ-PCI-05）：成功安装后重新探测该对象的版本与可用性。
 #[async_trait::async_trait]
 pub trait PostInstallProber: Send + Sync {
-    async fn refresh_after_install(&self, target: InstallTarget) -> Result<Option<String>, String>;
+    /// `install_bin_dir` = 本次安装产物的 bin 目录（绝对路径兜底探测用：
+    /// PATH 上找不到 CLI 时用 `<bin>/<cmd>` 再探一次）。
+    async fn refresh_after_install(
+        &self,
+        target: InstallTarget,
+        install_bin_dir: Option<&Path>,
+    ) -> Result<PostInstallProbeOutcome, String>;
 }
 
 /// 生产实现：provider → `provider_health.refresh` 后回填版本；
@@ -246,43 +263,64 @@ impl HealthRefreshProber {
             timeout,
         }
     }
+
+    /// 跑一次 `--version`（PATH 口径）。
+    async fn probe_version(&self, command: &str) -> Option<String> {
+        let request = BoundedCommandRequest {
+            executable: command.to_string(),
+            argv: vec!["--version".to_string()],
+            working_dir: self.working_dir.clone(),
+            timeout: self.timeout,
+            cancellation: CancellationToken::new(),
+            environment: host_environment(),
+            stdout_limit: 4096,
+            stderr_limit: 4096,
+        };
+        match self.command_runner.run(request).await {
+            Ok(result) if result.exit_code == Some(0) && !result.timed_out => result
+                .stdout
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_string),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl PostInstallProber for HealthRefreshProber {
-    async fn refresh_after_install(&self, target: InstallTarget) -> Result<Option<String>, String> {
-        self.health
-            .refresh(CancellationToken::new())
-            .await
-            .map_err(|error| error.to_string())?;
-        match target {
-            InstallTarget::Provider(provider) => Ok(self
+    async fn refresh_after_install(
+        &self,
+        target: InstallTarget,
+        _install_bin_dir: Option<&Path>,
+    ) -> Result<PostInstallProbeOutcome, String> {
+        let health = self.health.refresh(CancellationToken::new()).await;
+        let row = row_for_wire(target.wire_label());
+        // provider 版本走 health 快照（PATH ∪ overlay 口径）。
+        let mut version = match &target {
+            InstallTarget::Provider(provider) => self
                 .health
                 .latest_diagnostic()
-                .entry(&provider)
-                .and_then(|entry| entry.version.clone())),
-            InstallTarget::CodeGraph => {
-                let environment = host_environment();
-                let request = BoundedCommandRequest {
-                    executable: "codegraph".to_string(),
-                    argv: vec!["--version".to_string()],
-                    working_dir: self.working_dir.clone(),
-                    timeout: self.timeout,
-                    cancellation: CancellationToken::new(),
-                    environment,
-                    stdout_limit: 4096,
-                    stderr_limit: 4096,
-                };
-                match self.command_runner.run(request).await {
-                    Ok(result) if result.exit_code == Some(0) && !result.timed_out => Ok(result
-                        .stdout
-                        .lines()
-                        .map(str::trim)
-                        .find(|line| !line.is_empty())
-                        .map(str::to_string)),
-                    _ => Ok(None),
-                }
-            }
+                .entry(provider)
+                .and_then(|entry| entry.version.clone()),
+            InstallTarget::CodeGraph => None,
+        };
+        // 读不到版本 ⇒ 跑 `--version`（PATH 口径）。
+        if version.is_none() {
+            let command = row.map(|row| row.command).unwrap_or("codegraph");
+            version = self.probe_version(command).await;
+        }
+        match (version, health) {
+            (Some(version), _) => Ok(PostInstallProbeOutcome {
+                installed_version: Some(version),
+                real_command_ok: false,
+            }),
+            (None, Err(error)) => Err(error.to_string()),
+            (None, Ok(_)) => Ok(PostInstallProbeOutcome {
+                installed_version: None,
+                real_command_ok: false,
+            }),
         }
     }
 }
@@ -310,6 +348,19 @@ pub fn npm_path_hint(command: &str, prefix: &Path, path_value: Option<&str>) -> 
             prefix.display(),
             prefix_bin.display()
         )),
+    }
+}
+
+/// 修复命令（2.7③ / 2.8③）：npm 类带 `--prefix` 与 `--include=optional`
+/// （「装上但缺平台包」的修复句式，magpie `mendHint` 同款）；脚本类给官方
+/// 脚本命令。**永不 sudo**。
+pub fn install_repair_command(row: &InstallSourceRow, registry: &str, prefix: &Path) -> String {
+    match row.npm_package {
+        Some(package) => format!(
+            "npm install -g --registry={registry} --prefix {} --include=optional {package}@latest",
+            prefix.display()
+        ),
+        None => manual_install_command(row, registry),
     }
 }
 
@@ -498,6 +549,50 @@ impl InstallJobExecution {
         choose_effective_prefix(visible.as_deref(), npm_global.as_deref(), &self.npm_prefix)
     }
 
+    /// 装上但探针未过 ⇒ npm 类以 `--include=optional` **重试一次**（npm 会
+    /// 「留下缺 native 包的安装」却仍 exit 0 —— 首次装时 `--omit=optional`
+    /// 漏掉了平台包）；重试仍失败 ⇒ 给出**可复制**的修复命令（2.7③）。
+    async fn retry_with_optional_dependencies(
+        &self,
+        job_id: &str,
+        target: InstallTarget,
+        row: &InstallSourceRow,
+        prefix: &Path,
+        bin_dir: Option<&Path>,
+        path_hint: Option<String>,
+    ) {
+        if let Some(retry) = npm_retry_plan(row, None, &self.registry, prefix) {
+            if let Ok(result) = self.runner.execute(&retry).await
+                && result.exit_code == Some(0)
+                && !result.timed_out
+                && !result.cancelled
+            {
+                register_install_bin_dir(bin_dir, row.command);
+                if let Some(version) = self
+                    .prober
+                    .refresh_after_install(target, bin_dir)
+                    .await
+                    .ok()
+                    .and_then(|outcome| outcome.installed_version)
+                {
+                    let outcome = InstallJobOutcome {
+                        installed_version: Some(version),
+                        path_hint,
+                    };
+                    let _ = self.store.complete(job_id, outcome, self.clock.now());
+                    return;
+                }
+            }
+        }
+        let repair = install_repair_command(row, &self.registry, prefix);
+        let failure = InstallJobFailure {
+            kind: InstallFailureKind::Other,
+            message: format!("装上了但跑不起来（装完探测未通过）。请手动运行：{repair}"),
+            manual_command: repair,
+        };
+        let _ = self.store.fail(job_id, failure, self.clock.now());
+    }
+
     /// 单个目标的安装作业主流程（无批量入口）：执行安装 → 成功重探 +
     /// 落 completed / 失败分类落 failed。**安装 ≠ 核验**：重探只走
     /// provider health，不写 capability、不触发核验探针。
@@ -535,19 +630,35 @@ impl InstallJobExecution {
                 // overlay 登记**之后**再探测（平台自身探测立即可见）。
                 let detected = self
                     .prober
-                    .refresh_after_install(target)
+                    .refresh_after_install(target.clone(), bin_dir.as_deref())
                     .await
                     .ok()
-                    .flatten();
+                    .and_then(|outcome| outcome.installed_version);
                 let path_hint = match row.npm_package {
                     Some(_) => npm_path_hint(row.command, &prefix, path_value.as_deref()),
                     None => None,
                 };
-                let outcome = InstallJobOutcome {
-                    installed_version: detected,
-                    path_hint,
-                };
-                let _ = self.store.complete(job_id, outcome, self.clock.now());
+                match detected {
+                    Some(version) => {
+                        let outcome = InstallJobOutcome {
+                            installed_version: Some(version),
+                            path_hint,
+                        };
+                        let _ = self.store.complete(job_id, outcome, self.clock.now());
+                    }
+                    // 装上但探针未过 ⇒ 重试一次（2.7③）。
+                    None => {
+                        self.retry_with_optional_dependencies(
+                            job_id,
+                            target,
+                            row,
+                            &prefix,
+                            bin_dir.as_deref(),
+                            path_hint,
+                        )
+                        .await;
+                    }
+                }
             }
             Ok(result) => {
                 let signals = InstallFailureSignals {

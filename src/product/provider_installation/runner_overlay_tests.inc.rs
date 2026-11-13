@@ -6,6 +6,8 @@ use chrono::TimeZone;
 use tempfile::tempdir;
 
 use super::*;
+use crate::cross_cutting::aria_state_paths::AriaStatePaths;
+use crate::cross_cutting::provider_health::{ProviderHealthService, SystemProviderHealthClock};
 use crate::product::models::ProviderName;
 
 const REGISTRY: &str = "https://registry.npmmirror.com";
@@ -103,9 +105,13 @@ impl PostInstallProber for SpyProber {
     async fn refresh_after_install(
         &self,
         _target: InstallTarget,
-    ) -> Result<Option<String>, String> {
+        _install_bin_dir: Option<&Path>,
+    ) -> Result<PostInstallProbeOutcome, String> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.version.clone())
+        Ok(PostInstallProbeOutcome {
+            installed_version: self.version.clone(),
+            real_command_ok: true,
+        })
     }
 }
 
@@ -681,3 +687,4 @@ async fn install_retries_once_with_include_optional_when_probe_fails() {
         failure.manual_command
     );
 }
+
