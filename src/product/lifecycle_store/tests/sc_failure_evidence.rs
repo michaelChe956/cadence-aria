@@ -1,11 +1,8 @@
 // P05t 主测试模块：replay / raw / non-SC 三组消费者行为。
 // 落位：src/product/lifecycle_store/tests/sc_failure_evidence.rs（由 store 模块 #[path] 挂载）。
-// 共享 fixture 见同目录 sc_failure_evidence_fixture.rs。
+// 共享 fixture 由 store 模块统一挂载一次（见 sc_failure_evidence.rs 的 mod fixture）。
 
-#[path = "sc_failure_evidence_fixture.rs"]
-mod fixture;
-
-use fixture::*;
+use super::fixture::*;
 
 #[test]
 fn sc_failure_store_replay_conflict_and_corrupt_prefix() {

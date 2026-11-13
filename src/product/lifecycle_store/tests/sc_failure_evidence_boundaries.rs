@@ -1,13 +1,10 @@
 // P05 严格证据 store 消费者边界矩阵（补主测试未覆盖的 6 组边界；不是实现自证）。
 // 落位：src/product/lifecycle_store/tests/sc_failure_evidence_boundaries.rs
 // 挂载：sc_failure_evidence.rs 末尾 #[cfg(test)] #[path = "tests/sc_failure_evidence_boundaries.rs"] mod boundary_tests;
-// 复用同目录 fixture 作为独立模块实例（不改 fixture 内容/可见性）。
+// 复用 store 模块统一挂载的同一 fixture 实例（不重复实例化，内容/可见性不变）。
 // 断言只落在消费者可见面：错误 code / step / verified_prefix / 源身份 / 正文逐字。
 
-#[path = "sc_failure_evidence_fixture.rs"]
-mod fixture;
-
-use fixture::{
+use super::fixture::{
     available, begin, bound_round, chain_dir, complete_raw, live_sc_session, observed, parts,
     raw_locator, setup, sha256_hex, NODE_ID, PROMPT_TEXT, RAW1, RAW2,
 };
