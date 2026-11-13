@@ -253,6 +253,11 @@ fn run_command_capture_with_stream(
         "PATH",
         crate::cross_cutting::path_overlay::effective_path(base_path),
     );
+    // 计划 2026-11-13 §五 2.12:补入登录 shell 探测回的 agent 专属环境
+    // 变量(缺失才补;进程 env/覆盖层已有的值优先),None 分支同样补。
+    for (name, value) in crate::cross_cutting::path_overlay::shell_env_overrides(environment) {
+        command.env(name, value);
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_text.is_some() {
         command.stdin(Stdio::piped());
@@ -779,13 +784,9 @@ mod host_inheritance_tests {
     fn sync_capture_injects_shell_probe_agent_env_without_explicit_map() {
         let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
 
-        let Some(free_var) = [
-            "PI_CODING_AGENT_DIR",
-            "CODEX_HOME",
-            "CLAUDE_CONFIG_DIR",
-        ]
-        .into_iter()
-        .find(|name| std::env::var_os(name).is_none())
+        let Some(free_var) = ["PI_CODING_AGENT_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]
+            .into_iter()
+            .find(|name| std::env::var_os(name).is_none())
         else {
             panic!("宿主 env 已含全部 agent 变量,无法验证补入分支(环境不满足)");
         };

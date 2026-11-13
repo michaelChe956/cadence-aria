@@ -444,6 +444,12 @@ impl ProcessManager {
         if let Some(merged_path) = path_env(env_vars) {
             command_builder.env("PATH", merged_path);
         }
+        // 计划 2026-11-13 §五 2.12:补入登录 shell 探测回的 agent 专属
+        // 环境变量(缺失才补;进程 env/覆盖层已有的值优先)。
+        for (name, value) in crate::cross_cutting::path_overlay::shell_env_overrides(Some(env_vars))
+        {
+            command_builder.env(name, value);
+        }
         spawn_prepared(command, command_builder).await
     }
 
@@ -810,13 +816,9 @@ mod tests {
 
         let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
 
-        let Some(free_var) = [
-            "PI_CODING_AGENT_DIR",
-            "CODEX_HOME",
-            "CLAUDE_CONFIG_DIR",
-        ]
-        .into_iter()
-        .find(|name| std::env::var_os(name).is_none())
+        let Some(free_var) = ["PI_CODING_AGENT_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]
+            .into_iter()
+            .find(|name| std::env::var_os(name).is_none())
         else {
             panic!("宿主 env 已含全部 agent 变量,无法验证补入分支(环境不满足)");
         };
@@ -840,7 +842,10 @@ mod tests {
         let mut reader = std::pin::pin!(process.stdout);
         reader.read_to_string(&mut stdout).await.expect("read env");
         let _ = process.child.wait().await;
-        assert_eq!(stdout, "/probe/agent-dir", "缺失的 agent 变量必须被探测值补入");
+        assert_eq!(
+            stdout, "/probe/agent-dir",
+            "缺失的 agent 变量必须被探测值补入"
+        );
 
         // 平台优先分支:显式覆盖层已有该变量 ⇒ 保留显式值。
         let mut process = ProcessManager::spawn(
@@ -856,7 +861,10 @@ mod tests {
         let mut reader = std::pin::pin!(process.stdout);
         reader.read_to_string(&mut stdout).await.expect("read env");
         let _ = process.child.wait().await;
-        assert_eq!(stdout, "/explicit/agent-dir", "覆盖层已有值不得被探测值覆盖");
+        assert_eq!(
+            stdout, "/explicit/agent-dir",
+            "覆盖层已有值不得被探测值覆盖"
+        );
     }
 }
 
