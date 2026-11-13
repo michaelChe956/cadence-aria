@@ -1,14 +1,16 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde_json::json;
 
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::logical_codebase::member_reality::{
-    MEMBER_REALITY_MAX_LAYERED_LINES, MEMBER_REALITY_MAX_TOP_DIRECTORIES,
+    MEMBER_REALITY_MAX_LAYERED_LINES, MEMBER_REALITY_MAX_TOP_DIRECTORIES, detect_entrypoints,
     summarize_layered_directories,
 };
 use crate::product::models::{DesignContextCapabilities, IssueRecord, WorkspaceType};
+use crate::product::work_item_plan_compiler::PlanMemberTargets;
+use crate::product::work_item_split_engine::prompts::WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES;
 use crate::product::workspace_engine::{
     artifact_constraint_spec_for, heading_matches_rule, normalize_workspace_heading_line,
 };
@@ -20,6 +22,16 @@ const REPOSITORY_STRUCTURE_UNAVAILABLE_PREFIX: &str = "repository_structure_unav
 
 /// 多仓目录摘要：空仓的显式前缀（REQ-PLN-17）。
 const REPOSITORY_STRUCTURE_EMPTY_PREFIX: &str = "repository_structure_empty:";
+
+/// SC（单候选）首轮 `structure:` 段预算：与 `budget_markdown_context` 的
+/// structure 配额同源（上下文面 32,000 的 1/10，现值 3,200）。同步义务：
+/// 上游配额表达式调整时本值随之同值——单一事实来源，不复制字面量。
+const SC_MEMBER_STRUCTURE_BUDGET_BYTES: usize = WORK_ITEM_PLAN_MARKDOWN_CONTEXT_BUDGET_BYTES / 10;
+
+/// SC 成员感知 structure：成员子项轮转截断说明（计入段预算；身份头行
+/// 永不截断，缺子项不冒充全量）。
+const MEMBER_STRUCTURE_TRUNCATION_NOTE: &str =
+    "（成员子项超限，已按成员仓轮转保底截断；各成员仓身份头完整保留，未列出子项仍属对应成员仓）";
 
 pub fn design_context_capabilities_for_request(
     lifecycle: &LifecycleStore,
@@ -270,6 +282,185 @@ fn group_layered_directories(layered: Vec<String>) -> Vec<(String, Vec<String>)>
     grouped
 }
 
+/// 单候选（SC）专用：成员感知的 `structure:` 段装配（REQ-WSC-06「成员仓
+/// 身份头在预算内全部在场」「成员事实超预算时显式失败而非假装在场」）。
+///
+/// 与旧 `summarize_repository_structure` 的关系：旧函数及其四个 legacy 调用
+/// （split / outline / revision）逐字不变；本接口只服务 SC 首轮装配。
+/// - `member_targets` 缺席或成员表为空 ⇒ 原样退回旧摘要（逐字节同旧路径，
+///   上层 `budget_markdown_context` 照旧生效）。
+/// - 成员在场 ⇒ 所有成员身份头（`member <物理仓ID>: root <前缀|.>`，与
+///   `[confirmed_member_order]` 教学的 physical_repository 同汇）先全部保留；
+///   12 项 / 40 行只约束可轮转子项。
+/// - 整段按完整 UTF-8 行装配在 `SC_MEMBER_STRUCTURE_BUDGET_BYTES` 内（含
+///   截断说明），上层字节截断对本输出恒为 no-op，不可能切半身份头。
+/// - 身份头（含存在子项时的强制截断说明）自身超限 ⇒ 显式
+///   `member_inventory_budget_exceeded` + 成员总数与所需字节：不假称全员
+///   在场、不让作者轮失败、不新增模型调用。
+/// - 前缀表与 `plan_member_checkout_prefixes` 同键（物理成员仓 ID → 聚合根
+///   相对前缀；alias 不能当作已验证 checkout）；缺权威映射 ⇒ 既有错误面
+///   显式失败，绝不猜目录。
+pub(crate) fn summarize_repository_structure_sc_members(
+    aggregate_root: &Path,
+    logical: bool,
+    member_targets: Option<&PlanMemberTargets>,
+    checkout_prefixes: Option<&BTreeMap<String, String>>,
+) -> String {
+    let Some(targets) = member_targets else {
+        return summarize_repository_structure(aggregate_root, logical);
+    };
+    // 本轮已确认成员：physical_by_logical 值域 + 无归属 WI 的回落仓，按物理
+    // ID 去重；顺序确定性 = BTreeMap 迭代序（logical ID）+ 回落仓缀后。
+    let mut member_ids: Vec<String> = Vec::new();
+    for physical in targets.physical_by_logical.values() {
+        if !member_ids.contains(physical) {
+            member_ids.push(physical.clone());
+        }
+    }
+    if let Some(fallback) = targets.fallback_physical_id.as_deref() {
+        if !member_ids.iter().any(|id| id == fallback) {
+            member_ids.push(fallback.to_string());
+        }
+    }
+    if member_ids.is_empty() {
+        return summarize_repository_structure(aggregate_root, logical);
+    }
+    // 同源前缀交集：缺权威映射 ⇒ 既有错误面显式失败（不猜目录、不静默降级、
+    // 不输出部分成员视图）。
+    let Some(prefixes) = checkout_prefixes else {
+        return format!(
+            "{REPOSITORY_STRUCTURE_UNAVAILABLE_PREFIX} member checkout prefix missing for physical repositories {member_ids:?}"
+        );
+    };
+    let mut members: Vec<(&str, &str)> = Vec::with_capacity(member_ids.len());
+    for id in &member_ids {
+        let Some(prefix) = prefixes.get(id).map(String::as_str) else {
+            return format!(
+                "{REPOSITORY_STRUCTURE_UNAVAILABLE_PREFIX} member checkout prefix missing for physical repository {id}"
+            );
+        };
+        members.push((id.as_str(), prefix));
+    }
+
+    let headers: Vec<String> = members
+        .iter()
+        .map(|(id, prefix)| {
+            let root = if prefix.is_empty() { "." } else { *prefix };
+            format!("member {id}: root {root}")
+        })
+        .collect();
+    let headers_bytes: usize = headers.iter().map(|line| line.len() + 1).sum();
+    if headers_bytes > SC_MEMBER_STRUCTURE_BUDGET_BYTES {
+        return format!(
+            "member_inventory_budget_exceeded: members={member_count} required={required_bytes}B budget={SC_MEMBER_STRUCTURE_BUDGET_BYTES}B",
+            member_count = members.len(),
+            required_bytes = headers_bytes,
+        );
+    }
+    let details: Vec<Vec<String>> = members
+        .iter()
+        .map(|(_, prefix)| member_rotatable_children(aggregate_root, prefix))
+        .collect();
+    // 保底集合 = 全部身份头 + （存在任何子项时的）强制截断说明。
+    let note_bytes = if details.iter().any(|items| !items.is_empty()) {
+        MEMBER_STRUCTURE_TRUNCATION_NOTE.len() + 1
+    } else {
+        0
+    };
+    if headers_bytes + note_bytes > SC_MEMBER_STRUCTURE_BUDGET_BYTES {
+        return format!(
+            "member_inventory_budget_exceeded: members={member_count} required={required_bytes}B budget={SC_MEMBER_STRUCTURE_BUDGET_BYTES}B",
+            member_count = members.len(),
+            required_bytes = headers_bytes + note_bytes,
+        );
+    }
+
+    // 轮转子项：每轮每成员仓各取 1 条，总量 ≤40 行（上限只约束子项）。
+    let mut rotated: Vec<String> = Vec::new();
+    let mut round = 0;
+    while rotated.len() < MEMBER_REALITY_MAX_LAYERED_LINES {
+        let mut advanced = false;
+        for items in &details {
+            if rotated.len() >= MEMBER_REALITY_MAX_LAYERED_LINES {
+                break;
+            }
+            if let Some(line) = items.get(round) {
+                rotated.push(line.clone());
+                advanced = true;
+            }
+        }
+        if !advanced {
+            break;
+        }
+        round += 1;
+    }
+    // 按完整行装入剩余字节额度（预留截断说明位）——永不出半行。
+    let total_items: usize = details.iter().map(Vec::len).sum();
+    let mut used = headers_bytes;
+    let mut kept: Vec<&str> = Vec::with_capacity(rotated.len());
+    for line in &rotated {
+        if used + line.len() + 1 + note_bytes > SC_MEMBER_STRUCTURE_BUDGET_BYTES {
+            break;
+        }
+        used += line.len() + 1;
+        kept.push(line.as_str());
+    }
+    let dropped = total_items.saturating_sub(kept.len());
+
+    let mut lines: Vec<&str> = headers.iter().map(String::as_str).collect();
+    lines.extend(kept);
+    if dropped > 0 {
+        lines.push(MEMBER_STRUCTURE_TRUNCATION_NOTE);
+    }
+    lines.join("\n")
+}
+
+/// 单成员仓的可轮转子项：一级目录（`/` 结尾，跳过 `.git`，字典序）+
+/// `member_reality::detect_entrypoints` 探到的根下清单文件存在性（≤6 项），
+/// 相对聚合根呈现，合计 ≤12 项（`MEMBER_REALITY_MAX_TOP_DIRECTORIES` 同源
+/// 上限，只约束子项）。成员目录不可读 ⇒ 单行显式标记（身份头仍在场，不以
+/// 伪内容冒充、不让非成员条目顶替）。事实边界：不采纳 package.json ⇒
+/// npm test 之类启发式命令，不把构建入口文件表述为业务源入口或可执行命令。
+fn member_rotatable_children(aggregate_root: &Path, prefix: &str) -> Vec<String> {
+    let member_root = if prefix.is_empty() {
+        aggregate_root.to_path_buf()
+    } else {
+        aggregate_root.join(prefix)
+    };
+    let path_prefix = if prefix.is_empty() {
+        String::new()
+    } else {
+        format!("{prefix}/")
+    };
+    let Ok(entries) = std::fs::read_dir(&member_root) else {
+        return vec![format!("  {path_prefix}(成员目录不可读)")];
+    };
+    let mut directories: Vec<String> = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".git" {
+            continue;
+        }
+        directories.push(name);
+    }
+    directories.sort();
+    let mut items: Vec<String> = Vec::with_capacity(directories.len());
+    for directory in directories {
+        items.push(format!("  {path_prefix}{directory}/"));
+    }
+    for entry_file in detect_entrypoints(&member_root) {
+        items.push(format!("  {path_prefix}{entry_file}"));
+    }
+    items.truncate(MEMBER_REALITY_MAX_TOP_DIRECTORIES);
+    items
+}
+
 /// 规范 Design Spec 结构判定复用 parser 契约作为单一事实来源：
 /// 强制标题与别名直接取自 artifact_constraints.rs 的
 /// `artifact_constraint_spec_for(&WorkspaceType::Design).required_headings`，
@@ -472,51 +663,369 @@ mod tests {
         assert_eq!(lines.last(), Some(&"file: f29.txt"));
     }
 
+    // ---- SC 成员感知 structure 装配（REQ-WSC-06，repair-wig-fact-projections C1）----
+
+    use crate::product::logical_codebase::LogicalRepositoryId;
+    use uuid::Uuid;
+
+    /// 构造本轮已确认成员表：logical UUID 序号 → 物理 ID `phys-{slug}`。
+    fn member_targets_fixture(slugs: &[&str], fallback: Option<&str>) -> PlanMemberTargets {
+        let mut physical_by_logical = BTreeMap::new();
+        for (index, slug) in slugs.iter().enumerate() {
+            physical_by_logical.insert(
+                LogicalRepositoryId(
+                    Uuid::parse_str(&format!("00000000-0000-4000-8000-{index:012}"))
+                        .expect("parse uuid"),
+                ),
+                format!("phys-{slug}"),
+            );
+        }
+        PlanMemberTargets {
+            physical_by_logical,
+            fallback_physical_id: fallback.map(str::to_string),
+        }
+    }
+
+    /// 构造同源前缀表（物理 ID → 聚合根相对前缀；空串 = 根成员）。
+    fn checkout_prefixes_fixture(mapping: &[(&str, &str)]) -> BTreeMap<String, String> {
+        mapping
+            .iter()
+            .map(|(id, prefix)| (format!("phys-{id}"), prefix.to_string()))
+            .collect()
+    }
+
     #[test]
-    fn logical_summary_keeps_late_member_repo_when_point_files_crowd_top_level() {
-        // REQ-WSC-06「成员仓身份头在预算内全部在场」红测（W1）：>12 个点文件
-        // 挤占 12 顶层项时，字典序靠后的成员仓被现有实现整个丢弃。
+    fn sc_member_structure_keeps_late_member_repo_when_point_files_crowd() {
+        // REQ-WSC-06：>12 个点文件挤占顶层时，字典序靠后的成员仓身份头必须
+        // 在预算内全场；点文件不得以非成员身份冒充成员子项。
         let dir = TempDir::new().expect("temp repo");
         for index in 0..16 {
             std::fs::write(dir.path().join(format!("a{index:02}.txt")), "x")
                 .expect("write point file");
         }
-        std::fs::create_dir_all(dir.path().join("zzz-member").join("src"))
-            .expect("mkdir member");
+        std::fs::create_dir_all(dir.path().join("zzz-member").join("src")).expect("mkdir member");
+        let targets = member_targets_fixture(&["late"], None);
+        let prefixes = checkout_prefixes_fixture(&[("late", "zzz-member")]);
 
-        let summary = summarize_repository_structure(dir.path(), true);
+        let summary = summarize_repository_structure_sc_members(
+            dir.path(),
+            true,
+            Some(&targets),
+            Some(&prefixes),
+        );
 
         assert!(
-            summary.contains("zzz-member"),
-            "成员仓不得被点文件挤出摘要：\n{summary}"
+            summary.contains("member phys-late: root zzz-member"),
+            "成员身份头必须在场：\n{summary}"
+        );
+        assert!(
+            summary.contains("  zzz-member/src/"),
+            "成员一级目录必须在场：\n{summary}"
+        );
+        assert!(
+            !summary.contains("a00.txt") && !summary.contains("a15.txt"),
+            "点文件不得冒充成员子项：\n{summary}"
+        );
+        assert!(
+            summary.len() <= 3_200,
+            "structure 段恒 ≤3,200B：\n{summary}"
         );
     }
 
     #[test]
-    fn logical_summary_keeps_every_member_when_line_budget_exhausted() {
-        // REQ-WSC-06 红测（W1）：12 成员 × 6 子项超出 40 行上限时，现有实现
-        // 按序 truncate 把排名靠后的成员仓整个丢弃。
+    fn sc_member_structure_rotates_children_for_twelve_members() {
+        // REQ-WSC-06：12 成员 × 6 子项超出 40 行上限 ⇒ 轮转保底：所有身份头
+        // 在场、截断显式标记、末行完整（无半行）。
         let dir = TempDir::new().expect("temp repo");
-        for member in 0..12 {
+        let slugs: Vec<String> = (0..12).map(|member| format!("m{member:02}")).collect();
+        for slug in &slugs {
             for child in 0..6 {
-                std::fs::create_dir_all(
-                    dir.path()
-                        .join(format!("m{member:02}"))
-                        .join(format!("c{child}")),
-                )
-                .expect("mkdir member child");
+                std::fs::create_dir_all(dir.path().join(slug).join(format!("c{child}")))
+                    .expect("mkdir member child");
             }
         }
+        let slug_refs: Vec<&str> = slugs.iter().map(String::as_str).collect();
+        let targets = member_targets_fixture(&slug_refs, None);
+        let prefixes = checkout_prefixes_fixture(
+            &slugs
+                .iter()
+                .map(|slug| (slug.as_str(), slug.as_str()))
+                .collect::<Vec<_>>(),
+        );
 
-        let summary = summarize_repository_structure(dir.path(), true);
+        let summary = summarize_repository_structure_sc_members(
+            dir.path(),
+            true,
+            Some(&targets),
+            Some(&prefixes),
+        );
 
-        for member in 0..12 {
-            let name = format!("m{member:02}");
+        for slug in &slugs {
             assert!(
-                summary.contains(&name),
-                "成员仓 {name} 的身份头必须在场：\n{summary}"
+                summary.contains(&format!("member phys-{slug}: root {slug}")),
+                "成员 {slug} 身份头必须在场：\n{summary}"
             );
         }
+        assert!(
+            summary.contains("  m11/c2/"),
+            "轮转（非顺序）必须覆盖末位成员：\n{summary}"
+        );
+        assert!(
+            !summary.contains("  m11/c5/"),
+            "超限子项轮转截断：\n{summary}"
+        );
+        assert!(
+            summary.ends_with(MEMBER_STRUCTURE_TRUNCATION_NOTE),
+            "截断说明必须完整收尾：\n{summary}"
+        );
+        assert!(summary.len() <= 3_200);
+    }
+
+    #[test]
+    fn sc_member_structure_reports_budget_exceeded_for_huge_identity_headers() {
+        // REQ-WSC-06「成员事实超预算时显式失败而非假装在场」：身份头自身超
+        // 3,200B ⇒ 显式报总数与所需字节，不假称全员在场、不让作者轮失败。
+        let dir = TempDir::new().expect("temp repo");
+        let slugs: Vec<String> = (0..40).map(|index| format!("heavy{index:02}")).collect();
+        let slug_refs: Vec<&str> = slugs.iter().map(String::as_str).collect();
+        let long_prefix = "成员仓相对前缀超长段".repeat(12);
+        let targets = member_targets_fixture(&slug_refs, None);
+        let prefixes = checkout_prefixes_fixture(
+            &slugs
+                .iter()
+                .map(|slug| (slug.as_str(), long_prefix.as_str()))
+                .collect::<Vec<_>>(),
+        );
+
+        let summary = summarize_repository_structure_sc_members(
+            dir.path(),
+            true,
+            Some(&targets),
+            Some(&prefixes),
+        );
+
+        assert!(
+            summary.starts_with("member_inventory_budget_exceeded:"),
+            "超限必须显式失败：\n{summary}"
+        );
+        assert!(
+            summary.contains("members=40"),
+            "必须报成员总数：\n{summary}"
+        );
+        assert!(
+            summary.contains("required=") && summary.contains("budget=3200B"),
+            "必须报所需字节与预算：\n{summary}"
+        );
+        assert!(
+            !summary.contains("member phys-heavy00: root"),
+            "不得假称全员在场：\n{summary}"
+        );
+        assert!(summary.len() <= 3_200);
+    }
+
+    #[test]
+    fn sc_member_structure_renders_root_member_dot_and_nested_prefix() {
+        // 根成员（空前缀）渲染为 `.`、子项无前缀段；嵌套前缀按聚合根相对
+        // 路径渲染；fallback 与既有成员同仓时去重（单一身份头）。
+        let dir = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(dir.path().join("src")).expect("mkdir root src");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("write manifest");
+        std::fs::create_dir_all(dir.path().join("busi").join("gateway").join("api"))
+            .expect("mkdir nested member");
+        let targets = member_targets_fixture(&["root", "gw"], Some("root"));
+        let prefixes = checkout_prefixes_fixture(&[("root", ""), ("gw", "busi/gateway")]);
+
+        let summary = summarize_repository_structure_sc_members(
+            dir.path(),
+            true,
+            Some(&targets),
+            Some(&prefixes),
+        );
+
+        assert!(
+            summary.contains("member phys-root: root ."),
+            "根成员必须渲染为 `.`：\n{summary}"
+        );
+        assert_eq!(
+            summary.matches("member phys-root").count(),
+            1,
+            "fallback 同仓必须去重：\n{summary}"
+        );
+        assert!(
+            summary.contains("  src/") && summary.contains("  Cargo.toml"),
+            "根成员子项无前缀段：\n{summary}"
+        );
+        assert!(
+            summary.contains("member phys-gw: root busi/gateway")
+                && summary.contains("  busi/gateway/api/"),
+            "嵌套成员按聚合根相对路径渲染：\n{summary}"
+        );
+    }
+
+    #[test]
+    fn sc_member_structure_keeps_header_for_unreadable_member() {
+        // 成员目录不可读：身份头仍在场、单行显式标记、非成员条目不得顶替。
+        let dir = TempDir::new().expect("temp repo");
+        std::fs::write(dir.path().join("root-file.txt"), "x").expect("write root file");
+        std::fs::create_dir_all(dir.path().join("svc").join("src")).expect("mkdir member");
+        let targets = member_targets_fixture(&["ok", "missing"], None);
+        let prefixes = checkout_prefixes_fixture(&[("ok", "svc"), ("missing", "gone")]);
+
+        let summary = summarize_repository_structure_sc_members(
+            dir.path(),
+            true,
+            Some(&targets),
+            Some(&prefixes),
+        );
+
+        assert!(
+            summary.contains("member phys-missing: root gone"),
+            "不可读成员身份头必须在场：\n{summary}"
+        );
+        assert!(
+            summary.contains("  gone/(成员目录不可读)"),
+            "不可读必须显式标记：\n{summary}"
+        );
+        assert!(
+            summary.contains("member phys-ok: root svc") && summary.contains("  svc/src/"),
+            "可读成员不受影响：\n{summary}"
+        );
+        assert!(
+            !summary.contains("root-file.txt"),
+            "非成员根文件不得顶替成员子项：\n{summary}"
+        );
+    }
+
+    #[test]
+    fn sc_member_structure_missing_prefix_mapping_fails_explicitly() {
+        // 缺权威映射：既有错误面显式失败并点名成员，绝不猜目录；前缀表整体
+        // 缺席同样显式失败。
+        let dir = TempDir::new().expect("temp repo");
+        let targets = member_targets_fixture(&["known", "unknown"], None);
+        let prefixes = checkout_prefixes_fixture(&[("known", "svc")]);
+
+        let summary = summarize_repository_structure_sc_members(
+            dir.path(),
+            true,
+            Some(&targets),
+            Some(&prefixes),
+        );
+        assert!(
+            summary.starts_with(REPOSITORY_STRUCTURE_UNAVAILABLE_PREFIX)
+                && summary.contains("member checkout prefix missing")
+                && summary.contains("phys-unknown"),
+            "缺映射必须显式失败并点名成员：\n{summary}"
+        );
+        assert!(
+            !summary.contains("member phys-known: root"),
+            "映射不完整 ⇒ 整段失败，不输出部分成员视图：\n{summary}"
+        );
+
+        let no_table =
+            summarize_repository_structure_sc_members(dir.path(), true, Some(&targets), None);
+        assert!(
+            no_table.starts_with(REPOSITORY_STRUCTURE_UNAVAILABLE_PREFIX),
+            "前缀表缺席同样显式失败：\n{no_table}"
+        );
+    }
+
+    #[test]
+    fn sc_member_structure_without_members_matches_legacy_summary_exactly() {
+        // REQ-WSC-06「单仓摘要逐字不变」：成员集合缺席/为空 ⇒ 与旧摘要逐字节一致。
+        let dir = TempDir::new().expect("temp repo");
+        std::fs::create_dir_all(dir.path().join("src").join("core")).expect("mkdir src/core");
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("write manifest");
+        std::fs::write(dir.path().join("README.md"), "readme\n").expect("write readme");
+
+        for logical in [true, false] {
+            assert_eq!(
+                summarize_repository_structure_sc_members(dir.path(), logical, None, None),
+                summarize_repository_structure(dir.path(), logical),
+                "成员缺席 ⇒ 逐字节同旧摘要（logical={logical}）"
+            );
+        }
+        let empty_targets = PlanMemberTargets::default();
+        assert_eq!(
+            summarize_repository_structure_sc_members(dir.path(), true, Some(&empty_targets), None,),
+            summarize_repository_structure(dir.path(), true),
+            "空成员表 ⇒ 逐字节同旧摘要"
+        );
+    }
+
+    #[test]
+    fn sc_member_structure_lists_entry_manifest_files_without_commands() {
+        // 事实边界：只列 detect_entrypoints 的根下清单文件存在性；不采纳
+        // package.json ⇒ npm test 之类启发式命令。
+        let dir = TempDir::new().expect("temp repo");
+        let member = dir.path().join("svc");
+        std::fs::create_dir_all(member.join("src")).expect("mkdir member");
+        std::fs::write(member.join("Cargo.toml"), "[package]\n").expect("write manifest");
+        std::fs::write(member.join("package.json"), "{}\n").expect("write manifest");
+        let targets = member_targets_fixture(&["svc"], None);
+        let prefixes = checkout_prefixes_fixture(&[("svc", "svc")]);
+
+        let summary = summarize_repository_structure_sc_members(
+            dir.path(),
+            true,
+            Some(&targets),
+            Some(&prefixes),
+        );
+
+        assert!(
+            summary.contains("  svc/Cargo.toml") && summary.contains("  svc/package.json"),
+            "入口清单文件存在性必须在场：\n{summary}"
+        );
+        assert!(
+            !summary.contains("cargo test") && !summary.contains("npm test"),
+            "不得采纳启发式命令：\n{summary}"
+        );
+    }
+
+    #[test]
+    fn sc_member_structure_keeps_whole_lines_for_multibyte_prefixes() {
+        // 多字节长前缀 + 每成员 15 个子项（12 项上限 + 字节预算）⇒ 身份头均为
+        // 完整行、总输出 ≤3,200B、每成员 ≤12 子项、截断说明完整收尾。
+        let dir = TempDir::new().expect("temp repo");
+        let long_prefix = "业务网关成员仓相对前缀段".repeat(9);
+        let member_root = dir.path().join(&long_prefix);
+        for child in 0..15 {
+            std::fs::create_dir_all(member_root.join(format!("目录{child:02}")))
+                .expect("mkdir member child");
+        }
+        let targets = member_targets_fixture(&["mb"], None);
+        let prefixes = checkout_prefixes_fixture(&[("mb", &long_prefix)]);
+
+        let summary = summarize_repository_structure_sc_members(
+            dir.path(),
+            true,
+            Some(&targets),
+            Some(&prefixes),
+        );
+
+        let header = format!("member phys-mb: root {long_prefix}");
+        assert!(
+            summary.lines().any(|line| line == header),
+            "身份头必须是完整行（不被字节预算切半）：\n{summary}"
+        );
+        assert!(
+            summary.contains(&format!("  {long_prefix}/目录00/")),
+            "预算内子项在场：\n{summary}"
+        );
+        assert!(summary.len() <= 3_200, "总输出恒 ≤3,200B：\n{summary}");
+        assert!(
+            summary.lines().all(|line| line.starts_with("member ")
+                || line.starts_with("  ")
+                || line == MEMBER_STRUCTURE_TRUNCATION_NOTE),
+            "所有行都是完整装配行：\n{summary}"
+        );
+        assert!(
+            !summary.contains("目录12/") && !summary.contains("目录11/"),
+            "每成员子项 ≤12 项且超字节子项整行省略：\n{summary}"
+        );
+        assert!(
+            summary.ends_with(MEMBER_STRUCTURE_TRUNCATION_NOTE),
+            "截断说明必须完整收尾：\n{summary}"
+        );
     }
 
     /// 主记录缺失语义回归（REQ-DRG-04）：请求一个已被删除的 story_spec 时，既有
