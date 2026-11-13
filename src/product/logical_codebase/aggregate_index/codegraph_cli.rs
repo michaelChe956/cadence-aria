@@ -738,6 +738,31 @@ mod tests {
         );
     }
 
+    /// `files` 走专用抓取配额（64 MiB）与 `--no-metadata` flag；`status` /
+    /// `query_json` 等其余命令维持 1 MiB 通用上限（不得被一起放大）。
+    #[test]
+    fn files_uses_dedicated_output_limit_and_no_metadata_flag() {
+        let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
+            CommandCapture::success(r#"[{"path":"src/lib.rs"}]"#),
+            CommandCapture::success(r#"[{"name":"crossRepoGreeting"}]"#),
+            CommandCapture::success(
+                r#"{"initialized":true,"version":"1.6.0","projectPath":"/aggregate","indexPath":"/aggregate/.codegraph","lastIndexed":"2026-08-09T00:00:00Z","fileCount":1,"nodeCount":1,"edgeCount":1,"dbSizeBytes":1}"#,
+            ),
+        ]));
+        let cli = CodeGraphCli::new(runner.clone(), "codegraph".into());
+        let root = Path::new("/aggregate");
+
+        cli.files(root).unwrap();
+        cli.query_json(root, "crossRepoGreeting").unwrap();
+        cli.status(root).unwrap();
+
+        let requests = runner.requests();
+        assert_eq!(requests[0].argv, ["files", "--json", "--no-metadata"]);
+        assert_eq!(requests[0].stdout_limit, FILES_OUTPUT_LIMIT_BYTES);
+        assert_eq!(requests[1].stdout_limit, OUTPUT_LIMIT_BYTES);
+        assert_eq!(requests[2].stdout_limit, OUTPUT_LIMIT_BYTES);
+    }
+
     fn assert_clean_environment(request: &BoundedCommandRequest) {
         assert!(request.environment.keys().all(|key| key == "PATH"));
         if std::env::var_os("PATH").is_some() {
