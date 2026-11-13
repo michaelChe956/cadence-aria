@@ -59,15 +59,52 @@ pub struct InstallCommandPlan {
     pub argv: Vec<String>,
     /// 环境覆盖层（叠加在宿主环境之上）：npm 带 `npm_config_registry`。
     pub environment: BTreeMap<String, String>,
+    /// 安装子进程 PATH **前插**的目录（目标前缀的 bin）——「装的 PATH ≠ 探测的
+    /// PATH」从根上消除（magpie `updateEnv` 思路）。
+    pub path_prefix: Option<PathBuf>,
     pub manual_command: String,
 }
 
 /// npm 安装计划（REQ-PCI-03）：一个包一次安装，形态固定。
+///
+/// `--omit=optional` 与既有契约一致；另加 `--allow-scripts=<pkg>`（npm ≥12
+/// 不带它**不执行包的 install 脚本** —— `@anthropic-ai/claude-code` 有
+/// `postinstall: node install.cjs`；npm 10/11 把它当未知配置忽略 ⇒ 兼容）。
 pub fn npm_install_plan(
     row: &InstallSourceRow,
     version: Option<&str>,
     registry: &str,
     prefix: &Path,
+) -> InstallCommandPlan {
+    npm_plan_with_optional_flag(row, version, registry, prefix, "--omit=optional")
+}
+
+/// 重试计划（2.7③）：装完探测失败（装上但跑不起来）时用
+/// `--include=optional` 再装一次 —— npm 会「留下缺 native 包的安装」却仍
+/// exit 0（magpie 实测案例）。与 `--omit=optional` 互斥，故不同时出现。
+pub fn npm_retry_plan(
+    row: &InstallSourceRow,
+    version: Option<&str>,
+    registry: &str,
+    prefix: &Path,
+) -> Option<InstallCommandPlan> {
+    row.npm_package?;
+    Some(npm_plan_with_optional_flag(
+        row,
+        version,
+        registry,
+        prefix,
+        "--include=optional",
+    ))
+}
+
+/// npm 计划（`optional_flag` = `--omit=optional` / `--include=optional`）。
+fn npm_plan_with_optional_flag(
+    row: &InstallSourceRow,
+    version: Option<&str>,
+    registry: &str,
+    prefix: &Path,
+    optional_flag: &str,
 ) -> InstallCommandPlan {
     let package = row.npm_package.expect("npm 行必有包名");
     let spec = match version {
@@ -83,12 +120,14 @@ pub fn npm_install_plan(
             "-g".to_string(),
             "--prefix".to_string(),
             prefix.to_string_lossy().into_owned(),
-            "--omit=optional".to_string(),
+            optional_flag.to_string(),
             "--no-audit".to_string(),
             "--no-fund".to_string(),
+            format!("--allow-scripts={package}"),
             spec,
         ],
         environment,
+        path_prefix: Some(prefix.join("bin")),
         manual_command: manual_install_command(row, registry),
     }
 }
@@ -100,6 +139,7 @@ pub fn kimi_install_plan(row: &InstallSourceRow, registry: &str) -> InstallComma
         executable: "bash".to_string(),
         argv: vec!["-c".to_string(), format!("curl -fsSL {script} | bash")],
         environment: BTreeMap::new(),
+        path_prefix: None,
         manual_command: manual_install_command(row, registry),
     }
 }
@@ -145,6 +185,16 @@ impl ProviderInstallRunner {
         let mut environment = host_environment();
         for (key, value) in &plan.environment {
             environment.insert(key.clone(), value.clone());
+        }
+        // 安装子进程的 PATH **前插**目标前缀的 bin：装进去的命令当场就在
+        // PATH 上（magpie `updateEnv` 思路：npm 的全局目录跟着跑它的那个 node）。
+        if let Some(bin) = plan.path_prefix.as_ref() {
+            let host_path = environment.get("PATH").cloned().unwrap_or_default();
+            let mut entries = vec![bin.clone()];
+            entries.extend(std::env::split_paths(&host_path));
+            if let Ok(joined) = std::env::join_paths(entries) {
+                environment.insert("PATH".to_string(), joined.to_string_lossy().into_owned());
+            }
         }
         BoundedCommandRequest {
             executable: plan.executable.clone(),
@@ -265,11 +315,7 @@ pub fn npm_path_hint(command: &str, prefix: &Path, path_value: Option<&str>) -> 
 
 /// 安装产物的 bin 目录：npm 类 = `<prefix>/bin`；脚本类（Kimi）= **脚本实际
 /// 输出**的目录（登记条件以实际存在的文件为准，不依赖目录名假设）。
-fn install_bin_dir(
-    row: &InstallSourceRow,
-    prefix: &Path,
-    script_stdout: &str,
-) -> Option<PathBuf> {
+fn install_bin_dir(row: &InstallSourceRow, prefix: &Path, script_stdout: &str) -> Option<PathBuf> {
     if row.npm_package.is_some() {
         return Some(prefix.join("bin"));
     }
