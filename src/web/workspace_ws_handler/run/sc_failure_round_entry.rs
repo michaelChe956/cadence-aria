@@ -23,6 +23,7 @@ use crate::product::lifecycle_store::sc_failure_evidence::{
 use crate::product::models::{
     LcFreshOperationState, LcRecoveryRunContext, LcResumeRecoveryState, ProviderName,
 };
+use crate::web::workspace_ws_handler::run::gateway_start::PlanAuthorLaunch;
 use crate::web::workspace_ws_types::{ScFailureChainIdentity, ScFailureScope};
 
 /// 显式 fresh operation 的物理身份锚（P08 Case 5/6）。
