@@ -57,11 +57,14 @@ controller 显式置 WIG_TRUST_AUTHORIZED=1 且 scratch HOME 真实位于 /tmp �
 
 用法：
   # 一次性固定输入（也是 controller 的真实 smoke 入口）
-  python3 run_arms.py --seed <aria二进制> <3成员案例工作区> <out根> [端口] \
+  #   <state 根> = .aria 所在、会被克隆成 seed-workspace 的目录（controller 的 WIG_STATE_ROOT）
+  #   固定案例根 = 3 成员仓所在目录，唯一来源 --case-root 或 WIG_CASE_ROOT（不从 src 推断）
+  python3 run_arms.py --seed <aria二进制> <state根> <out根> [端口] \
+      --case-root /tmp/wig-measurement-setup/case \
       --issue-input /tmp/wig-measurement-setup/issue_input.md
   # 8 臂 ABBA（4 before + 4 after），唯一变量 = 二进制
   python3 run_arms.py <before二进制> <after二进制> <seed工作区> <out根> 2 [起始端口]
-  # issue 输入也可走环境变量：WIG_ISSUE_INPUT_FILE=<issue_input.md>
+  # issue 输入/案例根也可走环境变量：WIG_ISSUE_INPUT_FILE / WIG_CASE_ROOT
 """
 import base64
 import hashlib
@@ -1126,11 +1129,34 @@ def wait_terminal(run, issue_id, timeout=ARM_TIMEOUT_S):
 
 # ───────────────────────── seed（一次性固定输入，兼 controller smoke） ─────────────────────────
 
-def make_seed(binary, src, out_root, port, issue_input):
+def resolve_case_root(cli_value):
+    """固定案例根（3 成员仓所在目录）的唯一权威来源：--case-root 或 WIG_CASE_ROOT。
+
+    绝不从 `--seed` 的 src 推断：src 是 **state root**（`.aria` 所在、会被克隆成
+    seed-workspace 的目录），两者可以是完全不同的路径（controller 的
+    `WIG_CASE_ROOT=<case>` vs `WIG_STATE_ROOT=<state-seed>`）。缺值 ⇒ 显式失败，
+    不做任何猜测/回退。
+    """
+    value = (cli_value or os.environ.get("WIG_CASE_ROOT") or "").strip()
+    if not value:
+        raise SystemExit(
+            "缺少固定案例根：显式给 --case-root <3成员案例根> 或环境变量 "
+            "WIG_CASE_ROOT（controller 的 env.sh 已导出）；不从 --seed 的 src 推断")
+    root = os.path.abspath(value).rstrip("/")
+    if not os.path.isdir(root):
+        raise SystemExit("固定案例根不存在: %s" % root)
+    return root
+
+
+def make_seed(binary, src, out_root, port, issue_input, case_root):
     home = assert_scratch_home()
     src = os.path.abspath(src).rstrip("/")
     if not os.path.isdir(src):
         raise SystemExit("案例工作区不存在: %s" % src)
+    case_root = os.path.abspath(case_root).rstrip("/")
+    if src == case_root:
+        raise SystemExit("--case-root 与 --seed 的 src 相同（%s）：前者是成员案例根、"
+                         "后者是 state root，混用会误判成员身份" % src)
     seed_ws = os.path.join(out_root, "seed-workspace")
     if os.path.exists(seed_ws):
         raise SystemExit("seed 目录已存在，拒绝覆盖（证据保护）: %s" % seed_ws)
@@ -1138,27 +1164,7 @@ def make_seed(binary, src, out_root, port, issue_input):
     log("=== seed: 复制案例工作区 %s -> %s" % (src, seed_ws))
     shutil.copytree(src, seed_ws, symlinks=True)
 
-    # 成员 authority 冻结：复制前后必须逐字段一致（重指向不得碰
-    # canonical_path / checkout_path_hash / git_dir_identity / dirty）
-    snap_before = member_snapshot(seed_ws)
-    assert_three_members(snap_before, "seed")
-    assert_fixed_case_paths(snap_before, src, "seed")
-    changed, hits = repoint_state_root_refs(seed_ws, src)
-    if changed:
-        log("  状态根引用重指向: %d 个文件（字段 %s）" % (changed, hits))
-    else:
-        log("  未发现需改写的状态根引用：保留原固定外部案例（不重写任何 JSON）")
-    snap_after = member_snapshot(seed_ws)
-    diff = snapshot_diff(snap_before, snap_after)
-    if diff:
-        raise SystemExit("重指向后成员 authority 变化（%s）：拒绝继续（装置失效）"
-                         % diff)
-    log("  成员身份冻结: %s" % json.dumps(
-        {m.get("alias"): {"path": m.get("path"), "head": m.get("head"),
-                          "tree": m.get("tree"),
-                          "dirty_entries": len((m.get("status") or "").splitlines())}
-         for m in snap_after["members"].values()}, ensure_ascii=False))
-
+    # 先建 manifest 骨架：任何早失败（成员断言 / 重指向漂移）也要留 invalid 证据
     manifest = {
         "schema": "wig-seed-manifest/1",
         "mode": "seed",
@@ -1166,16 +1172,15 @@ def make_seed(binary, src, out_root, port, issue_input):
         "binary": binary,
         "binary_sha256": sha256_bin(binary),
         "src": src,
-        "fixed_case_root": src,
+        "state_root_src": src,
+        "fixed_case_root": case_root,
         "project_id": PROJECT,
         "scratch_home": home,
         "issue_input_path": issue_input["path"],
         "issue_input_sha256": issue_input["sha256"],
         "issue_input_bytes": issue_input["bytes"],
-        "member_snapshot": snap_after,
-        "member_snapshot_sha256": hashlib.sha256(
-            json.dumps(snap_after, ensure_ascii=False, sort_keys=True)
-            .encode("utf-8")).hexdigest(),
+        "member_snapshot": None,
+        "member_snapshot_sha256": None,
         "valid": False,
         "invalid_reason": "seed 未完成",
     }
@@ -1184,6 +1189,36 @@ def make_seed(binary, src, out_root, port, issue_input):
     def flush():
         with open(mpath, "w", encoding="utf-8") as f:
             json.dump(manifest, f, ensure_ascii=False, indent=1)
+
+    try:
+        # 成员 authority 冻结：复制前后必须逐字段一致（重指向不得碰
+        # canonical_path / checkout_path_hash / git_dir_identity / dirty）
+        snap_before = member_snapshot(seed_ws)
+        assert_three_members(snap_before, "seed")
+        assert_fixed_case_paths(snap_before, case_root, "seed")
+        changed, hits = repoint_state_root_refs(seed_ws, src)
+        if changed:
+            log("  状态根引用重指向: %d 个文件（字段 %s）" % (changed, hits))
+        else:
+            log("  未发现需改写的状态根引用：保留原固定外部案例（不重写任何 JSON）")
+        snap_after = member_snapshot(seed_ws)
+        diff = snapshot_diff(snap_before, snap_after)
+        if diff:
+            raise SystemExit("重指向后成员 authority 变化（%s）：拒绝继续（装置失效）"
+                             % diff)
+        log("  成员身份冻结: %s" % json.dumps(
+            {m.get("alias"): {"path": m.get("path"), "head": m.get("head"),
+                              "tree": m.get("tree"),
+                              "dirty_entries": len((m.get("status") or "").splitlines())}
+             for m in snap_after["members"].values()}, ensure_ascii=False))
+        manifest["member_snapshot"] = snap_after
+        manifest["member_snapshot_sha256"] = hashlib.sha256(
+            json.dumps(snap_after, ensure_ascii=False, sort_keys=True)
+            .encode("utf-8")).hexdigest()
+    except BaseException as e:
+        manifest["invalid_reason"] = "seed 失败（%s）" % e
+        flush()
+        raise
 
     try:
         proc = start_daemon(binary, seed_ws, port)
@@ -1447,33 +1482,41 @@ def _write_failed_manifest(out_root, arm, tag, port, binary, seed_ws,
         json.dump(manifest, f, ensure_ascii=False, indent=1)
 
 
-def _pop_issue_input(args):
-    """剥离 --issue-input <path>（可出现在任意位置）；返回 (path, 剩余 argv)。"""
-    if "--issue-input" not in args:
-        return os.environ.get("WIG_ISSUE_INPUT_FILE") or "", args
-    i = args.index("--issue-input")
+def _pop_option(args, flag, env_key):
+    """剥离 `flag <value>`（可出现在任意位置）；无则回退 env_key。返回 (value, argv)。"""
+    if flag not in args:
+        return os.environ.get(env_key) or "", args
+    i = args.index(flag)
     if i + 1 >= len(args):
-        raise SystemExit("--issue-input 需要文件路径")
-    rest = args[:i] + args[i + 2:]
-    return args[i + 1], rest
+        raise SystemExit("%s 需要文件路径/目录参数" % flag)
+    return args[i + 1], args[:i] + args[i + 2:]
+
+
+def _pop_issue_input(args):
+    """剥离 --issue-input <path>；无则回退 WIG_ISSUE_INPUT_FILE。"""
+    return _pop_option(args, "--issue-input", "WIG_ISSUE_INPUT_FILE")
 
 
 def main():
     global log_path
     issue_input_path, args = _pop_issue_input(sys.argv[1:])
+    case_root_cli, args = _pop_option(args, "--case-root", "WIG_CASE_ROOT")
     if args and args[0] in ("--seed", "--smoke"):  # --smoke = seed 的同义入口
         if len(args) < 4:
-            raise SystemExit("用法: run_arms.py --seed <binary> <src工作区> <out根> "
-                             "[端口=4709] --issue-input <issue_input.md>")
+            raise SystemExit("用法: run_arms.py --seed <binary> <state根> <out根> "
+                             "[端口=4709] --case-root <案例根> --issue-input <file>")
         binary, src, out_root = args[1], args[2], args[3]
         port = int(args[4]) if len(args) > 4 else 4709
         issue_input = load_issue_input(issue_input_path)   # 空/缺/错案例 ⇒ 非 0
+        case_root = resolve_case_root(case_root_cli)       # 唯一权威来源，不猜 src
         assert_scratch_home()
         os.makedirs(out_root, exist_ok=True)
         log_path = os.path.join(out_root, "sequence.log")
         log("issue 输入: %s sha256=%s bytes=%d"
             % (issue_input["path"], issue_input["sha256"], issue_input["bytes"]))
-        make_seed(binary, src, out_root, port, issue_input)
+        log("state root=%s（会被克隆）  fixed case root=%s（成员仓所在）"
+            % (os.path.abspath(src), case_root))
+        make_seed(binary, src, out_root, port, issue_input, case_root)
         return
     if len(args) < 5:
         raise SystemExit("用法: run_arms.py <before二进制> <after二进制> <seed工作区> "
@@ -1497,6 +1540,15 @@ def main():
         raise SystemExit("seed-manifest 缺冻结成员快照，拒绝开臂")
     if not seed_manifest.get("story_markdown_sha256"):
         raise SystemExit("seed-manifest 缺 confirmed 正文 digest，拒绝开臂")
+    seed_case_root = seed_manifest.get("fixed_case_root")
+    if not seed_case_root:
+        raise SystemExit("seed-manifest 缺 fixed_case_root，拒绝开臂（成员 authority 无锚）")
+    if case_root_cli:
+        # 给了案例根 ⇒ 只允许与 seed 记录一致（不静默纠正、不重指向成员）
+        given_case = os.path.abspath(case_root_cli).rstrip("/")
+        if given_case != os.path.abspath(seed_case_root).rstrip("/"):
+            raise SystemExit("给定 case root（%s）与 seed 记录的 fixed_case_root（%s）"
+                             "不一致：拒绝开臂" % (given_case, seed_case_root))
     if issue_input_path:
         given = load_issue_input(issue_input_path)
         if given["sha256"] != seed_manifest.get("issue_input_sha256"):

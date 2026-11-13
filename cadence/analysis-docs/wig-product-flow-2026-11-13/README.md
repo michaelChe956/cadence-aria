@@ -90,6 +90,23 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
 `docs/issue-003-公告管理升级.md` 与 `story_spec_0015`（13 REQ / 14 AC）是另一个
 更大的故事，**不得混入**（锚点校验会拒收）。
 
+### 两个不同的根：state root 与 case root
+
+| 名称 | 谁提供 | 含义 |
+|---|---|---|
+| **state root**（`--seed` 的第 2 个位置参数） | controller 的 `WIG_STATE_ROOT` | `.aria` 所在目录；整棵克隆成 `<out>/seed-workspace` |
+| **fixed case root** | `--case-root` 或 `WIG_CASE_ROOT`（**唯一权威**） | 3 个成员仓所在目录；只用于校验成员 `canonical_path` 与冻结 authority |
+
+装置**绝不从 state root 推断 case root**——两者不同是常态。失败一律显式非 0：
+
+- 两处都没给 ⇒ `缺少固定案例根：显式给 --case-root <…> 或环境变量 WIG_CASE_ROOT…`；
+- `--case-root` 与 src 相同 ⇒ 直接拒绝（混用会误判成员身份）；
+- 成员 `canonical_path` 不在该根下 ⇒ `成员 busi 的 canonical_path=… 不在固定案例根 … 之下`。
+
+上述三种失败都会先写 `<out>/seed-manifest.json`（`valid=false` +
+`invalid_reason`）并保留已复制的 `seed-workspace` 作为证据；脚本永不删除、永不
+覆盖已有 seed 目录。
+
 ### seed 与克隆
 
 - seed 只生成**一次**（`--seed`，一次真实 provider story run，binary 记入
@@ -221,9 +238,12 @@ source $SETUP/env.sh     # 导出 HOME=<scratch>、PATH 垫片（只放行 codex
 # export WIG_TRUST_AUTHORIZED=1
 
 # 1) 真实 smoke + 一次性固定 seed（controller 验收入口）
+#    第 2 个位置参数 = state root（.aria 所在、会被克隆）；
+#    case root 只认 --case-root 或 WIG_CASE_ROOT（不从位置参数推断）
 #    issue 正文必须显式给（无内置占位）：--issue-input 或 WIG_ISSUE_INPUT_FILE
 python3 $D/run_arms.py --seed /tmp/aria-wig-pinned/after-07a0df79 \
-  "$WIG_CASE_ROOT" /tmp/aria-wig 4709 \
+  "$WIG_STATE_ROOT" /tmp/aria-wig/out-seed 4709 \
+  --case-root "$WIG_CASE_ROOT" \
   --issue-input $SETUP/issue_input.md
 
 # 2) 8 臂 ABBA（唯一变量 = 二进制；任一臂失败 ⇒ 退出码非 0）
@@ -231,15 +251,34 @@ python3 $D/run_arms.py --seed /tmp/aria-wig-pinned/after-07a0df79 \
 python3 $D/run_arms.py \
   /tmp/aria-wig-pinned/before-a953327d \
   /tmp/aria-wig-pinned/after-07a0df79 \
-  /tmp/aria-wig/seed-workspace /tmp/aria-wig 2 4701
+  /tmp/aria-wig/out-seed/seed-workspace /tmp/aria-wig/out-seed 2 4701
 
 # 3) 收割 + 精确置换（只出方向性对照；排除清单与输入 digest 一并打印）
-python3 $D/harvest_by_role.py /tmp/aria-wig /tmp/aria-wig/sequence.log
+python3 $D/harvest_by_role.py /tmp/aria-wig/out-seed /tmp/aria-wig/out-seed/sequence.log
 ```
 
 全部测试产物只写 `/tmp`（装置不写仓库、不写 HOME、不动原案例目录）。
 `--issue-input` 可放在任意位置；臂阶段也接受它，但仅用于**核对**是否与 seed
 记录的 digest 一致（不一致即拒绝开臂）。
+
+### 已有 out 根（失败证据）不要删、不要复用
+
+`--seed` 拒绝覆盖已存在的 `<out>/seed-workspace`；失败的 seed 目录里会留
+`seed-manifest.json`（`valid=false` + `invalid_reason`）与已复制的
+`seed-workspace`，**原样保留作为证据**。装置没有「半程 resume」：arm 模式只接受
+`valid=true` 的 seed-manifest，因此恢复方式是**换新 out 根完整重跑 seed**：
+
+```bash
+# 例：/tmp/aria-wig 里已有失败的 seed-workspace ⇒ 用 out-seed2 重跑
+python3 $D/run_arms.py --seed /tmp/aria-wig-pinned/after-07a0df79 \
+  "$WIG_STATE_ROOT" /tmp/aria-wig/out-seed2 4709 \
+  --case-root "$WIG_CASE_ROOT" --issue-input $SETUP/issue_input.md
+
+# 8 臂随后指向新 out 的 seed 快照
+python3 $D/run_arms.py /tmp/aria-wig-pinned/before-a953327d \
+  /tmp/aria-wig-pinned/after-07a0df79 \
+  /tmp/aria-wig/out-seed2/seed-workspace /tmp/aria-wig/out-seed2 2 4701
+```
 
 ## 本次修复的验证状态（如实）
 
@@ -260,6 +299,16 @@ python3 $D/harvest_by_role.py /tmp/aria-wig /tmp/aria-wig/sequence.log
   真实 codex 会话中的实际生效、任何耗时/token 数值结论。这些都必须由
   controller 执行时观察；本目录脚本不会自行启动 provider 或追加 run。
 
+### 真机 seed 首次失败的根因（已修）
+
+controller 的 `bg_555` 首跑失败：`成员 busi 的 canonical_path=<case>/busi 不在
+固定案例根 <state-seed> 之下`。根因 = 旧版把 `--seed` 的**位置参数（state root）**
+当成 fixed case root。现改为 case root **只**取自 `--case-root` / `WIG_CASE_ROOT`，
+缺失即显式 error，绝不由 src 推断（见「两个不同的根」）。已补验证：
+⑦ case root 取自 `WIG_CASE_ROOT` 时能走过旧失败点并按 state root 克隆；
+`--case-root` 与 src 相同、给无关目录、以及两处都缺，三种情形分别得到明确
+error 且前两种先落 `valid=false` 的 seed-manifest 并保留 `seed-workspace` 证据。
+
 
 ## 窄冒烟（controller 用，不启动真实 provider）
 
@@ -278,6 +327,10 @@ HOME=/tmp python3 $D/run_arms.py --seed /bin/true /tmp/no-case /tmp/wig-probe-ou
 HOME=/tmp python3 $D/run_arms.py --seed /bin/true /tmp/no-case /tmp/wig-probe-out \
   --issue-input /tmp/wig-probe-empty.md; echo "rc=$?"
 
+# 2b) 缺 case root（既无 --case-root 也无 WIG_CASE_ROOT）⇒ rc=1「缺少固定案例根」
+env -u WIG_CASE_ROOT HOME=/tmp python3 $D/run_arms.py --seed /bin/true /tmp/no-case \
+  /tmp/wig-probe-out --issue-input $SETUP/issue_input.md; echo "rc=$?"
+
 # 3) 臂模式：伪造 seed-manifest（valid=false）⇒ rc=1「拒绝开臂」，不开 daemon
 mkdir -p /tmp/wig-probe
 printf '{"schema":"wig-seed-manifest/1","valid":false,"invalid_reason":"probe"}\n' \
@@ -286,4 +339,4 @@ HOME=/tmp python3 $D/run_arms.py /bin/true /bin/true /tmp/wig-probe/seed-workspa
 echo "rc=$?"
 ```
 
-三条门禁都不接触 provider、不写 HOME、只在 `/tmp` 下留探针文件。
+四条门禁都不接触 provider、不写 HOME、只在 `/tmp` 下留探针文件。
