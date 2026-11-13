@@ -226,7 +226,8 @@ fn equal_terminal_content_replays_same_package_id_and_reason_change_flips_it() {
     let chain = chain();
     let first = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: mismatched types", one_round_prefix())).expect("build");
     let replay = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: mismatched types", one_round_prefix())).expect("replay from independently constructed equal evidence");
-    assert!(!first.package_id.is_empty(), "package id must be a real derived id, never empty placeholder");
+    assert_eq!(first.package_id.len(), 64);
+    assert!(first.package_id.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
     assert_eq!(first, replay, "same terminal content must replay an identical package");
 
     let changed = build_sc_failure_repair_package(&chain, &one_round_read("E0308:3: different wording", one_round_prefix())).expect("changed reason");

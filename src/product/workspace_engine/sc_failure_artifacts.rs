@@ -38,6 +38,7 @@ const CODE_THROUGH_MISMATCH: &str = "sc_failure_evidence_through_mismatch";
 const CODE_PREFIX_MISSING: &str = "sc_failure_evidence_prefix_missing";
 const CODE_ROUND_ORDER_INVALID: &str = "sc_failure_round_order_invalid";
 const CODE_ROUND_NOT_BOUND: &str = "sc_failure_round_not_bound";
+const CODE_LAUNCH_STATE_UNKNOWN: &str = "sc_failure_launch_state_unknown";
 const CODE_PACKAGE_INVALID: &str = "sc_failure_package_invalid";
 const CODE_PACKAGE_SERIALIZE: &str = "sc_failure_package_serialize";
 
@@ -90,6 +91,20 @@ pub(crate) fn build_sc_failure_repair_package(
             ),
         ));
     }
+    // Plan §2.3/§3.2：`Unknown` 只表达“观察到但状态未知”，不写 ChainTerminal
+    // （等待／对账不伪造终局）。组包器兜底：终局观察里出现 `Unknown` 即拒绝，
+    // 绝不让它进包，也不把它降级成 NotStarted/Started。
+    if let Some((round_id, _)) = terminal
+        .launch_observations
+        .iter()
+        .find(|(_, state)| matches!(state, ScRoundLaunchState::Unknown))
+    {
+        return Err(error(
+            CODE_LAUNCH_STATE_UNKNOWN,
+            Some(round_id.clone()),
+            format!("终局观察把轮 {round_id} 记为 Unknown：Unknown 不伪造终局，不能组包"),
+        ));
+    }
 
     let mut rounds: Vec<ScRoundEvidence> = Vec::new();
     let mut teaching_prompts: Vec<ScTeachingPromptEvidence> = Vec::new();
@@ -123,6 +138,22 @@ pub(crate) fn build_sc_failure_repair_package(
                 ),
             ));
         }
+        let launch_state = resolved_launch_state(
+            evidence,
+            terminal.launch_observations,
+            round.round_id.as_str(),
+        )?;
+        // 观察说“未启动”却又有真实 FailureObserved：证据自相矛盾，不掩盖。
+        if failure.is_some() && launch_state != ScRoundLaunchState::Started {
+            return Err(error(
+                CODE_ROUND_EVIDENCE_INCONSISTENT,
+                Some(round.round_id.clone()),
+                format!(
+                    "轮 {} 有 FailureObserved 交付但启动观察是 {:?}，证据自相矛盾",
+                    round.round_id, launch_state
+                ),
+            ));
+        }
         let (failure_class, blocking_reasons, repair_instructions, raw, source) = match &failure {
             Some(facts) => (
                 facts.failure_class.clone(),
@@ -131,17 +162,18 @@ pub(crate) fn build_sc_failure_repair_package(
                 facts.raw.clone(),
                 facts.source.clone(),
             ),
-            None => (
-                None,
-                Vec::new(),
-                Vec::new(),
-                not_delivered(terminal.terminal_reason, round.round_id.as_str()),
-                not_delivered(terminal.terminal_reason, round.round_id.as_str()),
-            ),
+            None => {
+                let undelivered = undelivered_ref(
+                    &launch_state,
+                    terminal.terminal_reason,
+                    round.round_id.as_str(),
+                );
+                (None, Vec::new(), Vec::new(), undelivered.clone(), undelivered)
+            }
         };
         let round_evidence = ScRoundEvidence {
             identity: round.clone(),
-            launch_state: round_launch_state(terminal.launch_observations, round.round_id.as_str()),
+            launch_state,
             failure_class,
             blocking_reasons,
             repair_instructions,
@@ -194,11 +226,29 @@ pub(crate) fn build_sc_failure_repair_package(
 
     // last 物理轮 raw 与 last 失败轮 source 是两条不同来源：物理轮没有交付时留
     // 显式 missing（真实 code + 真实 terminal cause），绝不拿失败源顶替 raw。
+    // 但 last physical 必须是真的 `Started`：显式 `NotStarted`（或观察缺失且无
+    // 交付）说明终局选错了物理轮，直接 reject，不靠 Missing 掩盖矛盾。
     let last_provider_output = match &terminal.last_physical_round_id {
-        Some(round_id) => match failure_for(evidence, round_id.as_str()) {
-            Some(facts) => facts.raw.clone(),
-            None => not_delivered(terminal.terminal_reason, round_id.as_str()),
-        },
+        Some(round_id) => {
+            let state = resolved_launch_state(
+                evidence,
+                terminal.launch_observations,
+                round_id.as_str(),
+            )?;
+            if state != ScRoundLaunchState::Started {
+                return Err(error(
+                    CODE_ROUND_EVIDENCE_INCONSISTENT,
+                    Some(round_id.clone()),
+                    format!(
+                        "终局把物理轮 {round_id} 记为 {state:?}：last physical 必须是真实 Started，不能选择未启动轮"
+                    ),
+                ));
+            }
+            match failure_for(evidence, round_id.as_str()) {
+                Some(facts) => facts.raw.clone(),
+                None => undelivered_ref(&state, terminal.terminal_reason, round_id.as_str()),
+            }
+        }
         None => ScEvidenceRef::Missing {
             code: CODE_RAW_MISSING.into(),
             detail: format!(
@@ -382,21 +432,56 @@ fn prompts_for(
         .collect()
 }
 
-fn round_launch_state(
+/// 解析一轮的真实启动状态。只认终局里的**显式观察**；观察缺失时，仅当该轮已有
+/// 真实 `FailureObserved` 交付（有交付即已启动）才可推 `Started`，其余一律
+/// `Err sc_failure_launch_state_unknown`——缺证据既不是“未启动”，也不能当
+/// `Unknown` 混进包。
+fn resolved_launch_state(
+    evidence: &ScFailureEvidenceRead,
     observations: &[(String, ScRoundLaunchState)],
     round_id: &str,
-) -> ScRoundLaunchState {
-    observations
+) -> Result<ScRoundLaunchState, ScFailureEvidenceError> {
+    match observations
         .iter()
         .find(|(observed_id, _)| observed_id == round_id)
         .map(|(_, state)| state.clone())
-        .unwrap_or(ScRoundLaunchState::Unknown)
+    {
+        Some(state) => Ok(state),
+        None if failure_for(evidence, round_id).is_some() => Ok(ScRoundLaunchState::Started),
+        None => Err(error(
+            CODE_LAUNCH_STATE_UNKNOWN,
+            Some(round_id.to_string()),
+            format!("终局没有轮 {round_id} 的启动观察，且该轮没有任何交付事实，启动状态未知，不能入包"),
+        )),
+    }
 }
 
-fn not_delivered(terminal_reason: &str, round_id: &str) -> ScEvidenceRef {
+/// 无 `FailureObserved` 的轮如何表达“没有 raw/source”：只有真实 `Started` 才用
+/// `sc_failure_output_not_delivered`（真实 terminal cause + 真实该轮）；
+/// 显式 `NotStarted` 用 `sc_failure_raw_missing`——未启动就是“没有产生输出”，
+/// 不能伪造启动事实。`Unknown` 已在终局入口拒绝，此臂仅穷尽（防御性）。
+fn undelivered_ref(
+    state: &ScRoundLaunchState,
+    terminal_reason: &str,
+    round_id: &str,
+) -> ScEvidenceRef {
+    let (code, wording) = match state {
+        ScRoundLaunchState::Started => (
+            CODE_OUTPUT_NOT_DELIVERED,
+            format!("{terminal_reason}（{round_id} 已启动但未交付 provider 输出原文）"),
+        ),
+        ScRoundLaunchState::NotStarted => (
+            CODE_RAW_MISSING,
+            format!("{terminal_reason}（{round_id} 未启动，没有 provider 输出原文）"),
+        ),
+        ScRoundLaunchState::Unknown => (
+            CODE_RAW_MISSING,
+            format!("{terminal_reason}（{round_id} 启动状态未知，没有 provider 输出原文）"),
+        ),
+    };
     ScEvidenceRef::Missing {
-        code: CODE_OUTPUT_NOT_DELIVERED.into(),
-        detail: format!("{terminal_reason}（{round_id} 已启动但未交付 provider 输出原文）"),
+        code: code.into(),
+        detail: wording,
         round_id: round_id.into(),
     }
 }
