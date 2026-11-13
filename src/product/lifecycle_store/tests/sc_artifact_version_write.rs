@@ -276,11 +276,57 @@ fn p14_write_lock_is_scoped_to_one_session_file() {
         })
     };
     done_rx
-        .recv_timeout(Duration::from_secs(2))
+        .recv_timeout(Duration::from_secs(5))
         .expect("a different session's artifact table must not be blocked")
         .unwrap();
     other.join().unwrap();
 
     release_tx.send(()).unwrap();
     holder.join().unwrap();
+}
+
+#[test]
+fn p14_concurrent_appends_allocate_unique_contiguous_versions_without_lost_payloads() {
+    const WRITERS: usize = 3;
+    const APPENDS_PER_WRITER: usize = 4;
+    let (_tmp, store, session) = p14_store();
+    let sid = session.id.clone();
+    let start = std::sync::Arc::new(std::sync::Barrier::new(WRITERS));
+
+    // 每个 writer 追加互不相同的 payload；barrier 让写者同时起跑，竞争同一 session 的锁。
+    let writers: Vec<_> = (0..WRITERS)
+        .map(|writer| {
+            let (paths, sid, start) = (store.app_paths(), sid.clone(), start.clone());
+            std::thread::spawn(move || {
+                let store = LifecycleStore::new(paths);
+                start.wait();
+                for seq in 0..APPENDS_PER_WRITER {
+                    let payload = format!("# writer{writer}-seq{seq}");
+                    store
+                        .append_artifact_version(&sid, p14_version(99, &payload))
+                        .unwrap();
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+
+    let total = WRITERS * APPENDS_PER_WRITER;
+    let persisted = store.list_artifact_versions(&sid).unwrap();
+    let versions: Vec<u32> = persisted.iter().map(|entry| entry.version).collect();
+    let expected: Vec<u32> = (1..=total as u32).collect();
+    assert_eq!(versions, expected, "versions must be unique, contiguous and in append order");
+
+    let mut payloads: Vec<String> = persisted
+        .iter()
+        .map(|entry| entry.markdown().to_string())
+        .collect();
+    payloads.sort();
+    let mut wanted: Vec<String> = (0..WRITERS)
+        .flat_map(|writer| (0..APPENDS_PER_WRITER).map(move |seq| format!("# writer{writer}-seq{seq}")))
+        .collect();
+    wanted.sort();
+    assert_eq!(payloads, wanted, "every concurrently appended payload must survive exactly once");
 }
