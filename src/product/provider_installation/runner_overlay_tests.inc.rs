@@ -688,3 +688,79 @@ async fn install_retries_once_with_include_optional_when_probe_fails() {
     );
 }
 
+/// 桩 runner：所有命令都失败（用于「版本只能来自 package.json」的场景）。
+#[derive(Default)]
+struct AlwaysFailingRunner {
+    requests: Mutex<Vec<BoundedCommandRequest>>,
+}
+
+impl AlwaysFailingRunner {
+    fn requests(&self) -> Vec<BoundedCommandRequest> {
+        self.requests.lock().expect("recorded requests").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl BoundedCommandRunner for AlwaysFailingRunner {
+    async fn run(
+        &self,
+        request: BoundedCommandRequest,
+    ) -> Result<BoundedCommandResult, BoundedCommandError> {
+        self.requests.lock().expect("recorded requests").push(request);
+        failure("not found")
+    }
+}
+
+/// 装完探测用的 prober（health 服务另配桩 runner ⇒ 被断言的请求只来自
+/// prober 自身）。
+fn health_prober(root: &Path, runner: Arc<dyn BoundedCommandRunner>) -> HealthRefreshProber {
+    let health = ProviderHealthService::with_dependencies(
+        AriaStatePaths::from_workspace_root(root),
+        Arc::new(AlwaysFailingRunner::default()),
+        Arc::new(SystemProviderHealthClock),
+        Duration::from_secs(1),
+        4096,
+    );
+    HealthRefreshProber::new(
+        Arc::new(health),
+        runner,
+        root.to_path_buf(),
+        Duration::from_secs(1),
+    )
+}
+
+/// 版本读取**优先**读 npm 包的 `package.json`（不执行进程、更快更稳）；
+/// 读不到才跑 `--version`。
+#[tokio::test]
+async fn installed_version_prefers_npm_package_json() {
+    let root = tempdir().expect("root");
+    let prefix = root.path().join("installation");
+    let package_dir = prefix
+        .join("lib")
+        .join("node_modules")
+        .join("@openai")
+        .join("codex");
+    std::fs::create_dir_all(&package_dir).expect("package dir");
+    std::fs::write(
+        package_dir.join("package.json"),
+        br#"{"name":"@openai/codex","version":"9.9.9"}"#,
+    )
+    .expect("package.json");
+
+    let runner = Arc::new(AlwaysFailingRunner::default());
+    let prober = health_prober(root.path(), runner.clone());
+    let bin_dir = prefix.join("bin");
+
+    let outcome = prober
+        .refresh_after_install(
+            InstallTarget::Provider(ProviderName::Codex),
+            Some(bin_dir.as_path()),
+        )
+        .await
+        .expect("probe");
+    assert_eq!(
+        outcome.installed_version.as_deref(),
+        Some("9.9.9"),
+        "版本必须优先读 npm 包的 package.json（读不到才跑 --version）"
+    );
+}
