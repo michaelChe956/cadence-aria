@@ -96,7 +96,8 @@ AUTHORITY_DIRS = ("/members/", "/checkouts/", "/versions/")  # 权威/正文落�
 FIXED_MEMBER_ALIASES = ("busi", "frontend", "gateway")
 MEMBER_SNAP_SCHEMA = "wig-member-snapshot/1"
 SKIP_TREE_DIRS = {".codegraph"}      # 聚合索引缓存：读会改 sqlite 附属文件，不计入
-ISSUE_INPUT_ANCHORS = ("公告删除", "REQ-001", "REQ-007", "AC-001", "AC-006")
+ISSUE_INPUT_ANCHORS = ("公告删除",) + tuple(
+    "REQ-%03d" % i for i in range(1, 8)) + tuple("AC-%03d" % i for i in range(1, 7))
 TRUST_HINTS = ("trust_level", "trust entry", "trust 条目", "workspace trust",
                "untrusted", "not trusted", "trust 缺失")
 
@@ -245,13 +246,26 @@ def _git(repo, *args, timeout=120):
     return proc.stdout.strip() if proc.returncode == 0 else ""
 
 
-def _tree_digest(root):
-    """聚合根内「非成员目录」内容摘要（相对路径 + 模式 + 内容 sha256）。"""
+def _tree_digest(root, exclude_dirs=()):
+    """聚合根内「非成员目录」内容摘要（相对路径 + 模式 + 内容 sha256）。
+
+    exclude_dirs 只排除**精确路径**的目录（固定案例第一层的 3 个成员 canonical
+    目录）；不按目录名剪枝 —— 深层同名目录（例如 `<root>/nested/frontend`）的
+    内容必须计入，否则其中的改动会被漏掉。`.codegraph` 仍按名字排除（索引缓存，
+    读取会改 sqlite 附属文件）。
+    """
+    excluded = {os.path.abspath(p).rstrip("/") for p in exclude_dirs if p}
     entries = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames
-                             if d not in SKIP_TREE_DIRS
-                             and d not in FIXED_MEMBER_ALIASES)
+        kept = []
+        for d in sorted(dirnames):
+            if d in SKIP_TREE_DIRS:
+                continue
+            full = os.path.abspath(os.path.join(dirpath, d)).rstrip("/")
+            if full in excluded:
+                continue
+            kept.append(d)
+        dirnames[:] = kept
         for name in sorted(filenames):
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root)
@@ -327,7 +341,9 @@ def member_snapshot(root):
     agg_root = manifest.get("provider_context_root")
     agg_sha, agg_files = ("", 0)
     if agg_root and os.path.isdir(agg_root):
-        agg_sha, agg_files = _tree_digest(agg_root)
+        # 只排除固定案例里真实的成员 canonical 目录（按精确路径），不按名字剪枝
+        agg_sha, agg_files = _tree_digest(
+            agg_root, [m.get("path") for m in members.values()])
     return {
         "schema": MEMBER_SNAP_SCHEMA,
         "state_root": root,

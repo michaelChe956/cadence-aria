@@ -129,7 +129,9 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
    `/tmp/wig-measurement-setup/member_snapshot.py` 同构，装置内自带实现）。
    逐成员比 `alias` / `canonical_path` / `checkout_path_hash` /
    `git_dir_identity` / `canonical_git_dir` / `HEAD` / `tree` / `branch` /
-   **`git status --porcelain`（dirty）**；聚合根非成员树另有内容 digest。
+   **`git status --porcelain`（dirty）**；聚合根非成员树另有内容 digest——
+   只排除固定案例里**真实成员 canonical 目录的精确路径**（不按目录名剪枝，
+   深层同名目录如 `nested/frontend` 的内容计入），`.codegraph` 仍按名字跳过。
    **HEAD 没动但 dirty 内容变了 ⇒ 判不稳定**，该臂 invalid。
 3. 固定案例 = 精确 3 成员 `busi/frontend/gateway`，且每个成员
    `canonical_path` 必须仍在固定案例根之下（见下节「状态根重指向」）。
