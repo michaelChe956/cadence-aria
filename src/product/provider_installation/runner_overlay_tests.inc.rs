@@ -142,6 +142,7 @@ fn execution(
         npm_prefix: PathBuf::from("/home/dev/.npm-global"),
         path_value: None,
         npm_prefix_probe: None,
+        home_dir: None,
         clock: Arc::new(FixedClock),
     }
 }
@@ -846,5 +847,50 @@ async fn post_install_version_falls_back_to_absolute_path_probe() {
         }),
         "绝对路径探测必须经 BoundedCommandRunner: {:?}",
         runner.requests()
+    );
+}
+
+/// Kimi 行（官方脚本）安装结果必须带 `path_hint`，文案点名
+/// `~/.kimi-code/bin`（官方脚本只改 shell rc ⇒ 运行中的平台进程 PATH 不变
+/// ⇒ 探测必然 127 ⇒ 必须提示）。
+#[tokio::test]
+async fn kimi_install_result_carries_path_hint() {
+    let root = tempdir().expect("root");
+    let home = root.path().join("home");
+    let kimi_bin = home.join(".kimi-code").join("bin");
+    std::fs::create_dir_all(&kimi_bin).expect("kimi bin dir");
+    std::fs::write(kimi_bin.join("kimi"), b"#!/bin/sh\n").expect("kimi stub");
+
+    let install_runner = ScriptedRunner::new(
+        vec![success("Installed to /tmp/elsewhere/kimi")],
+        Duration::ZERO,
+    );
+    let mut execution = execution(
+        root.path(),
+        install_runner.clone(),
+        SpyProber::new(Some("1.2.3")),
+    );
+    execution.home_dir = Some(home.clone());
+
+    let job = execution
+        .store
+        .create("kimi_code", FixedClock.now())
+        .expect("create");
+    execution
+        .run(&job.job_id, InstallTarget::Provider(ProviderName::KimiCode))
+        .await;
+
+    let done = execution
+        .store
+        .get(&job.job_id)
+        .expect("io")
+        .expect("job exists");
+    let outcome = done.outcome.expect("outcome");
+    let hint = outcome
+        .path_hint
+        .expect("Kimi 行必须给 path_hint（脚本只改 shell rc）");
+    assert!(
+        hint.contains(".kimi-code/bin"),
+        "path_hint 必须点名 ~/.kimi-code/bin: {hint}"
     );
 }
