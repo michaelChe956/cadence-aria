@@ -510,8 +510,7 @@ fn platform_package_nodes(scoped: &Path, target: &str) -> Vec<PathBuf> {
         // 异平台兜底包（目录名 ≠ 当前平台）只有**可执行格式校验通过**才采用；
         // 当前平台的包沿用原口径（由采纳点再做 `is_executable_file` 校验）。
         .filter(|name| {
-            *name == exact
-                || is_native_executable(&scoped.join(name).join(node_executable_name()))
+            *name == exact || is_native_executable(&scoped.join(name).join(node_executable_name()))
         })
         .map(|name| scoped.join(name).join(node_executable_name()))
         .filter(|node| is_executable_file(node))
