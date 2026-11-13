@@ -12,21 +12,16 @@ import type {
   WorkspaceProviderName,
   HumanPresentationRevision,
   NodeDetail,
-  PlanAmendmentManifest,
   PlanProjectionBundle,
   PlanRepairSessionSnapshot,
   ProjectionValidationReport,
   StructuredOutputDiagnostic,
-  WorkItemBatchStatePayload,
-  WorkItemDraftCandidatePayload,
   WorkItemPlanArtifactPayload,
   WorkItemPlanArtifactVersion,
   WorkItemPlanCandidateDto,
-  WorkItemPlanCompileReportPayload,
-  WorkItemPlanContextBlockerPayload,
-  WorkItemPlanOutlineCandidatePayload,
   WorkItemProjectionBundle,
   WorkItemRevisionHistoryDto,
+  WorkspaceArtifactWire,
 } from "../api/types";
 import type {
   ChatEntry,
@@ -36,21 +31,7 @@ import type {
 } from "./chat-entries";
 import type { WorkspaceContentCache } from "./workspace-content-cache";
 
-export type WorkspaceArtifact =
-  | string
-  | null
-  | { markdown: string; diff?: string | null }
-  | { candidate: WorkItemPlanCandidateDto }
-  | { outline_candidate: WorkItemPlanOutlineCandidatePayload }
-  | { context_blocker: WorkItemPlanContextBlockerPayload }
-  | { draft_candidate: WorkItemDraftCandidatePayload }
-  | { batch_state: WorkItemBatchStatePayload }
-  | { compile_report: WorkItemPlanCompileReportPayload }
-  | { plan_projection: PlanProjectionBundle }
-  | { work_item_projection: WorkItemProjectionBundle }
-  | { work_item_revision_history: WorkItemRevisionHistoryDto }
-  | { projection_validation: ProjectionValidationReport }
-  | { plan_amendment_manifest: PlanAmendmentManifest };
+export type WorkspaceArtifact = string | null | WorkspaceArtifactWire;
 
 export type WorkItemPlanProjectionArtifacts = {
   planProjection: PlanProjectionBundle | null;
