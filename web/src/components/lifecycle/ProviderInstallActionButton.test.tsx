@@ -526,3 +526,167 @@ describe("安装完成后的 path_hint 呈现（原样渲染后端整句）", ()
     expect(status).toHaveTextContent("已安装：1.0.34");
   });
 });
+
+/** §五 2.11：install / 作业轮询 / expose 三路由发送器（expose 应答可注入）。 */
+function exposeFetchRouter(options: {
+  target: InstallTargetWire;
+  jobIds?: string[];
+  jobs?: JobResponder[];
+  expose?: () => Response;
+}): { requests: CapturedRequest[] } {
+  const requests: CapturedRequest[] = [];
+  const jobIds = [...(options.jobIds ?? ["job_0001"])];
+  const jobs = [...(options.jobs ?? [])];
+  const router = async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const url = typeof input === "string" ? input : input.toString();
+    const method = (init?.method ?? "GET").toUpperCase();
+    const rawBody = typeof init?.body === "string" ? init.body : null;
+    requests.push({
+      url,
+      method,
+      body: rawBody === null ? null : JSON.parse(rawBody),
+    });
+    if (
+      method === "POST" &&
+      url === `/api/providers/${options.target}/expose`
+    ) {
+      return (
+        options.expose?.() ??
+        jsonResponse({
+          exposed: true,
+          command: "claude",
+          dir: "/home/u/.local/bin",
+          target: "/opt/node/bin/claude",
+        })
+      );
+    }
+    if (
+      method === "POST" &&
+      url === `/api/providers/${options.target}/install`
+    ) {
+      return jsonResponse({ job_id: jobIds.shift() ?? "job_0001" });
+    }
+    const jobMatch = /^\/api\/providers\/install\/(.+)$/.exec(url);
+    if (method === "GET" && jobMatch) {
+      const responder = jobs.length > 1 ? jobs.shift()! : jobs[0];
+      const job = responder
+        ? responder()
+        : runningJob(jobMatch[1], options.target);
+      return jsonResponse(job);
+    }
+    return jsonResponse(
+      { code: "not_found", message: `no route for ${method} ${url}` },
+      404,
+    );
+  };
+  vi.stubGlobal("fetch", vi.fn(router));
+  return { requests };
+}
+
+// §五 2.11「把 CLI 暴露到终端 PATH」（用户明确点击才动作）：按钮仅在
+// 目标已安装时出现；成功后把「若不在 PATH 上请加入 PATH」的提示**刷新**
+// 为「已暴露到 <dir>，新终端可直接运行 <command>」；失败如实展示后端
+// 返回的可行动原因（候选目录与各自不合格原因）。
+describe("暴露到终端 PATH（§五 2.11）", () => {
+  it("按钮仅在已安装时渲染（未安装不显示）", () => {
+    exposeFetchRouter({ target: "claude_code" });
+    const view = renderButton({
+      target: "claude_code",
+      cliAvailable: true,
+      capabilityConfirmed: true,
+    });
+    expect(
+      screen.getByTestId("provider-install-expose-claude_code").textContent,
+    ).toBe("暴露到终端 PATH");
+
+    view.rerender(
+      <ProviderInstallActionButton
+        target="claude_code"
+        cliAvailable={false}
+        capabilityConfirmed={true}
+      />,
+    );
+    expect(
+      screen.queryByTestId("provider-install-expose-claude_code"),
+    ).toBeNull();
+  });
+
+  it("点击后 POST expose 端点；成功展示结果并刷新安装提示", async () => {
+    vi.useFakeTimers();
+    exposeFetchRouter({
+      target: "claude_code",
+      jobIds: ["job_expose"],
+      jobs: [
+        () => runningJob("job_expose", "claude_code"),
+        () => completedJob("job_expose", "claude_code"),
+      ],
+    });
+    const view = renderButton({ target: "claude_code", cliAvailable: false });
+    await driveToCompleted();
+    // 父级在 onSettled 后重读 health ⇒ 组件以「已安装」重渲。
+    view.rerender(
+      <ProviderInstallActionButton
+        target="claude_code"
+        cliAvailable={true}
+        capabilityConfirmed={true}
+      />,
+    );
+    expect(
+      screen.getByTestId("provider-install-path-hint-claude_code"),
+    ).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByTestId("provider-install-expose-claude_code"),
+      );
+      await Promise.resolve();
+    });
+
+    const result = screen.getByTestId(
+      "provider-install-expose-result-claude_code",
+    );
+    expect(result.textContent).toContain("已暴露到 /home/u/.local/bin");
+    expect(result.textContent).toContain("新终端可直接运行 claude");
+    // 成功后旧的「请把 … 加入 PATH」提示被刷新掉，不再误导。
+    expect(
+      screen.queryByTestId("provider-install-path-hint-claude_code"),
+    ).toBeNull();
+  });
+
+  it("失败时展示后端返回的可行动原因", async () => {
+    exposeFetchRouter({
+      target: "claude_code",
+      expose: () =>
+        jsonResponse(
+          {
+            code: "expose_no_candidate_dir",
+            message:
+              "没有可用的暴露目录（已安装于 /opt/node/bin/claude）：/home/u/.local/bin 真实不可写",
+          },
+          400,
+        ),
+    });
+    renderButton({
+      target: "claude_code",
+      cliAvailable: true,
+      capabilityConfirmed: true,
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByTestId("provider-install-expose-claude_code"),
+      );
+      await Promise.resolve();
+    });
+    const error = screen.getByTestId(
+      "provider-install-expose-error-claude_code",
+    );
+    expect(error.textContent).toContain("expose_no_candidate_dir");
+    expect(error.textContent).toContain("没有可用的暴露目录");
+    expect(
+      screen.queryByTestId("provider-install-expose-result-claude_code"),
+    ).toBeNull();
+  });
+});
