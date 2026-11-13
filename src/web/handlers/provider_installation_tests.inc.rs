@@ -16,8 +16,8 @@
 
     use super::{
         InstallJobExecution, OffPathQuery, TEST_INSTALL_EXECUTIONS, TestInstallExecutionBuilder,
-        get_install_job, get_install_targets, post_provider_expose, post_provider_install,
-        resolve_install_action, resolve_off_path,
+        get_install_job, get_install_targets, off_path_query_with, post_provider_expose,
+        post_provider_install, resolve_install_action, resolve_off_path,
     };
     use crate::cross_cutting::aria_state_paths::AriaStatePaths;
     use crate::cross_cutting::bounded_command_runner::{
@@ -366,9 +366,11 @@
         let prefix_bin = root.path().join("npm-global").join("bin");
         std::fs::create_dir_all(&prefix_bin).expect("prefix bin");
         std::fs::write(prefix_bin.join("claude"), "#!/bin/sh\n").expect("claude bin");
-        // 登录 shell PATH 上的真实目录（另一个目录）。
+        // 登录 shell PATH 上的真实目录（**也放一份 claude** ⇒ 「在 PATH 上
+        // 的那条分支」真的被测到，而不是落入「未安装 ⇒ false」）。
         let login_dir = root.path().join("login-bin");
         std::fs::create_dir_all(&login_dir).expect("login bin");
+        std::fs::write(login_dir.join("claude"), "#!/bin/sh\n").expect("login claude bin");
         let query = OffPathQuery {
             install_search_dirs: vec![prefix_bin.clone()],
             login_path_dirs: vec![login_dir.clone()],
@@ -394,6 +396,62 @@
                 login_path_dirs: Vec::new(),
             }
         ));
+    }
+
+    /// F8：off_path 的「平台能找到」口径必须含**服务进程 PATH**
+    /// （`effective_path` 合并后的真实生效序）—— 否则「服务自己能跑、用户
+    /// 终端 PATH 没有」会被误判成「未安装 ⇒ false」（REQ-PCI-08）。
+    #[test]
+    fn off_path_counts_service_process_path_as_platform_visible() {
+        const CLI: &str = "aria-off-path-fixture-cli";
+        let root = tempdir().expect("root");
+        let service_bin = root.path().join("service-bin");
+        std::fs::create_dir_all(&service_bin).expect("service bin");
+        std::fs::write(service_bin.join(CLI), "#!/bin/sh\n").expect("service cli");
+        let login_bin = root.path().join("login-bin");
+        std::fs::create_dir_all(&login_bin).expect("login bin");
+        let home = root.path().join("home");
+
+        // ① 服务进程 PATH 有、登录 shell PATH 没有 ⇒ 平台能找到但不在终端
+        //    PATH 上 ⇒ true。
+        let query = off_path_query_with(
+            &service_bin.display().to_string(),
+            Some(&login_bin.display().to_string()),
+            Some(&home),
+        );
+        assert_eq!(
+            query.install_search_dirs.first(),
+            Some(&service_bin),
+            "服务进程 PATH 必须排在查找序最前：{:?}",
+            query.install_search_dirs
+        );
+        assert!(
+            resolve_off_path(CLI, &query),
+            "服务进程 PATH 有、登录 shell PATH 没有 ⇒ off_path 必须为 true"
+        );
+
+        // ② 登录 shell PATH 也有（同一个目录）⇒ false。
+        let query = off_path_query_with(
+            &service_bin.display().to_string(),
+            Some(&service_bin.display().to_string()),
+            Some(&home),
+        );
+        assert!(
+            !resolve_off_path(CLI, &query),
+            "登录 shell PATH 也有 ⇒ off_path 必须为 false"
+        );
+
+        // ③ 两处都没有 ⇒ 未安装 ⇒ false。
+        let empty_bin = root.path().join("empty-bin");
+        let query = off_path_query_with(
+            &empty_bin.display().to_string(),
+            Some(&login_bin.display().to_string()),
+            Some(&home),
+        );
+        assert!(
+            !resolve_off_path(CLI, &query),
+            "两处都没有 ⇒ 未安装 ⇒ off_path 必须为 false"
+        );
     }
 
     // ---- GET install-targets ----
@@ -484,11 +542,13 @@
             claude["install_source"],
             json!("npm @anthropic-ai/claude-code")
         );
+        assert!(claude["latest_checked_at"].is_string());
         // 登录 shell PATH 快照不可用（测试线程未探测）⇒ off_path 不下结论（REQ-PCI-08）。
         assert_eq!(claude["off_path"], json!(false));
 
         let codex = by_target("codex");
         assert_eq!(codex["cli_available"], json!(false));
+        assert_eq!(codex["action"], json!("install"));
         // 未安装对象 off_path 恒为 false（REQ-PCI-08）。
         assert_eq!(codex["off_path"], json!(false));
 

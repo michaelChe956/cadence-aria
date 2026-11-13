@@ -193,24 +193,38 @@ pub fn expose_with_query(query: &ExposeQuery) -> Result<ExposeOutcome, ExposeErr
     })
 }
 
-/// 生产查询构建：overlay 登记目录（启动期已并入登录 shell PATH 上实际
-/// 存在的目录）+ 登录 shell PATH 快照 + 已知落点；候选顺序
-/// `~/.local/bin` → `~/bin` → 登录 shell PATH 上其它存在目录。
+/// 生产查询构建：**服务进程 PATH**（`effective_path` 合并后的真实生效序）
+/// → 登录 shell PATH 快照 → 已知落点；候选顺序 `~/.local/bin` → `~/bin`
+/// → 登录 shell PATH 上其它存在目录。
 fn production_query(command: &str) -> ExposeQuery {
-    let overlay_dirs = path_overlay::snapshot();
-    let login_path_dirs: Vec<PathBuf> = path_overlay::login_shell_path()
-        .as_deref()
-        .map(split_path_dirs)
-        .unwrap_or_default();
+    let service_path = path_overlay::effective_path(None);
+    let login_path = path_overlay::login_shell_path();
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
+    production_query_with(
+        command,
+        &service_path,
+        login_path.as_deref(),
+        home.as_deref(),
+    )
+}
 
-    // 已安装二进制搜索：overlay 登记（含启动期并入的登录 shell 目录）
-    // → 登录 shell PATH → 已知落点。
-    let mut install_search_dirs = overlay_dirs;
+/// [`production_query`] 的 seam（服务进程 PATH / 登录 shell PATH / HOME 注入）：
+/// 查找序口径只有一份，测试注入与生产走同一条路径。
+fn production_query_with(
+    command: &str,
+    service_path: &str,
+    login_path: Option<&str>,
+    home: Option<&Path>,
+) -> ExposeQuery {
+    let login_path_dirs: Vec<PathBuf> = login_path.map(split_path_dirs).unwrap_or_default();
+
+    // 已安装二进制搜索：**服务进程 PATH 在前**（服务自己跑得到的 CLI 必须
+    // 能暴露，不得误报「未安装」）→ 登录 shell PATH → 已知落点。
+    let mut install_search_dirs = split_path_dirs(service_path);
     extend_unique(&mut install_search_dirs, login_path_dirs.iter().cloned());
-    if let Some(home) = &home {
+    if let Some(home) = home {
         extend_unique(
             &mut install_search_dirs,
             std::iter::once(home.join(".npm-global/bin")),
@@ -225,7 +239,7 @@ fn production_query(command: &str) -> ExposeQuery {
     // PATH 顺序）；「确实在登录 shell PATH 上」由 expose_with_query 的
     // 准入条件①再验（home 候选不在 PATH 上时会被拒并说明）。
     let mut candidate_dirs = Vec::new();
-    if let Some(home) = &home {
+    if let Some(home) = home {
         candidate_dirs.push(home.join(".local/bin"));
         candidate_dirs.push(home.join("bin"));
     }
@@ -493,5 +507,38 @@ mod tests {
             "必须给出可行动提示：{}",
             error.message
         );
+    }
+
+    /// F8：服务进程 PATH 里有该二进制、登录 shell PATH 没有 ⇒ 生产查询的
+    /// 查找序必须以**服务进程 PATH** 打头，expose 能找到它（不得误报
+    /// 「未安装」）。
+    #[test]
+    fn expose_finds_binary_from_service_process_path() {
+        let root = tempdir().expect("tempdir");
+        let binary = install_binary(root.path(), "claude");
+        let install_dir = binary.parent().expect("install dir").to_path_buf();
+        let login_bin = make_dir(root.path(), "login-bin");
+        let home = root.path().join("home");
+
+        let query = production_query_with(
+            "claude",
+            &install_dir.display().to_string(),
+            Some(&login_bin.display().to_string()),
+            Some(&home),
+        );
+        assert_eq!(
+            query.install_search_dirs.first(),
+            Some(&install_dir),
+            "服务进程 PATH 必须排在已安装搜索序最前：{:?}",
+            query.install_search_dirs
+        );
+
+        let outcome = expose_with_query(&query).expect("服务进程 PATH 能找到 ⇒ 不得报「未安装」");
+        assert_eq!(
+            outcome.dir, login_bin,
+            "暴露目录仍是登录 shell PATH 上的候选"
+        );
+        assert_eq!(outcome.target, binary, "软链目标 = 服务进程 PATH 里的那份");
+        assert!(!outcome.already_exposed);
     }
 }

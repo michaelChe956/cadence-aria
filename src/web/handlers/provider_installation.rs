@@ -172,20 +172,31 @@ struct OffPathQuery {
     login_path_dirs: Vec<PathBuf>,
 }
 
-/// 生产查询构建：overlay 登记目录 → 登录 shell PATH 快照 → `~/.npm-global/bin`
-/// → `/usr/local/bin`（与 `expose` 的生产查询同口径；本面**只读**——不建链、
-/// 不做可写探测）。
+/// 生产查询构建：**服务进程 PATH**（`effective_path` 合并后的真实生效序）
+/// → 登录 shell PATH 快照 → `~/.npm-global/bin` → `/usr/local/bin`（与
+/// `expose` 的生产查询同口径；本面**只读**——不建链、不做可写探测）。
 fn off_path_query() -> OffPathQuery {
-    let login_path_dirs: Vec<PathBuf> = path_overlay::login_shell_path()
-        .as_deref()
-        .map(split_login_path_dirs)
-        .unwrap_or_default();
+    let service_path = path_overlay::effective_path(None);
+    let login_path = path_overlay::login_shell_path();
     let home = std::env::var_os("HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from);
-    let mut install_search_dirs = path_overlay::snapshot();
+    off_path_query_with(&service_path, login_path.as_deref(), home.as_deref())
+}
+
+/// [`off_path_query`] 的 seam（服务进程 PATH / 登录 shell PATH / HOME 注入）。
+fn off_path_query_with(
+    service_path: &str,
+    login_path: Option<&str>,
+    home: Option<&std::path::Path>,
+) -> OffPathQuery {
+    let login_path_dirs: Vec<PathBuf> = login_path.map(split_login_path_dirs).unwrap_or_default();
+    // 平台「能找到」的口径 = 服务进程 PATH（overlay 合并后的真实生效序）
+    // ∪ 登录 shell PATH ∪ 常见落点；缺了服务进程 PATH 就会把「服务自己能
+    // 跑、但用户终端 PATH 没有」的 CLI 误判成「未安装 ⇒ off_path=false」。
+    let mut install_search_dirs = split_login_path_dirs(service_path);
     extend_unique_dirs(&mut install_search_dirs, login_path_dirs.iter().cloned());
-    if let Some(home) = &home {
+    if let Some(home) = home {
         extend_unique_dirs(
             &mut install_search_dirs,
             std::iter::once(home.join(".npm-global/bin")),
