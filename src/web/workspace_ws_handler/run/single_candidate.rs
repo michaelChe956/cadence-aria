@@ -849,10 +849,15 @@ pub(crate) async fn run_single_candidate_author(
                          {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
                     ),
                 };
-                engine.persist_single_candidate_terminal_phase(
-                    crate::product::models::SingleCandidatePhase::Failed,
-                );
-                return Err(SingleCandidateProviderRunError::Message(message));
+                return Err(sc_failure_evidence::terminal_exit_error(
+                    engine,
+                    &lifecycle,
+                    &bound.chain,
+                    sc_failure_evidence::SC_TERMINAL_CLASS_COMPILE,
+                    Vec::new(),
+                    message,
+                )
+                .await);
             }
             };
         // O1（裁决二）：缺口机器指令不应用、不丢弃——渲染进 owner 可见
@@ -932,10 +937,15 @@ pub(crate) async fn run_single_candidate_author(
                      {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
                 ),
             };
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
-            );
-            return Err(SingleCandidateProviderRunError::Message(message));
+            return Err(sc_failure_evidence::terminal_exit_error(
+                engine,
+                &lifecycle,
+                &bound.chain,
+                sc_failure_evidence::SC_TERMINAL_CLASS_IR_PREFLIGHT,
+                Vec::new(),
+                message,
+            )
+            .await);
         }
         // Task 6：结构门类不再有独立槽位——拒收统一交回，重驱资格由同一
         // 教学窗口的 claim 结果决定（Denied ⇒ 停止该生成自动链）。
@@ -1013,10 +1023,15 @@ pub(crate) async fn run_single_candidate_author(
                          {SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE}"
                     ),
                 };
-                engine.persist_single_candidate_terminal_phase(
-                    crate::product::models::SingleCandidatePhase::Failed,
-                );
-                return Err(SingleCandidateProviderRunError::Message(message));
+                return Err(sc_failure_evidence::terminal_exit_error(
+                    engine,
+                    &lifecycle,
+                    &bound.chain,
+                    sc_failure_evidence::SC_TERMINAL_CLASS_STRUCTURE_GATE,
+                    Vec::new(),
+                    message,
+                )
+                .await);
             }
             // SG3a.1 拒收已按 typed 失败收口（durable + 尝试流水 + 重写/人工门）：
             // 引擎已在重写或人工门态，本次 provider run 正常结束，**不落 failed**。

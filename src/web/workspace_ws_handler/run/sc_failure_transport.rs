@@ -1,7 +1,8 @@
 //! SC 教学重驱 transport（P01 纯搬迁切片）。
 //!
 //! 实现自 `run/single_candidate.rs` 整体迁出：函数签名、函数体、归一化与
-//! 取消/AlreadyFinished/close/finalize 时序全部保持原样。归一化 helper 与
+//! 取消/close/finalize 时序保持原样；驱动中断与收口失败改由终局出口收口
+//! （Durable/Prefix 落真实终局，Unknown 先返回既有 CAS 等待）。归一化 helper 与
 //! 两个归一化事件发射器仍由 `single_candidate_compile_preflight` 原样提供，
 //! 本模块只调用不复制其实现。
 
@@ -353,8 +354,9 @@ pub(in crate::web::workspace_ws_handler::run) fn close_sc_split_round(
 }
 
 /// F2-B/3.6：教学重驱共用驱动——同 node 再驱一次 provider，返回归一化后的
-/// markdown source。驱动中断（会话失败/取消）时已按既有终态形态持久化 Failed
-/// 并返回 AlreadyFinished，与首轮驱动失败处理一致。
+/// markdown source。驱动中断/收口失败一律先落真实终局（Durable/Prefix），
+/// `Started` 未交付计入缺项；启动观察不可确认（Unknown）时不落 Failed，
+/// 先返回既有 CAS 等待（`NativeSupersededWaiting`）。
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::result_large_err)] // 上述枚举是运行收尾的唯一 typed 出口。
 pub(in crate::web::workspace_ws_handler::run) async fn drive_single_candidate_reredrive(
@@ -412,21 +414,47 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_single_candidate_re
                 Some(&bound.split),
                 &format!("provider session drive failed: {message}"),
             );
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
+            // 真实观察：attempt-key backfill 命中 ⇒ Started；其余 ⇒ Unknown
+            // （Unknown 不 finalize、不 persist Failed，改走既有 CAS 等待）。
+            let observations = super::sc_failure_evidence::teaching_launch_observations(
+                lifecycle,
+                &bound.chain.scope.session_id,
+                &bound.round,
+                sc_teaching_attempt,
             );
-            return Err(SingleCandidateProviderRunError::AlreadyFinished);
+            return Err(super::sc_failure_evidence::terminal_exit_error(
+                engine,
+                lifecycle,
+                &bound.chain,
+                super::sc_failure_evidence::SC_TERMINAL_CLASS_TEACHING_INTERRUPTED,
+                observations,
+                format!("SC 教学重驱失败：{message}"),
+            )
+            .await);
         }
     };
     // P08 严格收口：complete → 读回真实 raw → 逐字比较 → 才 finalize 纪元。
     // 失败原样上浮：不得把归档失败包装成成功交付，也不推进 launch 纪元。
-    let raw = close_sc_split_round(lifecycle, bound, reredrive_prompt, &reredrive_output)
-        .map_err(|failure| {
-            engine.persist_single_candidate_terminal_phase(
-                crate::product::models::SingleCandidatePhase::Failed,
+    let raw = match close_sc_split_round(lifecycle, bound, reredrive_prompt, &reredrive_output) {
+        Ok(raw) => raw,
+        Err(failure) => {
+            let observations = super::sc_failure_evidence::teaching_launch_observations(
+                lifecycle,
+                &bound.chain.scope.session_id,
+                &bound.round,
+                sc_teaching_attempt,
             );
-            SingleCandidateProviderRunError::Message(format!("{failure}"))
-        })?;
+            return Err(super::sc_failure_evidence::terminal_exit_error(
+                engine,
+                lifecycle,
+                &bound.chain,
+                super::sc_failure_evidence::SC_TERMINAL_CLASS_TEACHING_INTERRUPTED,
+                observations,
+                format!("SC 教学重驱收口失败：{failure}"),
+            )
+            .await);
+        }
+    };
     let reredrive_delivery = prepare_author_delivery_for_compile(&reredrive_output);
     emit_author_heading_normalized_event(
         engine,
