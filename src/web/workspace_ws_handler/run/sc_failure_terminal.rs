@@ -9,7 +9,6 @@
 //! 终局 fold。
 use super::evidence_store_failure;
 use super::super::sc_teaching_audit::sc_failure_step_error;
-use super::super::sc_teaching_source::{ScTeachingSourceInput, resolve_sc_teaching_source};
 use super::SingleCandidateProviderRunError;
 use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::lifecycle_store::sc_failure_evidence::{
@@ -21,8 +20,8 @@ use crate::product::work_item_plan_policy::ScTeachingAttemptRef;
 use crate::product::workspace_engine::WorkspaceEngine;
 use crate::product::workspace_engine::build_sc_failure_repair_package;
 use crate::web::workspace_ws_types::{
-    ScEvidenceRef, ScFailureChainIdentity, ScMissingEvidence, ScPackageCompleteness,
-    ScRoundIdentity, ScRoundLaunchState,
+    ScFailureChainIdentity, ScMissingEvidence, ScPackageCompleteness, ScRoundIdentity,
+    ScRoundLaunchState,
 };
 
 /// 终局类：三类机械失败 + 教学中断（与包 `terminal_class` 同一字面量）。
@@ -282,92 +281,19 @@ pub(in crate::web::workspace_ws_handler::run) fn teaching_launch_observations(
     vec![(round.round_id.clone(), state)]
 }
 
-/// 交包前的 source 真实核验：每个失败轮都用 P20 输入（该轮真实
-/// class/raw/source）读回失败源；读回失败**只**追加一条 `source` 缺项（同 bound
-/// round），由 builder 按 `(round, kind)` 把 `Available` 投影为 `Missing`——
-/// 不改 verified entries、不改证据字节摘要、不猜 launch 状态、不反填 raw。
-fn source_missing_evidence(
-    lifecycle: &LifecycleStore,
-    chain: &ScFailureChainIdentity,
-    read: &ScFailureEvidenceRead,
-) -> Vec<ScMissingEvidence> {
-    let mut missing = Vec::new();
-    for entry in &read.entries {
-        let ScFailureEvidenceEvent::FailureObserved {
-            round_id,
-            failure_class: Some(class),
-            raw,
-            source,
-            ..
-        } = &entry.event
-        else {
-            continue;
-        };
-        // 只有 `Available` 才需要核验；显式 `Missing` 是当时的真实事实。
-        if !matches!(source, ScEvidenceRef::Available { .. }) {
-            continue;
-        }
-        let Some(round) = read.entries.iter().find_map(|entry| match &entry.event {
-            ScFailureEvidenceEvent::RoundBound { round } if &round.round_id == round_id => {
-                Some(round)
-            }
-            _ => None,
-        }) else {
-            continue;
-        };
-        let input = ScTeachingSourceInput {
-            identity: round,
-            failure_class: class,
-            raw,
-            source,
-        };
-        if let Err(error) = resolve_sc_teaching_source(lifecycle, &chain.scope, &input) {
-            missing.push(ScMissingEvidence {
-                round_id: round_id.clone(),
-                kind: "source".to_string(),
-                code: error.code,
-                detail: error.detail,
-                locator: None,
-            });
-        }
-    }
-    missing
-}
-
-/// 从真实 durable `ChainTerminal` 行取同一终端事实（source 核验失败时改用
-/// `Local`）：launch 观察来自该实际事件，绝不按包自身推断。
-fn durable_terminal_facts(read: &ScFailureEvidenceRead) -> Option<ScLocalTerminal> {
-    read.entries.iter().rev().find_map(|entry| match &entry.event {
-        ScFailureEvidenceEvent::ChainTerminal {
-            last_failure_round_id,
-            last_physical_round_id,
-            terminal_class,
-            terminal_reason,
-            launch_observations,
-            completeness,
-            missing_evidence,
-        } => Some(ScLocalTerminal {
-            last_failure_round_id: last_failure_round_id.clone(),
-            last_physical_round_id: last_physical_round_id.clone(),
-            terminal_class: terminal_class.clone(),
-            terminal_reason: terminal_reason.clone(),
-            launch_observations: launch_observations.clone(),
-            completeness: completeness.clone(),
-            missing_evidence: missing_evidence.clone(),
-        }),
-        _ => None,
-    })
-}
-
-/// 终局已组（`Durable`/`Prefix`）后的唯一收口：真实 source 核验 → 真实组包 →
-/// 严格发布 → 失败相位 durable 回读确认 → 才回原始失败原文。
+/// 终局已组（`Durable`/`Prefix`）后的唯一收口：真实组包 → 严格发布 →
+/// 失败相位 durable 回读确认 → 才回原始失败原文。
 ///
 /// - `Unknown` 到不了这里（`finalize` 已先返回 typed Waiting，零 publish）；
-/// - 证据视图逐字使用：`Durable` 走 `ScTerminalInput::Durable`，`Prefix` 走
-///   `ScTerminalInput::Local`；source 读回失败才转 `Local` + `Incomplete`（真实
-///   日志里 `Available` 仍是当时事实，只是终局投影如实标缺）；
+/// - 证据视图**逐字使用**（不改 entries、不改 verified 字节）：`Durable` 走
+///   `ScTerminalInput::Durable`，`Prefix` 走 `ScTerminalInput::Local`；
 /// - 发布成功 ≠ candidate 成功：这里只闭合真实失败终局的发布与相位；
 /// - 发布失败文本带 store `code`/`detail`/`publication_incomplete`，不吞原错。
+///
+/// source 失效 ⇒ `Incomplete` 的降级**不在此处**：publisher 对健康日志内部必用
+/// `Durable` 重建并逐字段比对，调用方 `Local` 包会被 `sc_failure_package_mismatch`
+/// 拒绝；该投影必须由 builder（`(round, kind)` 投影 + 同契约重建）先落地，
+/// 否则这里只能保持真实 `Durable`，不得假造缺失。
 async fn terminal_outcome_error(
     engine: &mut WorkspaceEngine,
     lifecycle: &LifecycleStore,
@@ -375,34 +301,13 @@ async fn terminal_outcome_error(
     outcome: ScFailureTerminalOutcome,
     original_message: String,
 ) -> SingleCandidateProviderRunError {
-    let (read, prefix_local) = match outcome {
-        ScFailureTerminalOutcome::Durable(read) => (read, None),
-        ScFailureTerminalOutcome::Prefix { read, terminal } => (read, Some(terminal)),
-    };
-    let missing_sources = source_missing_evidence(lifecycle, chain, &read);
-    let local = match prefix_local {
-        // `Prefix` 已经带真实前缀终端事实：缺项追加即可。
-        Some(mut facts) => {
-            if !missing_sources.is_empty() {
-                facts.completeness = ScPackageCompleteness::Incomplete;
-                facts.missing_evidence.extend(missing_sources);
-            }
-            Some(facts)
+    let (read, terminal_input) = match &outcome {
+        ScFailureTerminalOutcome::Durable(read) => (read, ScTerminalInput::Durable),
+        ScFailureTerminalOutcome::Prefix { read, terminal } => {
+            (read, ScTerminalInput::Local(terminal))
         }
-        // 无 source 读回失败：保持 `Durable`（不无谓改写成 Local、不白克隆终局行）。
-        None if missing_sources.is_empty() => None,
-        // source 读回失败：用真实 durable 终局行转 `Local` + `Incomplete`。
-        None => durable_terminal_facts(&read).map(|mut facts| {
-            facts.completeness = ScPackageCompleteness::Incomplete;
-            facts.missing_evidence.extend(missing_sources);
-            facts
-        }),
     };
-    let terminal_input = match &local {
-        Some(facts) => ScTerminalInput::Local(facts),
-        None => ScTerminalInput::Durable,
-    };
-    let published = match build_sc_failure_repair_package(chain, &read, terminal_input) {
+    let published = match build_sc_failure_repair_package(chain, read, terminal_input) {
         Ok(package) => engine.publish_sc_failure_repair_package(package).await,
         Err(error) => Err(error),
     };
