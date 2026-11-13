@@ -565,5 +565,8 @@ fn is_safe_segment(value: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "sc_failure_publication_tests.rs"]
-mod tests;
+#[path = "sc_failure_publication_prefix_tests.rs"]
+mod prefix_tests;
+#[cfg(test)]
+#[path = "sc_failure_publication_retention_tests.rs"]
+mod retention_tests;
