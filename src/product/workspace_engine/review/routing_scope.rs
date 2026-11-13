@@ -815,23 +815,22 @@ impl WorkspaceEngine {
     /// 返回重复指纹数量；否则返回 None（首轮、指纹变化、advisory-only、无法读取
     /// 上一轮均不触发）。复用 policy 的 classify_finding 指纹口径，不触碰 policy CAS 主链。
     ///
-    /// REQ-WSC-12/14：两侧都先按 owner 已处置清单归一（`finding_key ∈ 清单` →
-    /// advisory）——durable 里存的是 provider 原始 verdict，不归一就会把 owner
-    /// 已裁定不归本 WI 的事实继续算进「同一问题再现」，重新卡住返修循环。
+    /// REQ-WSC-12/14 + B3 窄例外：两侧同用会话有效视图——owner 已处置清单归一
+    /// 后再套 SC 窄例外投影（与 live/历史入口同序同源）；durable 存 provider
+    /// 原始 verdict，不投影就会把已降级建议继续算进「同一问题再现」卡住返修。
     pub(super) fn single_candidate_consecutive_repeated_finding_count(
         &self,
         current: &ReviewVerdict,
     ) -> Option<usize> {
-        let excluded = self.session_human_disposition_keys();
-        let mut current_normalized = current.clone();
-        super::super::normalize_review_verdict_for_dispositions(&mut current_normalized, &excluded);
-        let current_set = non_advisory_finding_fingerprints(&current_normalized);
+        let mut current_view = self.apply_session_owner_dispositions(current.clone());
+        current_view = self.apply_sc_effective_review_verdict(current_view);
+        let current_set = non_advisory_finding_fingerprints(&current_view);
         if current_set.is_empty() {
             return None;
         }
         let active_node_id = self.active_node_id.as_ref()?;
         let lifecycle = self.lifecycle_store.as_ref()?;
-        let mut previous = self
+        let previous = self
             .timeline_nodes
             .iter()
             .rev()
@@ -849,8 +848,9 @@ impl WorkspaceEngine {
                 let persisted = detail.verdict?;
                 deserialize_historical_review_verdict(persisted).ok()
             })?;
-        super::super::normalize_review_verdict_for_dispositions(&mut previous, &excluded);
-        let previous_set = non_advisory_finding_fingerprints(&previous);
+        let previous_view = self.apply_session_owner_dispositions(previous);
+        let previous_view = self.apply_sc_effective_review_verdict(previous_view);
+        let previous_set = non_advisory_finding_fingerprints(&previous_view);
         (previous_set == current_set).then_some(current_set.len())
     }
 

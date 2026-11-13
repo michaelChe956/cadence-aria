@@ -8,9 +8,7 @@ mod policy_scope;
 pub(crate) mod routing;
 mod structured_output;
 
-pub(crate) use disposition_override::{
-    normalize_review_verdict_for_dispositions, normalize_review_verdict_with_store,
-};
+pub(crate) use disposition_override::normalize_review_verdict_with_store;
 pub(crate) use drive::ActivePlanReviewWindow;
 
 pub(crate) use feedback::{
