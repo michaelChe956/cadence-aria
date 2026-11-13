@@ -348,6 +348,55 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     ).toHaveTextContent("当前 0.44.0 → 最新 1.0.1");
   });
 
+  it("shows the off-path badge for an installed CLI missing from the login shell PATH (REQ-PCI-08)", async () => {
+    installFetchRouter(() => confirmedCodexProjection(), undefined, {
+      targets: [
+        {
+          target: "claude_code",
+          display_name: "Claude Code",
+          cli_available: true,
+          local_version: "1.0.0",
+          latest_version: "1.0.0",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @anthropic-ai/claude-code",
+          action: "none",
+          off_path: false,
+        },
+        {
+          target: "codex",
+          display_name: "Codex",
+          cli_available: true,
+          local_version: "1.0.0",
+          latest_version: "1.0.0",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @openai/codex",
+          action: "none",
+          off_path: true,
+        },
+      ],
+    });
+
+    renderProviderManagement();
+
+    // 已安装但不在登录 shell PATH ⇒ 行内提示徽标（行动入口走既有
+    // 「暴露到终端 PATH」按钮，不重复实现）。
+    const codexRow = await screen.findByTestId(
+      "provider-capability-provider-codex",
+    );
+    expect(
+      within(codexRow).getByTestId("provider-capability-off-path-codex"),
+    ).toHaveTextContent("已安装，但不在你的终端 PATH 上");
+    // 在登录 shell PATH 上（off_path=false）⇒ 无徽标。
+    const claudeRow = screen.getByTestId(
+      "provider-capability-provider-claude_code",
+    );
+    expect(
+      within(claudeRow).queryByTestId(
+        "provider-capability-off-path-claude_code",
+      ),
+    ).toBeNull();
+  });
+
   it("folds the batch job item state into the same row list", async () => {
     window.localStorage.setItem(BATCH_STORAGE_KEY, BATCH_JOB_ID);
     installFetchRouter(
