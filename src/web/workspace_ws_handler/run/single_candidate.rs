@@ -95,6 +95,11 @@ pub(super) mod sc_teaching_source;
 #[path = "sc_teaching_prompt.rs"]
 pub(super) mod sc_teaching_prompt;
 
+/// P25：SC 教学重驱 prompt 的审计面（全文不可变落盘 + 严格读回、缺提示的真实
+/// 记录）——三臂共用一份实现，模块本体声明在 single_candidate.rs 内。
+#[path = "sc_teaching_audit.rs"]
+pub(super) mod sc_teaching_audit;
+
 /// 公共 admission 预检「成员语言规则缺失」等待项的判别码（路 C，Task 4）：
 /// SC 消费链对成员文件的必需性判定收敛到实际消费点——该等待项在 SC 侧不
 /// 直接阻断（其他 active 成员缺失不阻断 SC），由消费点对已解析
