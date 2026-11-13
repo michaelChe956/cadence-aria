@@ -148,7 +148,8 @@ async fn publish_writes_version_ref_and_receipt_and_replay_reuses_same_version()
         .expect("published receipt barrier");
 
     // ArtifactUpdate 只在回执落盘之后广播，且携带发布版本。
-    let updates = artifact_updates(&drain(&mut event_rx));
+    let events = drain(&mut event_rx);
+    let updates = artifact_updates(&events);
     assert!(!updates.is_empty(), "回执落盘后必须广播 ArtifactUpdate");
     assert!(
         updates.iter().all(|(version, _)| *version == published.version),

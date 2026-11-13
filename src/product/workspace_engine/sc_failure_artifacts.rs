@@ -1001,7 +1001,7 @@ fn verify_sc_failure_package_bodies(
                         CODE_EVIDENCE_INVALID,
                         PUBLISH_STEP,
                         Some(round.identity.round_id.clone()),
-                        format!("结构 source 读回失败: {failure}"),
+                        format!("结构 source 读回失败: {failure:?}"),
                         true,
                     )
                 })?;
