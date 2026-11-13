@@ -665,6 +665,13 @@ pub(crate) async fn run_single_candidate_author(
     }
     .map_err(SingleCandidateProviderRunError::Message)?;
     let provider_input = engine.attach_tool_policy_audit(provider_input);
+    // P08a（计划 §2.4）：原轮 begin 前的失败链身份前置——durable 会话缺原
+    // 业务键（或 lifecycle 不可读）时，在真实 split begin／provider 启动之前
+    // 给出可见失败（不再空键启动、不由 ledger 形态猜身份）；返回值由 P08 首
+    // consumer 接管构造失败链作用域，此处不预分配日志/handle，也不留假绑定。
+    engine
+        .sc_author_business_key_for_failure_chain()
+        .map_err(SingleCandidateProviderRunError::Message)?;
     // Task 1b 段②生产臂:SC markdown author 单次 provider run 绑定
     // split run 身份;Markdown plan 产物按原文存档收口。
     let plan_split_run =

@@ -960,6 +960,25 @@ impl WorkspaceEngine {
         self.complete_review(ProviderCompletion::plain(readable, None), verdict)
             .await;
     }
+
+    /// P08a（计划 §2.4）：失败链身份锚——从持久 lifecycle 的**最新 durable**
+    /// 会话记录读原业务键，口径与 `current_sc_author_business_key` 完全同源
+    /// （不另立规则，也不看进程内镜像）。缺失即显式
+    /// `sc_failure_chain_identity_missing`：不空串兜底、不回退去猜「ledger
+    /// 最后键」。本方法只读——不分配授权、不追加 ledger、不建日志/handle；
+    /// 返回的业务键由 P08 首 consumer 用于构造失败链作用域。
+    pub(crate) fn sc_author_business_key_for_failure_chain(&self) -> Result<String, String> {
+        let lifecycle = self
+            .persistent_lifecycle()
+            .map_err(|error| format!("sc_failure_chain_identity_unavailable: {error:?}"))?;
+        let record = lifecycle
+            .get_workspace_session(&self.session.session_id)
+            .map_err(|error| format!("sc_failure_chain_identity_unavailable: {error}"))?;
+        current_sc_author_business_key(&record).ok_or_else(|| {
+            "sc_failure_chain_identity_missing: durable session has no original single candidate author business key"
+                .to_string()
+        })
+    }
 }
 
 /// Task 5（序 3，tasks 1.2 迁移面）：当前业务链最后一个**非教学** SC author
