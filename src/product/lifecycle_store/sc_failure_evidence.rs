@@ -4,13 +4,15 @@
 //! append-only 事实日志 `rounds.jsonl` + 只读教学提示正文
 //! `prompts/<ordinal>-<sha256>.txt`。
 //!
-//! 冻结接口（§2.3 前 6 个）：
+//! 冻结接口（§2.3 前 6 个；另加 P05 lookup）：
 //! 1. `sc_failure_chain_id` —— 长度前缀哈希的 chain 身份（无歧义拼接）；
 //! 2. `append_sc_failure_evidence` —— 逻辑槽位幂等追加；
 //! 3. `read_sc_failure_evidence` —— 带已验证前缀的读回；
 //! 4. `put_sc_teaching_prompt` —— 不可变教学提示正文；
 //! 5. `read_sc_teaching_prompt` —— 按 locator 校验摘要后读回；
-//! 6. `read_sc_split_output` —— 真实 split run 产物读回。
+//! 6. `read_sc_split_output` —— 真实 split run 产物读回；
+//! 7. `find_sc_failure_round` —— 按 scope + 业务键 + 原始节点 + 轮节点 + ordinal
+//!    找回已绑定的真实轮（只读；实现见 `sc_failure_evidence_lookup.rs`）。
 //!
 //! 严格性要点：
 //! - 逻辑槽键（`entry_key`）不含正文摘要：同槽异文是冲突，不得变成新键逃过冲突；
@@ -963,3 +965,5 @@ mod boundary_tests;
 #[cfg(test)]
 #[path = "tests/sc_failure_round_lookup.rs"]
 mod round_lookup_tests;
+#[path = "sc_failure_evidence_lookup.rs"]
+mod lookup;

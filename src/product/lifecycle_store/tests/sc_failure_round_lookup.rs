@@ -137,15 +137,15 @@ fn sc_failure_round_lookup_finds_bound_round_after_store_rebuild() {
     assert_eq!(found_round.provider, ProviderName::Codex);
 
     // 未命中：另一条链的轮、错 ordinal、未知业务键。
-    let misses: [(&str, &String, u32); 3] = [
-        (BUSINESS_KEY, &second_round.node_id, 1),
-        (BUSINESS_KEY, &first_round.node_id, 2),
-        ("business_key_missing_0003", &first_round.node_id, 1),
+    let misses: [(&str, &str, &String, u32); 3] = [
+        (BUSINESS_KEY, NODE_ID, &second_round.node_id, 1),
+        (BUSINESS_KEY, NODE_ID, &first_round.node_id, 2),
+        ("business_key_missing_0003", NODE_ID, &first_round.node_id, 1),
     ];
-    for (business_key, node_id, ordinal) in misses {
+    for (business_key, original_node_id, node_id, ordinal) in misses {
         assert!(
             reopened
-                .find_sc_failure_round(&scope, business_key, node_id, ordinal)
+                .find_sc_failure_round(&scope, business_key, original_node_id, node_id, ordinal)
                 .expect("lookup")
                 .is_none(),
             "未命中必须返回 None"
