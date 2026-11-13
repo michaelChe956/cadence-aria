@@ -13,7 +13,7 @@
 //
 // 本文件只提供 fixture 与只读助手；断言全部落在 publication 用例文件里。
 
-use super::build_sc_failure_repair_package;
+use super::sc_failure_artifact_builder::build_sc_failure_repair_package;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::lifecycle_store::sc_failure_evidence::{
     ScFailureEvidenceEvent, sc_failure_chain_id, sc_failure_split_locator,
