@@ -1,6 +1,6 @@
 # Tasks: fix-provider-install-no-effect-and-codegraph-json
 
-> **实施状态（2026-11-13）**：契约已获批并**已实施**；勾选状态按仓库实现证据记录（`[x]` = 已落地，`[ ]` = 待办）。未闭环项集中在第 8 包（后端「不在终端 PATH 上」显式状态字段）、第 11 包（归档同步）与第 12 包（容器 E2E 复验）。
+> **实施状态（2026-11-13）**：契约已获批并**已实施**；勾选状态按仓库实现证据记录（`[x]` = 已落地，`[ ]` = 待办）。未闭环项集中在第 11 包（归档同步）、第 12 包（容器 E2E 复验）与第 13 包（终审遗留跟踪，**本 change 不声称已实现**）。
 > 精确文件、命令、测试与提交步骤由 `writing-plans` 写入 `cadence/plans/`；本文件只记高层工作包，每个工作包映射到相关 requirement（编号逐字展开，一行一个）。
 > 依据：`cadence/plans/2026-11-13_计划文档_修复Provider安装无效果与聚合索引截断_v1.0.md`；owner 决策见 `.openspec.yaml` 的 `x-owner-decisions`。
 > 顺序约束：第 2 包必须早于第 5 包（装后登记依赖 overlay 就位）；第 4 包早于第 6 包（装后验证依赖前缀落点可信）；第 8 包依赖第 5 包的后端文案定稿；第 7 包依赖第 4 包与第 5 包（前缀落点与装后验证是更新语义的前提）；第 9 包依赖第 2 包与第 3 包（overlay 与登录 shell PATH 快照）；第 10 包与安装链无依赖。
@@ -33,17 +33,22 @@
 - [x] 2.4 四家 provider 的进程拉起 MUST 因共享命令层的合并而自动可见 overlay（**不改动四家 provider 目录**）
 - [x] 2.5 overlay 是进程级共享状态 ⇒ 相关用例持**全局锁**执行并在结束时清空，MUST NOT 污染并行的命令可见性断言用例
 
-## 3. 启动期登记用户工具目录
+## 3. 启动期登记用户工具目录与登录 shell 探测
 
 映射 requirement：
 
 - MODIFIED REQ-PCI-02
 - MODIFIED REQ-PCI-05
+- ADDED REQ-PCI-12
 
 - [x] 3.1 服务启动时把**实际存在**的用户工具目录登记进 overlay（常见版本管理器 / 包管理器的用户级 bin 目录 + 本仓自有落点：npm 全局前缀 bin、`NPM_PREFIX` bin、Kimi 安装目录 bin）
 - [x] 3.2 **只登记、不写盘、不创建目录**：不存在的目录 MUST NOT 被登记，MUST NOT 因此创建目录
 - [x] 3.3 启动路径上的前缀探针用**短超时**（不得引入与安装作业同量级的阻塞）
 - [x] 3.4 登记时机 MUST 在「监听就绪之后、首次 provider 健康刷新之前」；监听失败 MUST 保持零副作用
+- [x] 3.5 启动期探测**交互式登录 shell**（登录 + 交互、`kill_on_drop` 兜底回收）取回 agent 专属环境变量，最少覆盖 `PI_CODING_AGENT_DIR` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR`（收敛清单集中一处、可追加）；探测 MUST 有 **2s 硬上限**且在**后台异步**执行，MUST NOT 阻塞启动
+- [x] 3.6 探测值 MUST 只**补进平台发起的子进程 env**，且严格遵守优先级：调用方显式覆盖层 > 平台进程自身 env > 探测值；MUST NOT 用探测值覆盖用户显式指定的值；MUST NOT 生成空值变量
+- [x] 3.7 注入 MUST 在**两个命令汇聚点**（进程拉起通道 + 同步捕获通道，含「调用方未提供环境覆盖」那条路径）都生效；MUST NOT 只在其中一条生效；MUST NOT 因此改变 REQ-PCI-02 探针口径、REQ-PCI-08 的「不在终端 PATH 上」判定或 REQ-PCI-11 的暴露动作语义
+- [x] 3.8 探测失败 / 超时 / 不可用（未设 `SHELL` / shell 不可执行 / 输出不含标记行）MUST 是空操作：不注入、不阻塞，安装、装后探测、终端 PATH 判定与索引验收 SHALL 照常进行
 
 实施注记：启动期登记清单覆盖 `~/.local/bin` / `~/.npm-global/bin` / `~/.npmrc` 的 `prefix=` bin / nvm 默认 node bin / mise node installs 等**实际存在**的目录；`~/.kimi-code/bin` 不在启动清单内，由第 5 包的**装后登记**路径覆盖（Kimi 走官方脚本，安装时机才确定目录）。
 
@@ -111,8 +116,8 @@
 
 - [x] 8.1 安装提示句**原样渲染**（整句逐字呈现、无二次包裹）；后端未给出提示时 MUST NOT 渲染提示节点
 - [x] 8.2 前端类型注释与后端文案语义对齐（提示是完整句子，不是「提示目录」）
-- [ ] 8.3 安装目标视图增加「不在终端 PATH 上」的**显式状态**：平台能找到该 CLI、而其 bin 目录不在用户终端 PATH 上时为真；用户终端 PATH 取不到时 MUST NOT 判为真（**待实施**：后端安装目标视图尚无该字段；登录 shell PATH 快照已就位）
-- [ ] 8.4 该状态在界面上**显式呈现**（MUST NOT 仅给一句自由文本让用户自行推断；MUST NOT 呈现成「未安装」）—— 随 8.3 一并落地
+- [x] 8.3 安装目标视图增加「不在终端 PATH 上」的**显式状态**：平台能找到该 CLI、而其 bin 目录不在用户终端 PATH 上时为真；用户终端 PATH 取不到时 MUST NOT 判为真（**已实施**：`src/web/handlers/provider_installation.rs` 的 `off_path` DTO 字段 + `resolve_off_path`（登录 shell PATH 快照 ∪ 平台登记目录），提交 `d7d759c7`；红测试 `9d0abe95`）
+- [x] 8.4 该状态在界面上**显式呈现**（MUST NOT 仅给一句自由文本让用户自行推断；MUST NOT 呈现成「未安装」）（**已实施**：`web/src/api/types/provider.ts` 的 `off_path` + `web/src/components/lifecycle/ProviderCapabilityCard.tsx` 的「已安装，但不在你的终端 PATH 上」徽标，提交 `621d3269`；红测试 `9edc521f`）
 - [x] 8.5 平台 MUST NOT 自动改写用户 shell profile、MUST NOT 自动创建 symlink；处置内容以可复制形式给出；该状态 MUST NOT 阻断安装、探测或使用（用户**显式触发**的暴露动作见第 9 包与 REQ-PCI-11）
 
 ## 9. 「暴露到终端 PATH」显式动作
@@ -167,7 +172,7 @@
 | 装完已核验且版本落后 | 「更新」+ 本地 / 最新版本 | 「安装」 |
 | 装完已核验且版本最新 | 不显示安装 / 更新 | 无意义重装 |
 | 安装失败 | 失败分类、诊断、手动命令与可重试入口 | 伪报成功 / 吞掉错误 |
-| CLI 在平台登记目录内但不在用户终端 PATH 上 | 显式「不在终端 PATH 上」状态（待 8.3 落地）+ 可复制处置内容 | 呈现成「未安装」；自动改用户 shell |
+| CLI 在平台登记目录内但不在用户终端 PATH 上 | 显式「不在终端 PATH 上」徽标（`off_path` 已实施）+ 可复制处置内容 / 「暴露到终端 PATH」入口 | 呈现成「未安装」；自动改用户 shell |
 | 已安装且用户点「暴露到终端 PATH」 | 暴露成功提示（落在哪个目录、新终端可运行哪个命令） | 自动改 `.bashrc` / `.zshrc`；自动创建软链 |
 | 暴露失败（无合格候选目录 / 重验失败） | 如实失败原因 + 各候选目录的不合格原因 | 伪报暴露成功；覆盖用户同名文件 |
 | codegraph 可用 | 入口刷新可用性 | 因截断码显示「安装」（截断不是工具缺失） |
@@ -205,12 +210,14 @@
 - ADDED REQ-PCI-09
 - ADDED REQ-PCI-10
 - ADDED REQ-PCI-11
+- ADDED REQ-PCI-12
 
-- [ ] 11.1 本 change 的 `proposal.md` / `design.md` / 两份 delta / `tasks.md` 四件齐备且互相对齐（requirement 编号逐字展开、无缩写）
-- [ ] 11.2 delta 为 **MODIFIED**（REQ-PCI-02、REQ-PCI-03、REQ-PCI-05、REQ-IND-01、REQ-IND-04、REQ-IND-05）+ **ADDED**（REQ-PCI-08、REQ-PCI-09、REQ-PCI-10、REQ-PCI-11）；既有 requirement 的正文与既有场景 MUST 逐字保留，只做增补 —— **例外（按实施口径更新）**：REQ-IND-01 的成员覆盖验收条款（改为库 API 路径）、REQ-PCI-03 的安装参数形态（补 `--allow-scripts=<pkg>` 与 `--include=optional` 重试）、REQ-PCI-08 的 symlink 禁止条款（收敛为「不自动」，与 REQ-PCI-11 的显式动作对齐）、REQ-PCI-09 的前缀反推口径（改为「从已安装包真实路径反推」）
-- [ ] 11.3 MUST NOT 改主规格（`openspec/specs/**`）—— 归档时由 delta 自动同步
+- [x] 11.1 本 change 的 `proposal.md` / `design.md` / 两份 delta / `tasks.md` 四件齐备且互相对齐（requirement 编号逐字展开、无缩写）（**已对齐**：2026-11-13 补 REQ-PCI-12 并清理与实现冲突的旧非目标/设计文本后，`openspec validate ... --strict` 通过）
+- [x] 11.2 delta 为 **MODIFIED**（REQ-PCI-02、REQ-PCI-03、REQ-PCI-05、REQ-IND-01、REQ-IND-04、REQ-IND-05）+ **ADDED**（REQ-PCI-08、REQ-PCI-09、REQ-PCI-10、REQ-PCI-11、REQ-PCI-12）；既有 requirement 的正文与既有场景 MUST 逐字保留，只做增补 —— **例外（按实施口径更新）**：REQ-IND-01 的成员覆盖验收条款（改为库 API 路径）、REQ-PCI-03 的安装参数形态（补 `--allow-scripts=<pkg>` 与 `--include=optional` 重试）、REQ-PCI-08 的 symlink 禁止条款（收敛为「不自动」，与 REQ-PCI-11 的显式动作对齐）、REQ-PCI-09 的前缀反推口径（改为「从已安装包真实路径反推」）
+- [x] 11.3 MUST NOT 改主规格（`openspec/specs/**`）—— 归档时由 delta 自动同步（**已核对**：本次同步只改本 change 目录，`openspec/specs/**` 零改动）
 - [ ] 11.4 归档同步时对齐既有漂移：主规格 REQ-IND-01 的「exact version 钉定 v1.5.0」与实现现状（`>=1.6.0, <2.0.0`）—— **版本门本轮不动**，对齐由双审处理
-- [ ] 11.5 复核四家 provider 目录**零改动**（`git diff --stat` 复核），并把本轮的口径变更（overlay、可写性、装后验证、专用码、库 API 覆盖验收、暴露动作）记入变更说明
+- [x] 11.5 复核四家 provider 目录**零改动**（`git diff --stat` 复核）—— **已核对**：`git diff --stat c2929b02..HEAD -- 'src/cross_cutting/*_provider/**'` 空输出
+- [ ] 11.6 把本轮的口径变更（overlay、可写性、装后验证、专用码、库 API 覆盖验收、暴露动作、登录 shell agent 专属环境变量注入）记入变更说明（CHANGELOG / 发布说明），由该文件所有者执行
 
 ## 12. 容器 E2E 复验与清理
 
@@ -233,3 +240,29 @@
 - [ ] 12.4 截断路径的降级判定由单元级覆盖（构造超配额负载）⇒ 容器侧只断言「原因码是专用码、索引 degraded、保留 last-known-good、不伪造 active」
 - [ ] 12.5 可见性证据 MUST 来自平台自身的探测结果；MUST NOT 用手工改 PATH 的方式冒充平台可见性
 - [ ] 12.6 清理本轮容器 / 镜像 / 临时资产（只删本次产物）；宿主 dotfiles 零改动
+
+## 13. 终审遗留跟踪（**本 change 不声称已实现**）
+
+> 来源：终审（k3-reviewer，审阅快照 `44a1b4c4`）判定的必修项。本小节**只登记跟踪**：条目均未在本 change 声称落地，实施与验证由后续工作包承接；勾选状态保持 `[ ]` 直到有实现证据。
+
+映射 requirement：
+
+- MODIFIED REQ-PCI-02
+- MODIFIED REQ-PCI-03
+- MODIFIED REQ-PCI-05
+- MODIFIED REQ-PCI-08
+- MODIFIED REQ-PCI-09
+- MODIFIED REQ-PCI-10
+- MODIFIED REQ-PCI-11
+- MODIFIED REQ-IND-01
+
+- [ ] 13.1 PATH overlay 合并顺序 MUST 为 **Prepend → base → Append**（装完目录抢在 base 之前、启动期发现目录排在 base 之后）；当前 `src/cross_cutting/path_overlay.rs` 的 `effective_path` 为 Prepend → Append → base ⇒ 待改（契约归属 REQ-PCI-02 / REQ-PCI-05）
+- [ ] 13.2 更新落点的两个独立触发 MUST 都成立（契约归属 REQ-PCI-09）：①「PATH 上可见且真实可写的前缀」须**优先于**「已离 PATH 的旧包所在前缀」；② 原始 npm 全局前缀**不得**先以「bin ∈ PATH」过滤再查已装位置 —— 过滤与已装位置查找是两个独立触发，不得互相短路
+- [ ] 13.3 装后验证 MUST 在**首次安装与 `--include=optional` 重试两条路径**都消费「真实命令」结果（`real_command_ok`）：真实命令失败 MUST NOT 判作业 `completed`；重试成功后 MUST 重算安装提示（契约归属 REQ-PCI-03 / REQ-PCI-05）
+- [ ] 13.4 codegraph 真实命令验证 MUST 不依赖「已建索引」且确实加载 bundle；MUST 移除 `src/product/provider_installation/runner.rs:353` 当前仍传入的元数据抑制旗标（与 REQ-IND-01 已裁决**只带 `--json`** 的同类问题）—— 与 REQ-PCI-05 的「真实命令」口径及 REQ-IND-01 的调用边界一致
+- [ ] 13.5 bundled node 解析 MUST 覆盖「当前平台 / 版本下」的 nested、hoisted 与自愈缓存三种布局（当前 `codegraph_coverage.rs` 的 `bundled_node_candidates` 只覆盖 `<sdk 包根>/node_modules/@colbymchenry/codegraph-*/node` 一种）（契约归属 REQ-IND-01）
+- [ ] 13.6 能力卡父级 MUST NOT 因「已安装但未核验」而卸载「暴露到终端 PATH」入口（否则 UI 主路径不可达）（契约归属 REQ-PCI-11）
+- [ ] 13.7 `off_path` 判定与 expose 的 CLI 发现范围 MUST 为**宿主 PATH ∪ 平台登记目录（overlay）**，MUST NOT 漏掉「仅宿主 PATH 可见」的 CLI（契约归属 REQ-PCI-08 / REQ-PCI-11）
+- [ ] 13.8 Kimi Code 的更新前版本快照当前恒为 `None` ⇒ 版本未变检测漏 Kimi；MUST 同样取快照并比对、未变时如实报告「命令仍是旧版」（契约归属 REQ-PCI-10）
+- [ ] 13.9 前端观察器 P2：dirty 补跑的等待期内再次收到普通唤醒时，MUST NOT 把 1s 最短间隔改写成 250ms —— **契约归属待 owner 裁决**（该行为属前端观察器目录轮询，不在本 change 的两个 capability 内；本 change 不改其能力边界）
+- [ ] 13.10 终审「补充建议」（非必修，登记备查）：① Node helper 应以 `CodeGraph.open(root, { readOnly: true })` 打开索引；② 测试用线程级存储与生产进程级全局的跨线程差异需有独立的生产路径测试；③ `off_path` 的「PATH 分支」夹具未实际建出 CLI，致否定断言无效；④ 被删除的两条既有 handler 断言应恢复

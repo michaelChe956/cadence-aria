@@ -1,6 +1,6 @@
 # 设计：修复「页面点安装没有效果」与「聚合索引 codegraph 截断报错」
 
-> 依据：`cadence/plans/2026-11-13_计划文档_修复Provider安装无效果与聚合索引截断_v1.0.md`（`c2929b02` / `d06c1d16` / `8b9012c9`）；owner 决策见 `.openspec.yaml` 的 `x-owner-decisions`（D1/D2/D4 + magpie 澄清）。
+> 依据：`cadence/plans/2026-11-13_计划文档_修复Provider安装无效果与聚合索引截断_v1.0.md`（`c2929b02` / `d06c1d16` / `8b9012c9`）；owner 决策见 `.openspec.yaml` 的 `x-owner-decisions`（D1/D2/D4 + magpie 澄清 + 更新语义 + 库 API 覆盖验收 + 暴露终端 PATH + agent 专属环境变量注入）。
 > 本文件是 OpenSpec 层的**架构边界与权衡记录**：决策 / 理由 / 代价。契约文本见 `specs/**/spec.md`，工作包见 `tasks.md`。
 > **实施状态（2026-11-13）**：契约已获批并**已实施**；本文件记录的是**已落地的决策与取舍**，各决策的「实现落点」给出仓库内位置（未闭环项见 `tasks.md` 的实施状态对照）。
 
@@ -28,6 +28,7 @@
 | `provider-cli-installation` | ADDED REQ-PCI-09 | **新增**：更新落点必须与被更新对象当前所在的前缀一致（已在 PATH 上 ⇒ 装回同一前缀；已安装但不在 PATH 上 ⇒ 从已安装包真实路径反推 npm 前缀，不得改装到别的前缀） |
 | `provider-cli-installation` | ADDED REQ-PCI-10 | **新增**：更新后版本未变须明确报告「命令仍是旧版」（不得静默成功）；Kimi 更新沿用官方脚本原地替换并经装后验证 |
 | `provider-cli-installation` | ADDED REQ-PCI-11 | **新增**：**用户显式触发**的「暴露到终端 PATH」动作 —— 不改 shell 配置文件，只在「已存在 + 真实可写 + 确实在终端 PATH 上」的目录里建单个软链，失败如实报告 |
+| `provider-cli-installation` | ADDED REQ-PCI-12 | **新增**：把启动期从**交互式登录 shell**探测到的 agent 专属环境变量（`PI_CODING_AGENT_DIR` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR`）**补进平台子进程 env** —— 调用方显式覆盖层与平台进程 env 优先，缺失才补；2s 硬上限、失败不阻塞；两处命令汇聚点都生效（决策 13） |
 | `logical-codebase-aggregate-index` | MODIFIED REQ-IND-01 | 专用抓取配额（64 MiB）+ 专用截断码 `codegraph_files_output_truncated`；**成员覆盖验收改走 codegraph 库 API**（逐成员目录级查询，不依赖全量文件清单）；既有正文与既有场景逐字保留（成员覆盖条款按实施口径更新），只做增补 |
 | `logical-codebase-aggregate-index` | MODIFIED REQ-IND-01（场景） | 新增「库 API 逐成员查询 / 目录边界 / 排除性查询不动 / 回退留痕 / 回退非常规 / 健康闸只告警 / 回退路径仍受专用配额与专用截断码」相关场景 |
 | `logical-codebase-aggregate-index` | MODIFIED REQ-IND-04 | 截断属构建失败路径 ⇒ 保留 last-known-good 并标 degraded、不伪造 active；既有正文与既有场景逐字保留，只补两条场景 |
@@ -66,6 +67,8 @@
 | `src/cross_cutting/cli_adapter.rs` 的 `run_command_capture_with_stream` | provider 会话执行路径（同步捕获输出） |
 
 **关键细节**：`cli_adapter` 内部的命令构造在 `environment = None` 时**继承宿主环境**（`env_clear` 已删）⇒ 合并**不能**只写在 `Some(env)` 分支里，否则该分支之外的命令永远看不到 overlay。
+
+同一对汇聚点也是**agent 专属环境变量注入**的唯一落点（决策 13）：两条通道都必须补注入，缺一条就会出现「平台探测读到了用户配置、真正拉起 provider 时却读默认位置」的分裂口径。
 
 **明确不覆盖**：git / ast-grep 工具的裸 `Command::new`（`src/cross_cutting/git_command.rs`、`src/cross_cutting/ast_grep_tool.rs`）—— 与 provider CLI 安装无关，不扩大范围。
 
@@ -172,7 +175,7 @@
 
 **决定**：
 1. `path_hint` **原样渲染**（整句逐字呈现，不二次包裹）；后端文案缺失时不渲染该节点；前端类型注释随包 2 的后端文案一并更正（`path_hint` 是完整句子，不是「提示目录」）。
-2. 新增**显式状态**：安装目标视图增加 `off_path` 标志 —— 「平台能找到该 CLI，但它的 bin 目录不在登录 shell PATH 上」时为真，界面显式呈现该状态。（**实施状态**：后端安装目标视图尚未落地该字段，待办见 `tasks.md` 实施状态对照；用户终端 PATH 快照与「暴露到终端 PATH」动作已就位。）
+2. 新增**显式状态**：安装目标视图增加 `off_path` 标志 —— 「平台能找到该 CLI，但它的 bin 目录不在登录 shell PATH 上」时为真，界面显式呈现该状态。（**实施状态：已落地** —— 后端 `src/web/handlers/provider_installation.rs` 的 `off_path` DTO 字段与 `resolve_off_path`（登录 shell PATH 快照 ∪ 平台登记目录；提交 `d7d759c7`），前端 `web/src/api/types/provider.ts` + `web/src/components/lifecycle/ProviderCapabilityCard.tsx` 的「已安装，但不在你的终端 PATH 上」徽标（提交 `621d3269`）。）
 3. **本轮只加状态与文案，不自动改用户 shell profile**（不自动创建 symlink、不写 `.bashrc` / `.zshrc`）；用户**显式触发**的「暴露到终端 PATH」动作见决策 12。
 
 **理由**：显式状态让「平台可用 / 终端不可见」这件事在产品里说清楚，替代「一句提示」；自动改 shell profile 属于越界副作用（且用户未必想要）。
@@ -263,6 +266,40 @@
 | `src/web/handlers/provider_installation.rs` | `POST /api/providers/{target}/expose` 端点与错误码 |
 | `web/src/api/provider-install.ts` + `web/src/components/lifecycle/ProviderInstallActionButton.tsx` | 前端按钮与结果 / 失败文案呈现 |
 
+## 决策 13：登录 shell 探测到的 agent 专属环境变量**补进子进程 env**（2s 上限、缺失才补）
+
+**背景**：平台进程不是登录 shell ⇒ 用户写在 `.zshrc` / `.profile` 里的 `PI_CODING_AGENT_DIR`（Pi 的 `models.json` 就靠它落在 `~/.pi/agent`）、`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 对平台**不可见**。平台拉起 `pi` / `codex` / `claude` 时这些变量缺失 ⇒ 子进程去读**默认配置位置** ⇒ 用户看到的是「模型配了却不生效 / 找不到配置」。owner 2026-11-13 裁决「本轮做」（方案 §五 2.12），撤回此前「不在本轮范围」的界定。
+
+**决定**（契约见 REQ-PCI-12）：
+
+1. **探测方式**：启动期用用户的 `SHELL` 起**交互式 + 登录** shell（`-i -l -c`，`stdin` 置空、`stderr` 丢弃），以唯一标记行 `__aria_shell_probe__` 打印 `PATH` 与收敛清单里的 agent 专属变量；rc 文件的 banner 污染由「只认标记行」+ 空值过滤兜底。变量清单集中在一处常量（当前 `PI_CODING_AGENT_DIR` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR`），扩展只需追加。
+2. **2s 硬上限 + 不阻塞启动**：探测与 PATH 快照共用同一次 `tokio::spawn` 异步任务，`tokio::time::timeout` 2s 硬上限 + `kill_on_drop` 兜底回收子进程；超时/失败 ⇒ 空结果，启动流程一次都不等待。**同一次探测同时服务两个用途**：终端 PATH 快照（REQ-PCI-08 / REQ-PCI-11 的前提）与 agent 变量注入 —— 不为注入多起一个 shell。
+3. **合并优先级（缺失才补）**：① 调用方显式传入的环境覆盖层已有该变量 ⇒ 用调用方值；② 否则平台进程自身 env 已有 ⇒ 用平台已有值；③ 都没才补探测值。平台 MUST NOT 用探测值覆盖用户显式指定的值；探测到空值的变量**直接丢弃**（MUST NOT 生成空值 env 条目）。
+4. **落点 = 决策 2 的两个命令汇聚点**：进程拉起通道（`process_manager.rs` 的 `spawn_with_environment`）与同步捕获通道（`cli_adapter.rs` 的 `run_command_capture_with_stream`）都要补注入；缺一条就会出现「探测读到了用户配置、真正跑 provider 时读默认位置」的分裂口径。
+5. **失败不阻塞**：探测超时 / 失败 / 不可用（未设 `SHELL`、shell 不可执行、输出不含标记行）⇒ 注入是**空操作**；安装、装后探测、终端 PATH 判定与索引验收 MUST NOT 因它失败。
+
+**与 REQ-PCI-08 / REQ-PCI-11 的关系（两者独立，不互相替代）**：
+
+| 能力 | 解决什么 | 作用对象 |
+|---|---|---|
+| REQ-PCI-12（本决策） | provider **读到用户的配置**（配置目录该类环境变量） | 平台发起的**子进程 env** |
+| REQ-PCI-08 / REQ-PCI-11 | 用户终端里**能不能敲出命令**（PATH 可见性与单个软链） | 用户的**登录 shell**（人） |
+| 决策 1 / 2（overlay） | 平台自己**找不找得到**新装的 CLI | 平台子进程的 `PATH` |
+
+三者互不蕴含：注入 agent 变量不会让用户在终端敲出 `claude`，暴露终端 PATH 也不会让 provider 读到配置目录变量。因此 REQ-PCI-12 的注入 MUST NOT 改变 REQ-PCI-08 的判定，也 MUST NOT 触发 REQ-PCI-11 的动作。
+
+**理由**：只补「平台缺失的」变量，等价于把用户 shell 里的配置意图**透传**给 provider，同时不夺走平台/调用方更权威的取值（安装作业自己设的、测试注入的覆盖层都得赢）。
+
+**代价**：启动多一次 shell 启动开销（已异步 + 2s 上限，不落在启动关键路径）；rc 文件若有副作用（打印、慢命令）会拖慢探测 —— 超时兜底保证不会拖住启动。
+
+**实现落点**：
+
+| 位置 | 内容 |
+|---|---|
+| `src/cross_cutting/path_overlay.rs` | `SHELL_PROBE_VARS` 变量清单 + `probe_login_shell_env` 探测 + `parse_shell_probe_stdout` 解析 + `shell_env_overrides` 合并优先级 + `register_startup_overlay` 异步启动 |
+| `src/cross_cutting/process_manager.rs` | `spawn_with_environment` 内合并注入（进程拉起通道） |
+| `src/cross_cutting/cli_adapter.rs` | `run_command_capture_with_stream` 内合并注入（同步捕获通道，含 `environment = None` 的继承路径） |
+
 ## 权衡汇总
 
 | 备选 | 结论 | 理由 |
@@ -279,6 +316,7 @@
 | 库 API 不可用：直接失败 vs 回退 CLI 清单 | **回退 CLI 清单 + 可审计痕迹** | 小仓照常工作；大仓仍撞 64 MiB 截断（专用码如实报告，不伪装成协议不符） |
 | 索引健康异常：阻断激活 vs 只告警 | **只告警** | 保持既有「不因健康问题阻断」语义；未知 state 值宁可多一条可审计告警 |
 | magpie 的「不代跑安装」 | **不采纳**（owner 澄清） | 目标不变：产品内一键安装必须真的装上并能用 |
+| agent 专属环境变量：本轮不注入 vs 补进子进程 | **补进子进程**（决策 13，owner 2026-11-13 裁决「本轮做」） | 平台不是登录 shell ⇒ 用户配置目录变量天然不可见，provider 会读默认位置；「缺失才补、2s 上限、失败不阻塞」既透传意图又不夺走调用方/平台更权威的取值 |
 
 ## 明确不改的部分
 
@@ -290,4 +328,4 @@
 | 致命 / 降级分界（`codegraph_missing` / `codegraph_version_mismatch`） | 不动；截断码不进入致命匹配集 |
 | git / ast-grep 的裸命令通道 | 与 provider CLI 安装无关，不扩大范围 |
 | 用户 shell profile | 本轮不自动改；用户**显式触发**的暴露动作只建单个软链（决策 12），仍不写 `.bashrc` / `.zshrc` |
-| agent 专属环境变量注入 | 另立议题 |
+| agent 专属环境变量**清单**（收敛三项之外的变量） | 注入本身**已在本轮范围并已实施**（决策 13 / REQ-PCI-12）；本轮只收敛 `PI_CODING_AGENT_DIR` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR` 三项，新增变量须显式追加清单，不擅自扩大捕获面 |

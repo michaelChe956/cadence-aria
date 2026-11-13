@@ -281,3 +281,47 @@ Kimi Code 的更新 SHALL 沿用官方安装脚本的**原地替换**通道（�
 - **WHEN** 用户对未安装的对象触发暴露动作
 - **THEN** 平台 MUST 明确拒绝并说明先安装再暴露；MUST NOT 创建任何软链
 
+### Requirement: 登录 shell 探测到的 agent 专属环境变量补进子进程（REQ-PCI-12）
+
+平台 SHALL 在启动期以**交互式登录 shell** 探测 agent 专属环境变量（最少覆盖 `PI_CODING_AGENT_DIR`、`CODEX_HOME`、`CLAUDE_CONFIG_DIR`），并只在**缺失时**把它们补进平台发起的子进程 env：调用方显式覆盖层与平台进程自身 env 优先，MUST NOT 用探测值覆盖它们。探测 SHALL 有 **2s 硬上限**且在后台异步执行，超时 / 失败 / 不可用 MUST 不阻塞启动，MUST NOT 让安装、装后探测、终端 PATH 判定或索引验收失败。注入 SHALL 在两条命令汇聚点都生效，且只影响子进程环境。
+
+#### Scenario: 启动期探测不阻塞启动
+
+- **WHEN** 平台启动并登记启动期 PATH overlay
+- **THEN** 登录 shell 环境探测 SHALL 在后台异步执行，超过 2s 硬上限即放弃并使用空结果；MUST NOT 阻塞启动流程，也 MUST NOT 让登记调用等待探测完成
+
+#### Scenario: 不假定用户 shell 变量对平台可见
+
+- **WHEN** 平台进程不是登录 shell，而用户在 shell 配置里设定了 `PI_CODING_AGENT_DIR` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR`
+- **THEN** 平台 MUST NOT 假定这些变量可见；被拉起的 `pi` / `codex` / `claude` 若拿不到这些变量会去读默认配置位置 ⇒ 平台 SHALL 按本 requirement 的优先级补齐，MUST NOT 杜撰或猜测配置目录
+
+#### Scenario: 缺失的 agent 变量被补进子进程
+
+- **WHEN** 平台即将拉起子进程，调用方覆盖层与平台进程 env 都不含 `PI_CODING_AGENT_DIR`，而登录 shell 探测到了该变量
+- **THEN** 该子进程 env SHALL 含 `PI_CODING_AGENT_DIR` 及其探测值
+
+#### Scenario: 平台已有值优先
+
+- **WHEN** 平台进程自身 env 已含 `CODEX_HOME`，登录 shell 探测也返回了该变量
+- **THEN** 子进程 SHALL 使用平台进程已有的值；MUST NOT 用探测值覆盖它
+
+#### Scenario: 调用方显式覆盖优先
+
+- **WHEN** 调用方为某次子进程显式传入 `CLAUDE_CONFIG_DIR` 覆盖值
+- **THEN** 子进程 SHALL 使用调用方给出的值；MUST NOT 用探测值覆盖它
+
+#### Scenario: 探测失败不阻塞任何流程
+
+- **WHEN** 登录 shell 探测超时、失败或不可用（未设 `SHELL` / shell 不可执行 / 输出不含标记行）
+- **THEN** 平台 MUST NOT 注入任何 agent 专属变量、MUST NOT 生成空值变量；安装、装后探测、终端 PATH 判定与索引验收 SHALL 照常进行，MUST NOT 因探测失败而失败；MUST NOT 阻塞启动
+
+#### Scenario: 两条命令汇聚点都生效
+
+- **WHEN** 命令分别经进程拉起通道与同步捕获通道发起
+- **THEN** 两条通道的子进程 SHALL 都得到同样的 agent 专属变量注入；MUST NOT 只在其中一条通道生效
+
+#### Scenario: 注入不改变终端可见性语义
+
+- **WHEN** 平台把 agent 专属变量补进子进程 env
+- **THEN** 该注入 MUST NOT 被当作「把 CLI 暴露到用户终端 PATH」；MUST NOT 改变「不在终端 PATH 上」的判定，MUST NOT 触发显式暴露动作，也 MUST NOT 改写任何用户 shell 配置文件
+

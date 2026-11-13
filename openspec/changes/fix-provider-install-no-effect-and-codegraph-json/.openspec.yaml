@@ -35,3 +35,9 @@ x-owner-decisions:
     decision: 新增「暴露到终端 PATH」动作 —— 仅在用户显式触发时执行；MUST NOT 修改用户的 shell 配置文件；只在「已存在 + 真实可写 + 确实在终端 PATH 上」的目录里创建单个软链；失败如实报告
     reason: overlay 只让平台自己看见新装的 CLI，用户终端仍可能 command not found ⇒ 用户仍觉「装了没用」；自动改 shell profile 属越界副作用，故采用「显式触发 + 严格准入 + 事后重验」
     implementation: src/product/provider_installation/expose.rs + POST /api/providers/{target}/expose + 前端按钮（已实施）
+  - id: agent-env-injection
+    decided: 2026-11-13
+    decision: 登录 shell 探测到的 agent 专属环境变量（PI_CODING_AGENT_DIR / CODEX_HOME / CLAUDE_CONFIG_DIR）SHALL 补进平台发起的子进程 env —— 本轮做（方案 §五 2.12），撤回原「另立议题」的非目标
+    reason: 平台进程不是登录 shell ⇒ 用户 shell 配置里的配置目录变量对平台不可见 ⇒ 拉起的 pi/codex/claude 去读默认配置位置，表现为「模型配了却不生效 / 找不到配置」；只补缺失值既透传用户意图，又不夺走调用方与平台更权威的取值
+    implementation: src/cross_cutting/path_overlay.rs（SHELL_PROBE_VARS 变量清单 + probe_login_shell_env 交互式 login 探测 + 2s 硬上限 + shell_env_overrides 合并优先级）+ 两个命令汇聚点 src/cross_cutting/process_manager.rs 与 src/cross_cutting/cli_adapter.rs（已实施）；契约见 REQ-PCI-12
+    boundary: 探测失败 / 超时 / 不可用 MUST 不阻塞任何流程；平台已有值优先、调用方显式覆盖优先；注入 MUST NOT 改变终端 PATH 可见性语义（与 REQ-PCI-08 / REQ-PCI-11 独立）
