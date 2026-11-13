@@ -16,6 +16,10 @@
      时间来源，本装置不测、不估。
   6. **置换检验 = 精确枚举 C(8,4)=70 个分组**（n=4/臂），分辨率下限 1/70；
      只作方向性参考，不作显著性判定，不做多重检验校正。
+  7. **输入来源 digest 直接取自 manifest**（`issue_input_sha256` /
+     `story_markdown_sha256` / `story_version_ref` / `seed_manifest_sha256`）；
+     全臂不一致 ⇒ 显式打印「不可归因」，不静默混算。判等口径是 confirmed 版本
+     正文的 markdown 字节，不是带可变时间戳的 story spec 记录。
 
 用法：python3 harvest_by_role.py <run根目录> [sequence.log ...]
 """
@@ -107,6 +111,12 @@ def collect(run_dir, manifest):
         "plan_session_id": manifest.get("plan_session_id"),
         "status": manifest.get("status"),
         "provider_start_ledger": manifest.get("provider_start_ledger", 0),
+        # 输入来源身份（全部取自 manifest；seed 缺值即 None，不猜）
+        "story_version_ref": manifest.get("story_version_ref"),
+        "issue_input_sha256": manifest.get("issue_input_sha256"),
+        "story_markdown_sha256": manifest.get("story_markdown_sha256"),
+        "seed_manifest_sha256": manifest.get("seed_manifest_sha256"),
+        "scratch_home": manifest.get("scratch_home"),
         "author_rounds": 0, "author_seconds": 0.0, "author_cmds": 0, "author_codegraph": 0,
         "author_stream_bytes": 0, "author_fail_kind": None,
         "review_rounds": 0, "review_seconds": 0.0, "review_cmds": 0, "review_codegraph": 0,
@@ -283,6 +293,18 @@ def summarize(tag, rs):
     print("\n===== %s (有效样本 n=%d) =====" % (tag, len(rs)))
     print("  二进制 sha(前12): %s" %
           ", ".join(sorted({r["binary_sha256"] for r in rs})) )
+    # 输入来源 digest：来自 run-manifest（seed 冻结），全臂应完全一致
+    inputs = sorted({(r.get("issue_input_sha256"), r.get("story_markdown_sha256"),
+                      r.get("story_version_ref"), r.get("seed_manifest_sha256"))
+                     for r in rs})
+    if len(inputs) == 1:
+        i_sha, s_sha, vref, seed_sha = inputs[0]
+        print("  输入 digest: issue_input=%s story_markdown=%s seed_manifest=%s (%s)"
+              % (str(i_sha)[:12] or "not_observed", str(s_sha)[:12] or "not_observed",
+                 str(seed_sha)[:12] or "not_observed", vref))
+    else:
+        print("  !! 输入 digest 不一致（%d 组）：这些样本不可归因，检查 seed 复制/重指向"
+              % len(inputs))
     print("  终态: %s" % dict(collections.Counter(r["status"] for r in rs)))
     print("  【平台】节点时长合计(sum)中位=%s  计划产出(confirmed)=%d/%d  人工介入=%d/%d"
           % (fmt_med(rs, "node_seconds_sum"),
@@ -369,6 +391,17 @@ def main():
     summarize("改前（before 二进制）", b)
     summarize("改后（after 二进制）", a)
 
+    digests = {(r.get("issue_input_sha256"), r.get("story_markdown_sha256"),
+                r.get("story_version_ref"), r.get("seed_manifest_sha256"))
+               for r in b + a}
+    if len(digests) != 1:
+        print("\n!! before/after 的输入来源 digest 不一致（%d 组）："
+              "这些 run 不是同一输入，对照不可归因" % len(digests))
+    else:
+        i_sha, s_sha, vref, seed_sha = next(iter(digests))
+        print("\n输入来源（全臂一致）：issue_input=%s story_markdown=%s %s seed_manifest=%s"
+              % (str(i_sha)[:12], str(s_sha)[:12], vref, str(seed_sha)[:12]))
+
     print("\n" + "=" * 96)
     print("改前 → 改后 方向性对照（同一 seed 输入 × 同装置 × ABBA 串行；"
           "n=%d/%d 有效样本）" % (len(b), len(a)))
@@ -377,7 +410,8 @@ def main():
     for lab, key in DIRECTIONAL_METRICS:
         print("  %-24s %14s  →  %14s" % (lab, fmt_med(b, key), fmt_med(a, key)))
     print("  说明：总耗时口径 = 各 timeline 节点时长之和（sum），非墙钟起止差；")
-    print("  first-token time 不可测（durable 产物无首 token 时间戳来源）。")
+    print("  first-token time 不可测（durable 产物无首 token 时间戳来源），不估算。")
+    print("  token 缺 usage 事件的 run 记 None（中位只在观测到的值上算），不补 0。")
 
     print("\n" + "=" * 96)
     print("精确置换检验（枚举全部 C(%d,%d) 分组，方向性参考，不作显著性判定）"

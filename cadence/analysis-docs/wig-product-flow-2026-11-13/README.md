@@ -69,18 +69,91 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
 
 ## 固定输入（消灭第二变量）
 
+### issue 正文必须显式给（无占位）
+
+装置**不再内置 description 占位**（旧版写死 `"删除公告"`）。走
+
+```bash
+--issue-input /tmp/wig-measurement-setup/issue_input.md
+# 或 WIG_ISSUE_INPUT_FILE=<同一文件>
+```
+
+文件被**整篇**读出并作为 issue `description` 发送（不是摘要、不是标题）；同时把
+`issue_input_path` / `issue_input_sha256` / `issue_input_bytes` 写进
+`seed-manifest.json` 与每个 `run-manifest.json`。文件缺失 / 为空 / 非 UTF-8 /
+不含「公告删除 + REQ-001..007 + AC-001..006」锚点 ⇒ **非 0 退出，不开臂**。
+
+重建输入 = `/tmp/wig-measurement-setup/issue_input.md`（本目录外的 controller
+输入）：它只固定 6 条 AC 的保留语义（基线第 392-397 行逐字）、13 项编号清单
+（第 312 行）与「恰好 7 REQ / 6 AC」的覆盖约束。**原 REQ-001..REQ-007 的散文
+正文已不可恢复，未伪造**；REQ 的具体切分由 Story 阶段决定。案例内
+`docs/issue-003-公告管理升级.md` 与 `story_spec_0015`（13 REQ / 14 AC）是另一个
+更大的故事，**不得混入**（锚点校验会拒收）。
+
+### seed 与克隆
+
 - seed 只生成**一次**（`--seed`，一次真实 provider story run，binary 记入
-  seed-manifest.json）；8 臂全部字节级克隆同一 seed 快照（confirmed story +
-  成员 heads 完全一致）。
-- 每臂收尾复核输入身份：story spec 文件 sha256 与 seed 一致、成员仓 HEAD 未漂移；
-  任一不符 ⇒ 该臂 invalid（`member_heads`/`story_input_sha256` 记入 manifest）。
-- provider/model/effort：author=reviewer=codex、effort 不传（产品默认档）、
-  权限 auto。**不因 `~/.codex/auth.json` 存在而推定可用**——真实可用性只由
-  durable `provider_start_ledger` 非空证明（seed 与每臂 plan 会话都检查，
-  为空即 invalid）。
-- 若服务端发来 permission_request / choice_request / trust 指引等未知门：
-  装置**明确报阻塞**（该臂失败），不自动批准、不发 `register_trust_entry`
-  （不写任何 HOME 级用户配置）。
+  `seed-manifest.json`）；8 臂全部字节级克隆同一 seed 快照。装置**不会**自动
+  触发额外 baseline/初始化 run：8 臂只由 controller 显式执行。
+- seed 结束时冻结成员快照 `member_snapshot`（+ 派生 `member_snapshot_sha256`），
+  并在 seed 收尾再取一次快照断言完全一致；不一致 ⇒ seed 判 `valid=false` 且
+  非 0 退出。
+- 每臂克隆后、开 daemon 前，就把克隆体的快照与 seed 冻结快照逐字段比对；漂移
+  直接判 invalid（不再白跑一小时才发现污染）。
+
+### 输入身份：只认 durable 事实
+
+1. **story 输入 = confirmed 版本正文**。判等用 `versions/<story_spec_id>/
+   version_%04d.json` 的 `markdown` 字段 UTF-8 bytes 的 sha256
+   （`story_markdown_sha256`），并记录 `story_version_ref`（`<id>@version_0001`）、
+   `story_version_file_sha256`。story spec **记录**文件自带可变时间戳，其
+   sha256 只作为 `story_record_sha256` 参考，**不参与判等**。
+2. **成员身份 = manifest → members → checkouts 解析链**（与
+   `/tmp/wig-measurement-setup/member_snapshot.py` 同构，装置内自带实现）。
+   逐成员比 `alias` / `canonical_path` / `checkout_path_hash` /
+   `git_dir_identity` / `canonical_git_dir` / `HEAD` / `tree` / `branch` /
+   **`git status --porcelain`（dirty）**；聚合根非成员树另有内容 digest。
+   **HEAD 没动但 dirty 内容变了 ⇒ 判不稳定**，该臂 invalid。
+3. 固定案例 = 精确 3 成员 `busi/frontend/gateway`，且每个成员
+   `canonical_path` 必须仍在固定案例根之下（见下节「状态根重指向」）。
+
+### 状态根重指向（只改该改的）
+
+`repoint_state_root_refs()` 的纪律：
+
+- 只处理 `.aria` 下 **JSON/JSONL 的值**，且 key 必须在白名单
+  `state_root / workspace_root / aria_root / product_state_root / root_dir`；
+- `members/`、`checkouts/`、`versions/` 整目录跳过；`canonical_path`、
+  `source_identity`、`*_hash` 等字段不在白名单 ⇒ 永不改写（固定案例路径、
+  成员 authority、正文 digest 一律保持字节不变）；
+- 没有任何命中 ⇒ **不写任何文件**（保留原固定外部案例，多臂共享同一物理成员仓
+  是预期语义），日志明确打印「保留原固定外部案例」；
+- 重指向前后各取一次成员快照，断言完全一致，否则拒绝继续（该臂 invalid）。
+
+### 环境来源（不猜默认档）
+
+`seed-manifest.json` 与每臂 `run-manifest.json` 写 `observed`：`provider`
+（来源 = start_generation payload）、`model` / `effort` / `reasoning_effort`
+——只有 session 记录或 payload 里**真观测到**才填值并注明来源；没有观测到一律
+`{"value": null, "source": "not_observed"}`，**不写 inherit、不猜 xhigh**。
+`scratch_home` 记录 controller 提供的隔离 HOME 路径（不含任何 secret）。
+
+### 权限/信任门纪律
+
+- `permission_modes` 取 auto。`permission_request` / `choice_request` 等未知门
+  ⇒ **明确报阻塞、该臂失败**，绝不自动批准。
+- codex workspace trust 缺项单独处理：装置只读观测
+  `$CODEX_HOME/config.toml`（缺省 `$HOME/.codex/config.toml`）中
+  `[projects."<root>"]` 的 `trust_level`，**不打印 config 内容**。
+  - 默认（未授权）：显式失败，并给出 controller 需追加的完整 TOML 片段与路径；
+  - 仅当 controller 置 `WIG_TRUST_AUTHORIZED=1` **且** scratch HOME 真实位于
+    `/tmp` 时，装置才登记缺失条（0600 追加，绝不覆盖既有 `untrusted` 条目），
+    然后**显式重试一次** start_generation；
+  - 装置不复制任何凭据/secret、不写真实 HOME；隔离环境一律由 controller 的
+    `prepare_env.sh` 提供（`source <setup>/env.sh` 后再跑装置）。
+- 真实可用性只由 durable `provider_start_ledger` 非空证明（seed 与每臂 plan
+  会话都检查，为空即 invalid）；不因 `~/.codex/auth.json` 存在而推定可用。
+
 
 ## 臂序与绑定
 
@@ -88,11 +161,17 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
   严格串行，唯一变量 = 二进制。两件二进制内嵌 UI 资源同为 `index-CD_NhB8M.js`；
   即便如此，性能结论**仍只按后端 binary 差异解释**（前端不参与驱动）。
 - 每 run 写 `run-manifest.json`：tag/arm/port、binary 路径 + sha256、
-  seed-manifest sha256、issue/story/version、plan_session_id、终态、
-  provider_start_ledger、输入身份复核、valid/invalid_reason。
+  seed-manifest sha256、issue/story/version + `story_version_ref`、
+  `issue_input_sha256` / `story_markdown_sha256`（输入来源 digest）、
+  `scratch_home`、`observed`（provider/model/effort 及其来源）、
+  plan_session_id、终态、provider_start_ledger、输入身份复核
+  （`checks.member_snapshot_*` / `checks.story_markdown_identical`）、
+  valid/invalid_reason。
 - 产物纪律：已存在的 run/seed 目录**拒绝覆盖**（失败证据不删除）；任一臂
-  超时/异常 ⇒ 进程退出码非 0；超时/异常/未终态/污染的臂不算有效样本，
-  收割器显式列排除清单。
+  超时/异常/未终态/正文 digest 不符/成员快照漂移 ⇒ 该臂 invalid 且进程退出码
+  非 0；收割器显式列排除清单。error/timeout/inconclusive 一律不是有效样本。
+- 无效判定不看「HEAD 是否变了」：`HEAD` 相同但 `git status` 变化（dirty 内容被
+  改）同样判 invalid。
 
 ## 对初版 README 的更正（错误归因）
 
@@ -117,6 +196,10 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
 3. n=4/臂 ⇒ 任何指标只看方向，不能声称统计显著；不使用多重检验校正话术。
 4. 界面前端呈现层不在测量面（本轮改动是平台侧投影与 prompt 注入）。
 5. 二进制固定：改代码必须重建并重新固定 sha，否则前后臂不可比。
+6. seed 与 issue 输入都是**重建**：seed 不是原 `story_spec_0009` 的逐字重现，
+   issue 输入不含原 REQ 散文正文（仅编号 + 6 条 AC 保留语义）。任何结论都不得
+   表述为「与原验收 seed/issue 逐字相同」，也不得把 `issue-003` /
+   `story_spec_0015` 的更大故事当成本输入。
 
 ## 复现（controller 入口）
 
@@ -130,21 +213,77 @@ after=`/tmp/aria-wig-pinned/after-07a0df79`
 
 ```bash
 D=/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-wig-optimize-11-08/cadence/analysis-docs/wig-product-flow-2026-11-13
+SETUP=/tmp/wig-measurement-setup
 
-# 1) 真实 smoke + 一次性固定 seed（= controller 验收入口：
-#    证据链 = server 接受 start_generation（story-ws-frames.jsonl 有
-#    start_generation_sent 帧）→ provider_start_ledger 非空 → story confirmed）
+# 0) 隔离环境（controller 一次性准备；scratch HOME 在 /tmp，凭据只由它物化）
+source $SETUP/env.sh     # 导出 HOME=<scratch>、PATH 垫片（只放行 codex）、WIG_CASE_ROOT
+# 缺 codex trust 且已获授权时，装置才会登记缺失条并显式重试 start：
+# export WIG_TRUST_AUTHORIZED=1
+
+# 1) 真实 smoke + 一次性固定 seed（controller 验收入口）
+#    issue 正文必须显式给（无内置占位）：--issue-input 或 WIG_ISSUE_INPUT_FILE
 python3 $D/run_arms.py --seed /tmp/aria-wig-pinned/after-07a0df79 \
-  <3成员案例工作区> /tmp/aria-wig 4709
+  "$WIG_CASE_ROOT" /tmp/aria-wig 4709 \
+  --issue-input $SETUP/issue_input.md
 
 # 2) 8 臂 ABBA（唯一变量 = 二进制；任一臂失败 ⇒ 退出码非 0）
+#    装置只按参数跑这 8 臂，不会自行追加 baseline/初始化 run
 python3 $D/run_arms.py \
   /tmp/aria-wig-pinned/before-a953327d \
   /tmp/aria-wig-pinned/after-07a0df79 \
   /tmp/aria-wig/seed-workspace /tmp/aria-wig 2 4701
 
-# 3) 收割 + 精确置换（只出方向性对照；排除清单一并打印）
+# 3) 收割 + 精确置换（只出方向性对照；排除清单与输入 digest 一并打印）
 python3 $D/harvest_by_role.py /tmp/aria-wig /tmp/aria-wig/sequence.log
 ```
 
 全部测试产物只写 `/tmp`（装置不写仓库、不写 HOME、不动原案例目录）。
+`--issue-input` 可放在任意位置；臂阶段也接受它，但仅用于**核对**是否与 seed
+记录的 digest 一致（不一致即拒绝开臂）。
+
+## 本次修复的验证状态（如实）
+
+- 已在本机（无真实 provider、无 daemon 真启动）做定向冒烟：
+  ① issue 输入缺失/空/错案例、HOME 非 `/tmp` ⇒ 非 0 且不建产物目录；
+  ② 合成 3 成员 `.aria` 夹具上 `member_snapshot` 解析出精确 3 成员
+     alias/head/tree/dirty 与固定案例路径；`repoint_state_root_refs` 只改
+     `state_root`，`provider_context_root` / `*_hash` 保持原值，二次调用 0 文件；
+  ③ 成员 `HEAD` 不变、仅新增未跟踪文件 ⇒ `snapshot_diff` 命中
+     `<member>.status`（判不稳定）；
+  ④ trust 门：缺项未授权只报片段；授权后登记 2 条并 0600、幂等；既有
+     `untrusted` 条目拒绝覆盖；授权但 HOME 非 `/tmp` 拒绝写；
+  ⑤ `story_version_digest` 在 version 记录时间戳变化时 markdown 字节 digest
+     不变；缺版本文件非 0；
+  ⑥ harvester 在合成 manifests 上打印 issue/story/seed digest、排除 timeout
+     臂、token 缺值呈 `n/a`。
+- **未验证（notrun）**：真实 provider 的 seed 生成、8 臂真机执行、trust 登记在
+  真实 codex 会话中的实际生效、任何耗时/token 数值结论。这些都必须由
+  controller 执行时观察；本目录脚本不会自行启动 provider 或追加 run。
+
+
+## 窄冒烟（controller 用，不启动真实 provider）
+
+```bash
+D=/home/michaelche/workspace/github/cadence-aria/.worktrees/feat-wig-optimize-11-08/cadence/analysis-docs/wig-product-flow-2026-11-13
+SETUP=/tmp/wig-measurement-setup
+
+# 0) 语法（不是验收，只挡低级错误）
+python3 -m py_compile $D/run_arms.py $D/harvest_by_role.py && echo COMPILE_OK
+
+# 1) 缺 issue 输入 ⇒ rc=1，且不创建产物目录
+HOME=/tmp python3 $D/run_arms.py --seed /bin/true /tmp/no-case /tmp/wig-probe-out; echo "rc=$?"
+
+# 2) 空输入 / 错案例输入 ⇒ rc=1
+: > /tmp/wig-probe-empty.md
+HOME=/tmp python3 $D/run_arms.py --seed /bin/true /tmp/no-case /tmp/wig-probe-out \
+  --issue-input /tmp/wig-probe-empty.md; echo "rc=$?"
+
+# 3) 臂模式：伪造 seed-manifest（valid=false）⇒ rc=1「拒绝开臂」，不开 daemon
+mkdir -p /tmp/wig-probe
+printf '{"schema":"wig-seed-manifest/1","valid":false,"invalid_reason":"probe"}\n' \
+  > /tmp/wig-probe/seed-manifest.json
+HOME=/tmp python3 $D/run_arms.py /bin/true /bin/true /tmp/wig-probe/seed-workspace /tmp/wig-probe 1
+echo "rc=$?"
+```
+
+三条门禁都不接触 provider、不写 HOME、只在 `/tmp` 下留探针文件。
