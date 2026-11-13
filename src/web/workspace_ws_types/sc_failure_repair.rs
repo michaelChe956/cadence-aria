@@ -476,9 +476,12 @@ mod tests {
         );
     }
 
+    fn wire_name<T: serde::Serialize>(value: &T) -> String {
+        serde_json::to_string(value).unwrap()
+    }
+
     #[test]
     fn sc_failure_dto_enum_wire_names_are_snake_case() {
-        let wire_name = |value: &dyn serde::Serialize| serde_json::to_string(value).unwrap();
         assert_eq!(wire_name(&ScFailureClass::Compile), "\"compile\"");
         assert_eq!(wire_name(&ScFailureClass::IrPreflight), "\"ir_preflight\"");
         assert_eq!(wire_name(&ScFailureClass::StructureGate), "\"structure_gate\"");
