@@ -71,7 +71,6 @@ mod review_disposition_platform;
 mod review_repair_prompt;
 mod run_boundary_detection;
 mod run_boundary_prompt;
-mod sc_compile_reredrive_prompt;
 mod single_candidate;
 mod single_candidate_flow_dispatch;
 mod single_candidate_prompt;

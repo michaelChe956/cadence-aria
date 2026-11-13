@@ -248,6 +248,8 @@ fn render_teaching_reredrive_prompt(
 
 #[cfg(test)]
 mod reredrive_prompt_tests {
+    use sha2::Digest as _;
+
     use super::{
         TeachingReredriveFacts, build_work_item_plan_compile_reredrive_prompt,
         render_teaching_reredrive_prompt,
@@ -255,10 +257,93 @@ mod reredrive_prompt_tests {
     use crate::product::work_item_plan_compiler::{
         IrFault, IrFaultKind, IrFaultLocator, LoweringFault,
     };
+    use crate::product::workspace_engine::{ScTeachingPromptError, ScTeachingSourceMetadata};
+    use crate::web::workspace_ws_types::ScTeachingSourceOrigin;
+
+    /// P23 来源 fixture 的 locator（教学来源 locator 形态）。
+    const FIXTURE_SOURCE_REF: &str = "sc-teaching-source/v1/session-1/chain-1/0";
+
+    /// 真实字节口径的上一轮源码：自带反引号围栏行 + CJK 多字节正文
+    /// （chars ≠ bytes，字节口径断言才有区分力）。
+    const FIXTURE_SOURCE: &str =
+        "# Work Item Plan\n\n```yaml\nid: WI-PLAN\n```\n中文正文：计划。\n";
+
+    /// 真实字节口径的来源 fixture：sha256/bytes 由正文自身复算（与 P21
+    /// renderer 同一口径），不手写魔法值。
+    struct SourceFixture {
+        sha256: String,
+    }
+
+    impl SourceFixture {
+        fn of(source: &str) -> Self {
+            Self {
+                sha256: hex::encode(sha2::Sha256::digest(source.as_bytes())),
+            }
+        }
+
+        fn metadata<'a>(&'a self, source: &'a str) -> ScTeachingSourceMetadata<'a> {
+            ScTeachingSourceMetadata {
+                source_ref: FIXTURE_SOURCE_REF,
+                sha256: &self.sha256,
+                bytes: source.len() as u64,
+                origin: ScTeachingSourceOrigin::CompileSplitOutput,
+            }
+        }
+    }
+
+    /// 新签名（7 参 → `Result`）的完整调用面，来源元数据按真实字节口径构造。
+    fn build(
+        parse_reasons: &[String],
+        lowering_faults: &[LoweringFault],
+        ir_faults: &[IrFault],
+        instructions: &[String],
+        registered: &[String],
+    ) -> Result<String, ScTeachingPromptError> {
+        let fixture = SourceFixture::of(FIXTURE_SOURCE);
+        build_work_item_plan_compile_reredrive_prompt(
+            parse_reasons,
+            lowering_faults,
+            ir_faults,
+            instructions,
+            registered,
+            FIXTURE_SOURCE,
+            &fixture.metadata(FIXTURE_SOURCE),
+        )
+    }
 
     /// 旧形态（仅 parse 码表错误原文）的便捷调用。
     fn plain_prompt(parse_reasons: &[String], registered: &[String]) -> String {
-        build_work_item_plan_compile_reredrive_prompt(parse_reasons, &[], &[], &[], registered)
+        build(parse_reasons, &[], &[], &[], registered).expect("合法来源元数据必须构造成功")
+    }
+
+    /// 按围栏结构在 prompt 内定位上一轮源码正文并断言逐字完整——正则与断言都
+    /// 直接作用于 prompt 本身，不经 renderer 重算（避免自证）；返回正文起点
+    /// 供顺序断言使用。
+    fn assert_lossless_source_block(prompt: &str) -> usize {
+        let start = prompt.find(FIXTURE_SOURCE).expect("source 正文必须在场");
+        let open_fence = prompt[..start]
+            .strip_suffix('\n')
+            .and_then(|head| head.rsplit('\n').next())
+            .expect("正文前必须是一条围栏行");
+        assert!(
+            open_fence.len() >= 3 && open_fence.bytes().all(|byte| byte == b'`'),
+            "正文前必须是反引号围栏行: {open_fence:?}"
+        );
+        let after = prompt[start + FIXTURE_SOURCE.len()..]
+            .strip_prefix('\n')
+            .expect("正文后必须换行");
+        assert!(
+            after.starts_with(open_fence),
+            "闭合围栏必须与开启围栏等长: {after:?}"
+        );
+        let tail = after[open_fence.len()..]
+            .strip_prefix('\n')
+            .expect("闭合围栏后必须换行");
+        assert!(
+            !tail.trim().is_empty(),
+            "source 块之后必须仍有内容（source 不是文末）"
+        );
+        start
     }
 
     /// r41 B1:unknown_structured_key 类失败的重驱 prompt 必须附 14 合法
@@ -350,15 +435,19 @@ mod reredrive_prompt_tests {
             expected_shape: "- requirement_refs: REQ-001".to_string(),
         }];
         let instructions = vec!["rule-x: 迁往合法字段".to_string()];
+        let fixture = SourceFixture::of(FIXTURE_SOURCE);
         let prompt = render_teaching_reredrive_prompt(
             &TeachingReredriveFacts {
                 parse_reasons: &parse_reasons,
                 lowering_faults: &lowering_faults,
                 ir_faults: &ir_faults,
                 autorepair_instructions: &instructions,
+                previous_source: FIXTURE_SOURCE,
+                source: fixture.metadata(FIXTURE_SOURCE),
             },
             &[],
-        );
+        )
+        .expect("合法来源元数据必须构造成功");
         for required in [
             "intent_target_repo",
             "第 12 行",
@@ -384,8 +473,8 @@ mod reredrive_prompt_tests {
         let instructions: Vec<String> = (0..10)
             .map(|index| format!("rule-{index}: 修复动作"))
             .collect();
-        let prompt =
-            build_work_item_plan_compile_reredrive_prompt(&[], &[], &[], &instructions, &[]);
+        let prompt = build(&[], &[], &[], &instructions, &[])
+            .expect("合法来源元数据必须构造成功");
         assert!(
             prompt.contains("rule-3: 修复动作"),
             "上限内的指令必须在场: {prompt}"
@@ -562,5 +651,113 @@ mod reredrive_prompt_tests {
             !plain.contains(&keys),
             "非 unknown_structured_key 失败不得附带键集: {plain}"
         );
+    }
+
+    /// P23（Plan §2.4）：上一轮失败源码逐字入 prompt——真实 source（自带反引号
+    /// 围栏行 + CJK 多字节）按字节完整、围栏自洽；位置在失败事实之后、文末
+    /// 指令之前（顺序断言，不 pin 句子）。
+    #[test]
+    fn previous_source_block_preserves_source_bytes_after_facts() {
+        let parse_reasons = vec![
+            "missing_section:5:结构化 section 缺少必需字段。\n  缺失字段: Goal\n  正确形状: - Goal: value"
+                .to_string(),
+        ];
+        let prompt = plain_prompt(&parse_reasons, &[]);
+        assert_eq!(
+            prompt.matches(FIXTURE_SOURCE).count(),
+            1,
+            "上一轮源码必须逐字出现且仅一次: {prompt}"
+        );
+        let source_start = assert_lossless_source_block(&prompt);
+        let fact = prompt.find("缺失字段: Goal").expect("parse 事实必须在场");
+        assert!(fact < source_start, "source 块必须在失败事实之后");
+        assert!(
+            FIXTURE_SOURCE.chars().count() < FIXTURE_SOURCE.len(),
+            "fixture 必须含 CJK 多字节正文，字节断言才有区分力"
+        );
+    }
+
+    /// P23 × A1：parse 事实块超 32,000 B 整条省略语义不变（计数记账、不切半），
+    /// 且 source 块仍逐字完整——省略不得波及本轮自带的上一轮源码。
+    #[test]
+    fn oversized_parse_fact_block_omitted_whole_keeps_source_verbatim() {
+        let oversized = format!(
+            "missing_section:1:m\n  缺失字段: big\n  正确形状: {}",
+            "v".repeat(40_000)
+        );
+        let parse_reasons = vec![
+            oversized,
+            "missing_section:2:m\n  缺失字段: ok\n  正确形状: - ok: value".to_string(),
+        ];
+        let prompt = plain_prompt(&parse_reasons, &[]);
+        assert!(
+            prompt.contains("共 2 条 / 呈现 1 条 / 省略 1 条"),
+            "超字节预算必须显式记账总数/呈现数/省略数: {prompt}"
+        );
+        assert!(prompt.contains("缺失字段: ok"), "小条完整在场: {prompt}");
+        assert!(
+            !prompt.contains("缺失字段: big"),
+            "超大条不得切半残留: {prompt}"
+        );
+        assert!(
+            !prompt.contains("missing_section:1:"),
+            "超大条首行一并省略: {prompt}"
+        );
+        assert_eq!(
+            prompt.matches(FIXTURE_SOURCE).count(),
+            1,
+            "source 正文必须仍逐字完整在场: {prompt}"
+        );
+        assert_lossless_source_block(&prompt);
+    }
+
+    /// P23：来源元数据与正文复算不符 ⇒ `Err`（错误只来自 source/render 失败），
+    /// 不返回任何半成品 prompt。
+    #[test]
+    fn tampered_source_metadata_returns_error_instead_of_prompt() {
+        let fixture = SourceFixture::of(FIXTURE_SOURCE);
+        let mut metadata = fixture.metadata(FIXTURE_SOURCE);
+        metadata.bytes += 1;
+        let err = build_work_item_plan_compile_reredrive_prompt(
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            FIXTURE_SOURCE,
+            &metadata,
+        )
+        .expect_err("bytes 篡改必须报错");
+        assert_eq!(err.code, "sc_failure_evidence_invalid");
+    }
+
+    /// A1（REQ-WSC-32，自 `single_candidate_compile_preflight` 的 typed 重驱用例
+    /// 迁移）：同 message、不同 field 的 parse 诊断块经重驱入口后，最终 prompt
+    /// 逐条含原三段（逐字）+ 精确 field/形状，两条互不吞并。
+    /// （资格判定侧 `teaching_verdict` 为 `run` 模块内的 `pub(super)` 面，其
+    /// diagnostics→parse_reasons 投影由 `run/` 自己的测试覆盖。）
+    #[test]
+    fn typed_reredrive_prompt_keeps_parse_field_and_example_facts() {
+        let fields = ["Goal", "role"];
+        let parse_reasons: Vec<String> = fields
+            .iter()
+            .map(|field| {
+                format!(
+                    "missing_section:5:结构化 section 缺少必需字段。\n  缺失字段: {field}\n  正确形状: - {field}: value"
+                )
+            })
+            .collect();
+        let prompt = build(&parse_reasons, &[], &[], &[], &[]).expect("合法来源元数据必须构造成功");
+        for field in fields {
+            let block = format!(
+                "missing_section:5:结构化 section 缺少必需字段。\n  缺失字段: {field}\n  正确形状: - {field}: value"
+            );
+            assert!(prompt.contains(&block), "{field} 逐条可区分: {prompt}");
+            assert_eq!(
+                prompt.matches(&block).count(),
+                1,
+                "{field} 块必须恰出现一次（不得互相吞并）: {prompt}"
+            );
+        }
     }
 }
