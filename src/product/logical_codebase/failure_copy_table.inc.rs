@@ -553,6 +553,13 @@ const TABLE: &[Entry] = &[
         FailureTriage::ProductDefect,
     ),
     (
+        "codegraph_files_output_truncated",
+        "codegraph 文件清单超出抓取上限",
+        "索引文件太多，清单输出超过抓取上限被截断，得到的清单不完整（不是上游协议异常）。",
+        "缩小聚合根规模后重新发起聚合索引重建；持续出现时附机器码与诊断提交问题。",
+        FailureTriage::Environment,
+    ),
+    (
         "codegraph_query_failed",
         "codegraph 查询命令失败",
         "索引的负向验收查询以失败结束。",

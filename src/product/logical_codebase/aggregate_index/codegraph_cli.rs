@@ -58,6 +58,9 @@ pub struct CodeGraphCommandResult {
     pub stdout: String,
     pub stderr: String,
     pub duration_ms: u64,
+    /// stdout 是否被上限截断——载荷不完整，调用方不得把它当完整结果用
+    /// （例如把截断后的 JSON 前缀当合法载荷解析）。
+    pub stdout_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -131,6 +134,7 @@ impl CodeGraphCli {
             Path::new("."),
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_version_failed",
+            OUTPUT_LIMIT_BYTES,
         )?;
         let actual = output.stdout.trim();
         let in_range = parse_codegraph_version(actual).is_some_and(|version| {
@@ -152,6 +156,7 @@ impl CodeGraphCli {
             root,
             AggregateIndexBudget::FIFTY_MEMBER_INITIAL,
             "codegraph_init_failed",
+            OUTPUT_LIMIT_BYTES,
         )
     }
 
@@ -161,6 +166,7 @@ impl CodeGraphCli {
             root,
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_sync_failed",
+            OUTPUT_LIMIT_BYTES,
         )
     }
 
@@ -194,11 +200,23 @@ impl CodeGraphCli {
 
     pub fn files(&self, root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
         let output = self.run_checked(
-            &["files", "--json"],
+            &["files", "--json", "--no-metadata"],
             root,
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_files_failed",
+            FILES_OUTPUT_LIMIT_BYTES,
         )?;
+        // 截断判定必须先于解析：stdout 被上限切掉后剩下的是 JSON 前缀，
+        // 解析必然失败。若继续落到解析分支，截断会被混报成
+        // `codegraph_files_invalid_json`（上游协议异常），把排障方向带偏。
+        if output.stdout_truncated {
+            return Err(AggregateIndexError::Failed {
+                code: "codegraph_files_output_truncated",
+                message: format!(
+                    "codegraph files --json 输出被截断：stdout 超过 {FILES_OUTPUT_LIMIT_BYTES} 字节上限，文件清单不完整",
+                ),
+            });
+        }
         // codegraph 1.6 实证契约缺陷：空索引（0 文件）时 `files --json`
         // 以 exit 0 输出人读提示而非 JSON 数组。先识别该形态返回专用
         // 空索引码，交给上层归并为业务语义的覆盖不足错误；
@@ -230,6 +248,7 @@ impl CodeGraphCli {
             root,
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_query_failed",
+            OUTPUT_LIMIT_BYTES,
         )?;
         serde_json::from_str(&output.stdout).map_err(|error| AggregateIndexError::Failed {
             code: "codegraph_query_invalid_json",
@@ -243,6 +262,7 @@ impl CodeGraphCli {
             root,
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_status_failed",
+            OUTPUT_LIMIT_BYTES,
         )?;
         serde_json::from_str(&output.stdout).map_err(|error| AggregateIndexError::Failed {
             code: "codegraph_status_invalid_json",
@@ -256,8 +276,9 @@ impl CodeGraphCli {
         root: &Path,
         budget: AggregateIndexBudget,
         failure_code: &'static str,
+        stdout_limit: usize,
     ) -> Result<CodeGraphCommandResult, AggregateIndexError> {
-        let output = self.run(argv, root, budget.fail_secs)?;
+        let output = self.run(argv, root, budget.fail_secs, stdout_limit)?;
         if output.exit_code != Some(0) {
             return Err(AggregateIndexError::Failed {
                 code: failure_code,
@@ -272,6 +293,7 @@ impl CodeGraphCli {
         argv: &[&str],
         root: &Path,
         timeout_secs: u64,
+        stdout_limit: usize,
     ) -> Result<BoundedCommandResult, AggregateIndexError> {
         let request = BoundedCommandRequest {
             executable: self.executable.clone(),
@@ -280,7 +302,7 @@ impl CodeGraphCli {
             timeout: Duration::from_secs(timeout_secs),
             cancellation: CancellationToken::new(),
             environment: sanitized_environment(),
-            stdout_limit: OUTPUT_LIMIT_BYTES,
+            stdout_limit,
             stderr_limit: OUTPUT_LIMIT_BYTES,
         };
         let runner = self.runner.clone();
@@ -347,6 +369,7 @@ fn command_result(output: BoundedCommandResult) -> CodeGraphCommandResult {
         stdout: output.stdout,
         stderr: output.stderr,
         duration_ms: output.duration_ms,
+        stdout_truncated: output.stdout_truncated,
     }
 }
 
@@ -594,7 +617,7 @@ mod tests {
             requests[0].timeout,
             Duration::from_secs(AggregateIndexBudget::INCREMENTAL.fail_secs)
         );
-        assert_eq!(requests[1].argv, ["files", "--json"]);
+        assert_eq!(requests[1].argv, ["files", "--json", "--no-metadata"]);
         assert_eq!(requests[2].argv, ["query", "crossRepoGreeting", "--json"]);
         assert_eq!(requests[3].argv, ["status", ".", "--json"]);
         for request in requests.iter() {
