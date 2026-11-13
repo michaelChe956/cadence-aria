@@ -227,6 +227,7 @@ class WsClient:
         if b" 101 " not in head.split(b"\r\n")[0]:
             raise WsError("ws 握手被拒: %s" % head[:200].decode("utf-8", "replace"))
         self._buf = rest
+        self._frag = []  # 跨 recv_text 调用的半消息分片（pending message state）
 
     def _read_exact(self, n, deadline):
         while len(self._buf) < n:
@@ -246,35 +247,45 @@ class WsClient:
         return True
 
     def _read_frame(self, deadline):
+        """解析一条完整帧；帧未凑齐时**不消费任何字节**，可跨超时安全重试。
+
+        回归修复（controller 探针 2026-11-13）：旧实现逐段消费 _buf（先切掉
+        2 字节头再等载荷），payload 半齐时头已丢失，下次把载荷首字节当头 ⇒
+        流永久错位。现在先窥视（peek）算出整帧长度，凑齐后一次性切出。
+
+        返回 (fin, opcode, payload)；None=预算耗尽/空轮（上层收口）；
+        False=有部分缓冲且仍在预算内（上层继续等，缓冲原样保留）。
+        """
         ok = self._read_exact(2, deadline)
         if ok is not True:
-            return ok  # False=暂无数据 None=本轮无进展
+            return ok
         b1, b2 = self._buf[0], self._buf[1]
-        self._buf = self._buf[2:]
-        fin, opcode = b1 >> 7, b1 & 0x0F
-        masked, ln = b2 >> 7, b2 & 0x7F
-        if ln == 126:
-            if self._read_exact(2, deadline) is not True:
-                return False
-            ln = struct.unpack(">H", self._buf[:2])[0]
-            self._buf = self._buf[2:]
-        elif ln == 127:
-            if self._read_exact(8, deadline) is not True:
-                return False
-            ln = struct.unpack(">Q", self._buf[:8])[0]
-            self._buf = self._buf[8:]
+        masked = b2 >> 7
+        ln7 = b2 & 0x7F
+        ext = 2 if ln7 == 126 else (8 if ln7 == 127 else 0)
+        head = 2 + ext + (4 if masked else 0)
+        ok = self._read_exact(head, deadline)
+        if ok is not True:
+            return ok
+        if ext == 2:
+            ln = struct.unpack(">H", self._buf[2:4])[0]
+        elif ext == 8:
+            ln = struct.unpack(">Q", self._buf[2:10])[0]
+        else:
+            ln = ln7
         if ln > (1 << 26):
             raise WsError("帧过大: %d" % ln)
-        mask = b""
+        ok = self._read_exact(head + ln, deadline)
+        if ok is not True:
+            return ok
+        frame = self._buf[:head + ln]
+        self._buf = self._buf[head + ln:]
+        fin, opcode = b1 >> 7, b1 & 0x0F
+        off = 2 + ext
+        mask = frame[off:off + 4] if masked else b""
         if masked:
-            if self._read_exact(4, deadline) is not True:
-                return False
-            mask = self._buf[:4]
-            self._buf = self._buf[4:]
-        if self._read_exact(ln, deadline) is not True:
-            return False
-        payload = self._buf[:ln]
-        self._buf = self._buf[ln:]
+            off += 4
+        payload = frame[off:]
         if masked:
             payload = bytes(c ^ mask[i % 4] for i, c in enumerate(payload))
         return (fin, opcode, payload)
@@ -297,15 +308,19 @@ class WsClient:
         self._send_frame(0x1, text.encode("utf-8"))
 
     def recv_text(self, timeout_s):
-        """收一条完整文本消息；超时返回 None；ping 自动回 pong。"""
+        """收一条完整文本消息；超时返回 None；ping 自动回 pong。
+
+        跨超时续拼：已收分片保存在 self._frag（实例级 pending message
+        state），超时返回 None 不丢分片，下一次调用继续拼同一条消息
+        （controller 闭集修复 2026-11-13：局部 parts 会把半消息丢成流洞）。
+        """
         deadline = time.time() + timeout_s
-        parts = []
         while True:
             frame = self._read_frame(deadline)
             if frame is None:
                 return None
             if frame is False:
-                continue  # 缓冲内字节不足，继续等
+                continue  # 帧不完整但仍在预算内：整帧未消费，继续等
             fin, opcode, payload = frame
             if opcode == 0x9:  # ping → pong
                 self._send_frame(0xA, payload)
@@ -316,9 +331,13 @@ class WsClient:
                 except Exception:
                     pass
                 raise WsClosed("服务端关闭: %s" % payload[:120].decode("utf-8", "replace"))
-            parts.append(payload)
-            if fin:
-                return b"".join(parts).decode("utf-8", "replace")
+            if opcode in (0x0, 0x1, 0x2):  # continuation / text / binary
+                self._frag.append(payload)
+                if fin:
+                    msg = b"".join(self._frag)
+                    self._frag = []
+                    return msg.decode("utf-8", "replace")
+            # 其余控制帧（0xA pong 等）：忽略
 
     def close(self):
         try:
@@ -455,7 +474,7 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
         deadline = time.time() + budget_s
         while time.time() < deadline:
             try:
-                raw = cli.recv_text(timeout=30)
+                raw = cli.recv_text(30)
             except WsClosed as e:
                 raise SystemExit("story WS 被服务端关闭: %s" % e)
             if raw is None:
