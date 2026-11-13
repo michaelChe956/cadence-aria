@@ -27,6 +27,7 @@ import type {
   PlanRepairSessionSnapshot,
   WorkspaceSessionLink,
 } from "./coding-plan-repair";
+import type { ScFailureRepairPackage } from "./sc-failure-repair";
 
 export type WorkspaceMessage = {
   role: string;
@@ -352,35 +353,23 @@ export interface LeaseDiagnosticsResponse {
   events: unknown[];
 }
 
-export type ArtifactUpdateMessage =
-  | { type: "artifact_update"; version: number; markdown: string; diff?: string | null }
-  | { type: "artifact_update"; version: number; candidate: WorkItemPlanCandidateDto }
-  | {
-      type: "artifact_update";
-      version: number;
-      outline_candidate: WorkItemPlanOutlineCandidatePayload;
-    }
-  | { type: "artifact_update"; version: number; context_blocker: WorkItemPlanContextBlockerPayload }
-  | { type: "artifact_update"; version: number; draft_candidate: WorkItemDraftCandidatePayload }
-  | { type: "artifact_update"; version: number; batch_state: WorkItemBatchStatePayload }
-  | { type: "artifact_update"; version: number; compile_report: WorkItemPlanCompileReportPayload }
-  | { type: "artifact_update"; version: number; plan_projection: PlanProjectionBundle }
-  | { type: "artifact_update"; version: number; work_item_projection: WorkItemProjectionBundle }
-  | {
-      type: "artifact_update";
-      version: number;
-      work_item_revision_history: WorkItemRevisionHistoryDto;
-    }
-  | {
-      type: "artifact_update";
-      version: number;
-      projection_validation: ProjectionValidationReport;
-    }
-  | {
-      type: "artifact_update";
-      version: number;
-      plan_amendment_manifest: PlanAmendmentManifest;
-    };
+// P15（A4 wire）：WS artifact_update／REST artifact／session_state artifact 三入口共用的原始键联合；原 markdown/candidate/outline/context/draft/batch/compile/projection/history/validation/manifest 十二键全保留，新增 sc_failure_repair_package 独立键（Plan §2.2）。
+export type WorkspaceArtifactWire =
+  | { markdown: string; diff?: string | null }
+  | { candidate: WorkItemPlanCandidateDto }
+  | { outline_candidate: WorkItemPlanOutlineCandidatePayload }
+  | { context_blocker: WorkItemPlanContextBlockerPayload }
+  | { draft_candidate: WorkItemDraftCandidatePayload }
+  | { batch_state: WorkItemBatchStatePayload }
+  | { compile_report: WorkItemPlanCompileReportPayload }
+  | { plan_projection: PlanProjectionBundle }
+  | { work_item_projection: WorkItemProjectionBundle }
+  | { work_item_revision_history: WorkItemRevisionHistoryDto }
+  | { projection_validation: ProjectionValidationReport }
+  | { plan_amendment_manifest: PlanAmendmentManifest }
+  | { sc_failure_repair_package: ScFailureRepairPackage };
+
+export type ArtifactUpdateMessage = { type: "artifact_update"; version: number } & WorkspaceArtifactWire;
 
 // 退役留档（T5/REQ-RET-02）：RevertWorkItemMessage/SaveHumanPresentationRevision
 // 消息族类型随 wire 变体删除（wp5-attribution-table.md §1/§2）。
@@ -920,6 +909,7 @@ export type WorkspaceStructuredArtifactVersion = ArtifactVersionSummary & {
   work_item_revision_history?: WorkItemRevisionHistoryDto;
   projection_validation?: ProjectionValidationReport;
   plan_amendment_manifest?: PlanAmendmentManifest;
+  sc_failure_repair_package?: ScFailureRepairPackage;
 };
 
 export type ProviderSnapshot = {
@@ -976,16 +966,7 @@ export type WorkspaceEventOutputResponse = {
 export type WorkspaceArtifactVersionResponse = {
   version: number;
   markdown: string;
-  artifact?:
-    | { markdown: string; diff?: string | null }
-    | { candidate: WorkItemPlanCandidateDto }
-    | { outline_candidate: WorkItemPlanOutlineCandidatePayload }
-    | { context_blocker: WorkItemPlanContextBlockerPayload }
-    | { draft_candidate: WorkItemDraftCandidatePayload }
-    | { batch_state: WorkItemBatchStatePayload }
-    | { compile_report: WorkItemPlanCompileReportPayload }
-    | WorkItemPlanArtifactPayload
-    | null;
+  artifact?: WorkspaceArtifactWire | WorkItemPlanArtifactPayload | null;
   generated_by?: WorkspaceProviderName;
   reviewed_by?: WorkspaceProviderName | null;
   review_verdict?: ReviewVerdictType | null;
@@ -1102,21 +1083,7 @@ export type WsOutMessage = WithEventSeq<
       openspec_enabled: boolean;
       messages: WsMessage[];
       checkpoints: WsCheckpoint[];
-      artifact:
-        | string
-        | null
-        | { markdown: string; diff?: string | null }
-        | { candidate: WorkItemPlanCandidateDto }
-        | { outline_candidate: WorkItemPlanOutlineCandidatePayload }
-        | { context_blocker: WorkItemPlanContextBlockerPayload }
-        | { draft_candidate: WorkItemDraftCandidatePayload }
-        | { batch_state: WorkItemBatchStatePayload }
-        | { compile_report: WorkItemPlanCompileReportPayload }
-        | { plan_projection: PlanProjectionBundle }
-        | { work_item_projection: WorkItemProjectionBundle }
-        | { work_item_revision_history: WorkItemRevisionHistoryDto }
-        | { projection_validation: ProjectionValidationReport }
-        | { plan_amendment_manifest: PlanAmendmentManifest };
+      artifact: string | null | WorkspaceArtifactWire;
       providers: WsProviderConfig;
       timeline_nodes: TimelineNode[];
       active_node_id: string | null;

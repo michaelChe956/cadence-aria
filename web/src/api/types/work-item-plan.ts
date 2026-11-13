@@ -3,6 +3,7 @@ import type {
   WorkItemContextBudget,
   WorkItemKind,
 } from "./common";
+import type { ScFailureRepairPackage } from "./sc-failure-repair";
 import type { LifecycleWorkItem, WorkspaceReviewStatus } from "./lifecycle";
 import type {
   ArtifactVersionSummary,
@@ -323,7 +324,8 @@ export type WorkItemPlanArtifactPayload =
   | { type: "plan_projection"; payload: PlanProjectionBundle }
   | { type: "work_item_projection"; payload: WorkItemProjectionBundle }
   | { type: "work_item_revision_history"; payload: WorkItemRevisionHistoryDto }
-  | { type: "projection_validation"; payload: ProjectionValidationReport };
+  | { type: "projection_validation"; payload: ProjectionValidationReport }
+  | { type: "sc_failure_repair_package"; payload: ScFailureRepairPackage };
 
 export type WorkItemPlanArtifactVersion = ArtifactVersionSummary & {
   artifact?: WorkItemPlanArtifactPayload | null;
