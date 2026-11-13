@@ -27,8 +27,8 @@ use crate::product::models::ArtifactRef;
 use crate::product::workspace_engine::{EngineEvent, WorkspaceEngine, WorkspaceSession};
 use crate::web::workspace_ws_types::ArtifactPayload;
 use fixture::{
-    NODE_ID, artifact_updates, chain_dir, drain, engine_for, ordinary_version,
-    publication_fixture, receipt_from_disk, seed_timeline_node,
+    NODE_ID, chain_dir, ordinary_version, publication_fixture, receipt_from_disk,
+    seed_timeline_node,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
