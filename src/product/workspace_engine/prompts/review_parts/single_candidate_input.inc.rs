@@ -195,14 +195,6 @@ impl WorkspaceEngine {
                 "mechanical_report_ref": report_ref,
             }),
         )?;
-        append_single_candidate_context_section_compact(
-            &mut prompt,
-            "Immutable Candidate Artifact Refs",
-            &json!({
-                "plan_candidate_ir_ref": ir_ref,
-                "mechanical_report_ref": report_ref,
-            }),
-        )?;
 
         // SG3a.1 三可信 section（plan §0.6.2）：只序列化同一 record 的 Some
         // 结构 payload——实际来源边/仓序/target、身份绑定与修复审计。
