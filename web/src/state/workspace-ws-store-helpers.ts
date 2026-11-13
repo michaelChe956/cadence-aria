@@ -10,6 +10,7 @@ import type {
   WorkItemRevisionHistoryDto,
   WorkspaceProviderName,
 } from "../api/types";
+import type { ScFailureRepairPackage } from "../api/types/sc-failure-repair";
 import type { ChatEntryRole } from "./chat-entries";
 import type {
   ArtifactVersion,
@@ -417,6 +418,12 @@ export function workItemPlanProjectionArtifactFromRecord(
     return {
       type: "projection_validation",
       payload: value.projection_validation as ProjectionValidationReport,
+    };
+  }
+  if ("sc_failure_repair_package" in value) {
+    return {
+      type: "sc_failure_repair_package",
+      payload: value.sc_failure_repair_package as ScFailureRepairPackage,
     };
   }
   return null;

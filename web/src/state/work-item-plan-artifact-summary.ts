@@ -131,6 +131,23 @@ export function workItemPlanArtifactUpdateSummary(
     };
   }
 
+  if (artifact.type === "sc_failure_repair_package") {
+    const pkg = artifact.payload;
+    return {
+      content: `SC Failure Repair 已更新 · ${pkg.package_id} · ${pkg.completeness}`,
+      metadata: {
+        version,
+        version_label: versionLabel,
+        artifact_type: artifact.type,
+        artifact_label: "SC Failure Repair",
+        object_id: pkg.package_id,
+        status_label: pkg.completeness,
+        completeness: pkg.completeness,
+        terminal_class: pkg.terminal_class,
+      },
+    };
+  }
+
   return {
     content: `Projection Validation 已发布 · ${artifact.payload.findings.length} findings`,
     metadata: {

@@ -18,6 +18,7 @@ import type {
   UsageReportPayload,
   WsOutMessage,
 } from "../api/types";
+import type { ScFailureRepairPackage } from "../api/types/sc-failure-repair";
 import type { TrustRegistrationReceipt } from "../state/workspace-ws-store-types";
 import type { ChatEntry, ChatEntryRole } from "../state/chat-entries";
 import {
@@ -891,6 +892,12 @@ function workItemPlanArtifactFromMessage(msg: WsServerMessage): WorkItemPlanArti
     return {
       type: "projection_validation",
       payload: msg.projection_validation as ProjectionValidationReport,
+    };
+  }
+  if (msg.sc_failure_repair_package) {
+    return {
+      type: "sc_failure_repair_package",
+      payload: msg.sc_failure_repair_package as ScFailureRepairPackage,
     };
   }
   return null;
