@@ -832,7 +832,9 @@ mod tests {
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").expect("write manifest");
         std::fs::create_dir_all(dir.path().join("busi").join("gateway").join("api"))
             .expect("mkdir nested member");
-        let targets = member_targets_fixture(&["root", "gw"], Some("root"));
+        // fallback_physical_id 与 physical_by_logical 值同域：完整物理仓 ID
+        // （同 prompt_contract_* 的 `Some("repo_backend_0001")`），非 slug。
+        let targets = member_targets_fixture(&["root", "gw"], Some("phys-root"));
         let prefixes = checkout_prefixes_fixture(&[("root", ""), ("gw", "busi/gateway")]);
 
         let summary = summarize_repository_structure_sc_members(
@@ -986,7 +988,8 @@ mod tests {
         // 多字节长前缀 + 每成员 15 个子项（12 项上限 + 字节预算）⇒ 身份头均为
         // 完整行、总输出 ≤3,200B、每成员 ≤12 子项、截断说明完整收尾。
         let dir = TempDir::new().expect("temp repo");
-        let long_prefix = "业务网关成员仓相对前缀段".repeat(9);
+        // 单段路径分量 ≤255B（Linux NAME_MAX），多段拼出 332B 多字节长前缀。
+        let long_prefix = vec!["业务网关成员仓相对前缀段"; 9].join("/");
         let member_root = dir.path().join(&long_prefix);
         for child in 0..15 {
             std::fs::create_dir_all(member_root.join(format!("目录{child:02}")))
