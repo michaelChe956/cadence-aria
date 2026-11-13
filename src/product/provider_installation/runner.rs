@@ -3,12 +3,20 @@
 //! - **一个包一次安装**：API 只接受单个 `InstallTarget`，无批量入口
 //!   （批量由块3 编排层循环调用）。
 //! - npm 形态固定：`install -g --prefix <prefix> --omit=optional
-//!   --no-audit --no-fund <pkg>[@version]`，环境带 `npm_config_registry`
-//!   （默认阿里镜像，`NPM_REGISTRY` 可覆盖）；`<prefix>` 避开 sudo。
+//!   --no-audit --no-fund --allow-scripts=<pkg> <pkg>[@version]`，环境带
+//!   `npm_config_registry`（默认阿里镜像，`NPM_REGISTRY` 可覆盖）；
+//!   `<prefix>` 避开 sudo。安装子进程的 PATH **前插**目标前缀的 bin。
 //! - Kimi 走官方脚本（`curl -fsSL … | bash`）。
-//! - 成功后经 `PostInstallProber` 重新探测（`provider_health.refresh`）；
-//!   **安装 ≠ 核验**：不写 capability、不触发核验探针。
-//! - 失败经 `failure_classify` 分类落 job。
+//! - 成功后把安装产物的 bin 目录登记进共享 PATH overlay（**仅当**目录里确实
+//!   含刚装好的可执行文件）⇒ 平台自身探测立即可见；**之后**再经
+//!   `PostInstallProber` 重新探测（`provider_health.refresh` + 绝对路径兜底 +
+//!   npm 包 `package.json` 版本 + 一个真实命令）；**安装 ≠ 核验**：不写
+//!   capability、不触发核验探针。
+//! - 装完探测仍不过 ⇒ 以 `--include=optional` **重试一次**；仍失败 ⇒ 给出
+//!   可复制的修复命令（失败经 `failure_classify` 分类落 job）。
+//! - 更新语义（2.10）：前缀落点必须与被更新对象一致 —— 已安装且在 PATH 上
+//!   ⇒ 装回同一前缀；已安装但不在 PATH 上 ⇒ 从已安装包的真实路径反推前缀；
+//!   更新后版本未变 ⇒ 明确报「命令仍是旧版」，不得静默成功。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -366,14 +374,14 @@ impl PostInstallProber for HealthRefreshProber {
             npm_package_json_version(prefix, package)
         });
         // ② provider 版本走 health 快照（PATH ∪ overlay 口径）。
-        if version.is_none() {
-            if let InstallTarget::Provider(provider) = &target {
-                version = self
-                    .health
-                    .latest_diagnostic()
-                    .entry(provider)
-                    .and_then(|entry| entry.version.clone());
-            }
+        if version.is_none()
+            && let InstallTarget::Provider(provider) = &target
+        {
+            version = self
+                .health
+                .latest_diagnostic()
+                .entry(provider)
+                .and_then(|entry| entry.version.clone());
         }
         // 读不到版本 ⇒ 跑 `--version`：先 PATH 口径，再**绝对路径**兜底
         // （装到 PATH 之外时 PATH 口径必然 127）。
@@ -731,9 +739,9 @@ impl InstallJobExecution {
         }
         let repair = install_repair_command(row, &self.registry, prefix);
         Some(match base {
-            Some(hint) => format!(
-                "{hint}；装上了但真实命令跑不起来（可能缺平台包），请手动运行：{repair}"
-            ),
+            Some(hint) => {
+                format!("{hint}；装上了但真实命令跑不起来（可能缺平台包），请手动运行：{repair}")
+            }
             None => format!("装上了但真实命令跑不起来（可能缺平台包），请手动运行：{repair}"),
         })
     }
@@ -750,27 +758,26 @@ impl InstallJobExecution {
         bin_dir: Option<&Path>,
         path_hint: Option<String>,
     ) {
-        if let Some(retry) = npm_retry_plan(row, None, &self.registry, prefix) {
-            if let Ok(result) = self.runner.execute(&retry).await
-                && result.exit_code == Some(0)
-                && !result.timed_out
-                && !result.cancelled
+        if let Some(retry) = npm_retry_plan(row, None, &self.registry, prefix)
+            && let Ok(result) = self.runner.execute(&retry).await
+            && result.exit_code == Some(0)
+            && !result.timed_out
+            && !result.cancelled
+        {
+            register_install_bin_dir(bin_dir, row.command);
+            if let Some(version) = self
+                .prober
+                .refresh_after_install(target, bin_dir)
+                .await
+                .ok()
+                .and_then(|outcome| outcome.installed_version)
             {
-                register_install_bin_dir(bin_dir, row.command);
-                if let Some(version) = self
-                    .prober
-                    .refresh_after_install(target, bin_dir)
-                    .await
-                    .ok()
-                    .and_then(|outcome| outcome.installed_version)
-                {
-                    let outcome = InstallJobOutcome {
-                        installed_version: Some(version),
-                        path_hint,
-                    };
-                    let _ = self.store.complete(job_id, outcome, self.clock.now());
-                    return;
-                }
+                let outcome = InstallJobOutcome {
+                    installed_version: Some(version),
+                    path_hint,
+                };
+                let _ = self.store.complete(job_id, outcome, self.clock.now());
+                return;
             }
         }
         let repair = install_repair_command(row, &self.registry, prefix);
@@ -821,12 +828,8 @@ impl InstallJobExecution {
             Ok(result) if result.exit_code == Some(0) && !result.timed_out && !result.cancelled => {
                 // 装后登记 overlay（**仅当**目录里确实有刚装好的可执行文件）
                 // ⇒ 平台自身的命令可见 PATH 立刻包含新装的 CLI（D1/D2）。
-                let bin_dir = install_bin_dir(
-                    row,
-                    &prefix,
-                    &result.stdout,
-                    self.home_dir().as_deref(),
-                );
+                let bin_dir =
+                    install_bin_dir(row, &prefix, &result.stdout, self.home_dir().as_deref());
                 register_install_bin_dir(bin_dir.as_deref(), row.command);
                 // overlay 登记**之后**再探测（平台自身探测立即可见）。
                 let probe = self

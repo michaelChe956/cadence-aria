@@ -543,8 +543,7 @@ async fn resolve_effective_prefix_skips_npm_global_when_bin_not_on_path() {
         .await;
 
     assert_ne!(
-        resolved,
-        npm_global,
+        resolved, npm_global,
         "npm 全局前缀的 bin 不在 PATH 上 ⇒ 不得选它（装到 PATH 之外 = 装完探测仍失败）"
     );
     assert_eq!(resolved, fallback, "应落到兜底前缀");
@@ -552,6 +551,9 @@ async fn resolve_effective_prefix_skips_npm_global_when_bin_not_on_path() {
 
 /// 装成功后必须把「安装产物的 bin 目录」登记进 PATH overlay ⇒ 平台自身的
 /// 命令可见 PATH 立刻包含新装的 CLI（决策 D1/D2）。
+// overlay 是进程级共享状态 ⇒ 必须持全局锁把「登记 + 断言」整段串行化
+// （锁要跨 await 持有：先例 workspace_engine/tests/part_03/task_3_4_oracles.rs）。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn install_registers_install_bin_dir_into_path_overlay() {
     // overlay 是进程级共享状态 ⇒ 必须持全局锁并在结束时清空。
@@ -709,7 +711,10 @@ impl BoundedCommandRunner for AlwaysFailingRunner {
         &self,
         request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
-        self.requests.lock().expect("recorded requests").push(request);
+        self.requests
+            .lock()
+            .expect("recorded requests")
+            .push(request);
         failure("not found")
     }
 }
@@ -813,7 +818,10 @@ impl BoundedCommandRunner for PathAwareRunner {
         request: BoundedCommandRequest,
     ) -> Result<BoundedCommandResult, BoundedCommandError> {
         let executable = request.executable.clone();
-        self.requests.lock().expect("recorded requests").push(request);
+        self.requests
+            .lock()
+            .expect("recorded requests")
+            .push(request);
         if executable.contains('/') {
             success("1.2.3")
         } else {
@@ -844,9 +852,10 @@ async fn post_install_version_falls_back_to_absolute_path_probe() {
         "PATH 找不到时绝对路径探测必须回填版本"
     );
     assert!(
-        runner.requests().iter().any(|request| {
-            request.executable == bin.join("codegraph").to_string_lossy()
-        }),
+        runner
+            .requests()
+            .iter()
+            .any(|request| { request.executable == bin.join("codegraph").to_string_lossy() }),
         "绝对路径探测必须经 BoundedCommandRunner: {:?}",
         runner.requests()
     );
@@ -855,6 +864,8 @@ async fn post_install_version_falls_back_to_absolute_path_probe() {
 /// Kimi 行（官方脚本）安装结果必须带 `path_hint`，文案点名
 /// `~/.kimi-code/bin`（官方脚本只改 shell rc ⇒ 运行中的平台进程 PATH 不变
 /// ⇒ 探测必然 127 ⇒ 必须提示）。
+// 同上：overlay 登记是进程级共享状态 ⇒ 持全局锁跨 await 串行化。
+#[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn kimi_install_result_carries_path_hint() {
     // 该用例会触发 overlay 登记 ⇒ 必须持全局锁并在结束时清空，避免污染
@@ -959,8 +970,7 @@ async fn update_targets_existing_install_that_is_not_on_path() {
         .await;
 
     assert_eq!(
-        resolved,
-        existing,
+        resolved, existing,
         "已安装但不在 PATH 上 ⇒ 必须反推回它所在的前缀，不得改装到别处"
     );
 }
