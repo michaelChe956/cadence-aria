@@ -79,6 +79,10 @@ const SINGLE_CANDIDATE_TERMINAL_REOPEN_GUIDANCE: &str =
 #[path = "sc_failure_transport.rs"]
 pub(super) mod sc_failure_transport;
 
+/// P09：SC 失败证据 blocking reasons 纯拼装（compile/IR/structure 三通道共用）。
+#[path = "sc_failure_evidence.rs"]
+pub(super) mod sc_failure_evidence;
+
 /// 公共 admission 预检「成员语言规则缺失」等待项的判别码（路 C，Task 4）：
 /// SC 消费链对成员文件的必需性判定收敛到实际消费点——该等待项在 SC 侧不
 /// 直接阻断（其他 active 成员缺失不阻断 SC），由消费点对已解析
