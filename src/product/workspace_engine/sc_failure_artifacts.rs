@@ -688,7 +688,7 @@ impl WorkspaceEngine {
 
         let digest = sc_failure_package_digest(&package)?;
         let session_id = package.session_id.clone();
-        let author_provider = self.session.author_provider;
+        let author_provider = self.session.author_provider.clone();
         let package_for_write = package.clone();
         let node_for_write = node_id.clone();
 

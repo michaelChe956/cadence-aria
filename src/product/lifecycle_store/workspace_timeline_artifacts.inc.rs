@@ -294,8 +294,11 @@ impl ArtifactVersionsWrite<'_> {
         }
     }
 
-    /// 以 `proposed` 为权威整表落盘：删除/回滚合法，不复活磁盘缺席条目，同 version
-    /// 改 payload 允许。version 重复在任何写之前拒绝。
+    /// 以 `proposed` 为权威整表落盘，但 A4（SC 失败修复包）走集中协调：
+    /// 磁盘已有而 `proposed` 缺席的 A4 逐字保留；同 version A4 必须逐字相等
+    /// （异 payload/metadata 拒绝）；A4 恒 `is_current=false`；同 `package_id`
+    /// 不得绑定两个不同 digest。普通条目仍以 `proposed` 为权威（删除/回滚
+    /// 不复活）。version 重复在任何写之前拒绝。
     /// 禁止转调公共 `save_artifact_versions`：同一 sidecar 的 flock 按 open file
     /// description 计，同线程二次获取会永久阻塞。
     pub(crate) fn save(
@@ -309,9 +312,78 @@ impl ArtifactVersionsWrite<'_> {
                 reason: "duplicate_version".to_string(),
             });
         }
-        write_json(self.path, &proposed)?;
-        self.raw = proposed.to_vec();
-        Ok(self.raw.clone())
+        let merged = self.merge_preserving_a4(proposed)?;
+        write_json(self.path, &merged)?;
+        self.raw = merged.clone();
+        Ok(merged)
+    }
+
+    /// A4-only 集中协调（Plan §2.5 P14）。
+    fn merge_preserving_a4(
+        &self,
+        proposed: &[ArtifactVersion],
+    ) -> Result<Vec<ArtifactVersion>, ProductStoreError> {
+        for entry in proposed {
+            if is_a4_payload(&entry.payload) && entry.is_current {
+                return Err(ProductStoreError::InvalidRecord {
+                    kind: "artifact_versions",
+                    reason: "a4_current_forbidden".to_string(),
+                });
+            }
+        }
+        let mut merged = proposed.to_vec();
+        for disk in &self.raw {
+            if !is_a4_payload(&disk.payload) {
+                continue;
+            }
+            match merged
+                .iter()
+                .position(|entry| entry.version == disk.version)
+            {
+                Some(index) => {
+                    if merged[index] != *disk {
+                        return Err(ProductStoreError::InvalidRecord {
+                            kind: "artifact_versions",
+                            reason: "a4_immutable_violation".to_string(),
+                        });
+                    }
+                }
+                None => merged.push(disk.clone()),
+            }
+        }
+        let mut digest_by_package: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for entry in &merged {
+            let crate::web::workspace_ws_types::ArtifactPayload::ScFailureRepairPackage {
+                sc_failure_repair_package,
+            } = &entry.payload
+            else {
+                continue;
+            };
+            let digest = crate::product::lifecycle_store::sc_failure_publication::sc_failure_package_digest(
+                sc_failure_repair_package,
+            )
+            .map_err(|error| ProductStoreError::InvalidRecord {
+                kind: "artifact_versions",
+                reason: format!("a4_package_digest_failed: {}", error.detail),
+            })?;
+            match digest_by_package.get(sc_failure_repair_package.package_id.as_str()) {
+                Some(existing) if existing != &digest => {
+                    return Err(ProductStoreError::InvalidRecord {
+                        kind: "artifact_versions",
+                        reason: "a4_package_digest_conflict".to_string(),
+                    });
+                }
+                Some(_) => {}
+                None => {
+                    digest_by_package.insert(
+                        sc_failure_repair_package.package_id.clone(),
+                        digest,
+                    );
+                }
+            }
+        }
+        Ok(merged)
     }
 
     /// 当前磁盘文件的逐字节内容；文件缺失与 `list_artifact_versions` 同口径返回空。
@@ -323,6 +395,13 @@ impl ArtifactVersionsWrite<'_> {
             ProductStoreError::Io(format!("read {}: {error}", self.path.display()))
         })
     }
+}
+
+fn is_a4_payload(payload: &crate::web::workspace_ws_types::ArtifactPayload) -> bool {
+    matches!(
+        payload,
+        crate::web::workspace_ws_types::ArtifactPayload::ScFailureRepairPackage { .. }
+    )
 }
 
 #[cfg(test)]
