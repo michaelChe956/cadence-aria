@@ -118,7 +118,8 @@ async fn publish_writes_version_ref_and_receipt_and_replay_reuses_same_version()
     assert!(ordinary.is_current, "普通 current 版本不得被 SC 包改写");
     assert_eq!(ordinary.payload, ordinary_version().payload);
 
-    // 节点 artifact_ref：必须是同一个发布版本。
+    // 节点 artifact_ref：artifact_id 沿用既有 `artifact_version_{version:03}` 约定，
+    // 版本必须就是本次发布版本（package_id 不充当 artifact 身份）。
     let detail = fixture
         .store
         .load_node_detail(&fixture.session_id, NODE_ID)
@@ -126,7 +127,7 @@ async fn publish_writes_version_ref_and_receipt_and_replay_reuses_same_version()
     assert_eq!(
         detail.artifact_ref,
         Some(ArtifactRef {
-            artifact_id: fixture.package.package_id.clone(),
+            artifact_id: format!("artifact_version_{:03}", published.version),
             version: published.version,
         })
     );

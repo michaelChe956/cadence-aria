@@ -268,8 +268,10 @@ impl WorkspaceEngine {
             })?;
 
         // 节点 artifact_ref：写入后读回同一版本（无未核验兜底、不写 no-op 引用）。
+        // artifact_id 沿用既有 `artifact_version_{version:03}` 约定（与 store 的发布
+        // 屏障核验同口径）；package_id 只活在载荷与回执里，不是 artifact 身份。
         let artifact_ref = ArtifactRef {
-            artifact_id: package.package_id.clone(),
+            artifact_id: format!("artifact_version_{:03}", published_row.version),
             version: published_row.version,
         };
         self.persist_artifact_ref(&node_id, artifact_ref.clone())
