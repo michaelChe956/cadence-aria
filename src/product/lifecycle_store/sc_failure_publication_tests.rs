@@ -560,3 +560,35 @@
             .unwrap();
         assert!(receipt_path(&store2, &sid2, &id2.chain_id, &pkg2.package_id).exists());
     }
+
+    // F1 RED (no impl yet): a non-UTF8 tail must not destroy the real verified
+    // prefix. Strict log has a real RoundBound prefix; 0xFF corrupts the tail.
+    // Current whole-file `read_to_string` drops the prefix (verified_prefix=None),
+    // so this test FAILs until the module reads bytes and only the first physical
+    // line, then lets the existing strict read supply the verified prefix.
+    #[test]
+    fn p14_read_chain_preserves_verified_prefix_on_non_utf8_tail() {
+        let (_tmp, store, session) = fixture_sc();
+        let sid = session.id.clone();
+        let sc = scope(&sid);
+        let id = identity(&sc);
+        store
+            .append_sc_failure_evidence(&id, &round_bound(&id, &sid))
+            .unwrap();
+        let log = evidence_log_path(&store, &sid, &id.chain_id);
+        let mut bytes = std::fs::read(&log).unwrap();
+        bytes.push(0xFF);
+        bytes.push(b'\n');
+        std::fs::write(&log, &bytes).unwrap();
+
+        let err = store
+            .read_sc_failure_chain_for_publication(&sc, &id.chain_id)
+            .expect_err("non-UTF8 tail must fail the strict read");
+        let prefix = err
+            .verified_prefix
+            .expect("real verified prefix must survive a non-UTF8 tail");
+        assert!(
+            !prefix.entries.is_empty(),
+            "prefix keeps the validated entries"
+        );
+    }
