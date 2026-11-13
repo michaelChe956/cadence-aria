@@ -960,3 +960,6 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/sc_failure_evidence_boundaries.rs"]
 mod boundary_tests;
+#[cfg(test)]
+#[path = "tests/sc_failure_round_lookup.rs"]
+mod round_lookup_tests;
