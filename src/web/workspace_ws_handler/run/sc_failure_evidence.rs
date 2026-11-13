@@ -1,11 +1,121 @@
-//! P09 前置 RED（纯行为面）：SC 失败证据三通道 blocking reasons 拼装契约。
-//! 落点：`run/sc_failure_evidence.rs` 末尾 `#[cfg(test)] mod tests`，原样粘贴；
-//! helpers 在 `super::`（文件尚不存在）⇒ 当前整体不可编译 = RED。只钉数据事实
-//! （顺序/存在/重复/未截断），不钉实现措辞；仅 ticket 明文的 `code:line:message` 比对整串。
+//! P09：SC 失败证据 blocking reasons 三通道纯拼装（compile / IR / structure）。
 //!
-//! v2 校正（2026-11-13，FullFailureFacts）：`IrFault` 实测 7 字段（`ir_fault.rs:21-40`
-//! 含 `offending_ref: String`），v1 fixture 缺该字段会额外产生 E0063，使 RED 失真；
-//! 此处补齐真实字段，其余断言逐字未改。
+//! 本模块只做**事实投影**：不解析 message/code 文本、不重建 typed payload、
+//! 不改写来源集合、不授予任何资格。教学资格只由
+//! `single_candidate_compile_preflight::PreflightVerdict::to_teaching_verdict`
+//! 判定——本模块产出 facts，资格由调用侧既有判据决定。
+use super::single_candidate_compile_preflight::{PreflightVerdict, format_compile_failure_reasons};
+use crate::product::planning_failure::{PlanningFailure, PlanningFailureSet};
+use crate::product::work_item_plan_compiler::{
+    CompilerDiagnostic, IrFault, IrFaultKind, IrFaultLocator,
+};
+
+/// compile 失败面：逐条 `code:line:message`（复用既有单源形态；顺序即
+/// diagnostics 顺序，不去重、不排序）后**全量**追加修复指令行——不设呈现
+/// 上限、不折叠计数，第 N 条指令逐字在场（呈现截断仍由
+/// `compile_failure_surface` 单独负责，本通道不截断）。
+pub(super) fn compile_blocking_reasons(
+    diagnostics: &[CompilerDiagnostic],
+    instructions: &[String],
+) -> Vec<String> {
+    let mut reasons = format_compile_failure_reasons(diagnostics);
+    reasons.extend(instructions.iter().cloned());
+    reasons
+}
+
+/// IR 预检失败面：operational 在前、呈现原文在后（与
+/// `PreflightVerdict::presentation_reasons` 同序）。两文本面皆空且 typed
+/// 事实非空时，才回落到 typed 事实的稳定渲染——**有事实 ≠ 有资格**：
+/// 不可定位的 typed 事实仍由 `to_teaching_verdict` 判 `ir_fault_not_locatable`。
+pub(super) fn ir_blocking_reasons(preflight: &PreflightVerdict) -> Vec<String> {
+    let mut reasons = preflight.operational_failures.clone();
+    reasons.extend(preflight.failure_reasons.iter().cloned());
+    if reasons.is_empty() && !preflight.ir_faults.is_empty() {
+        reasons = preflight
+            .ir_faults
+            .iter()
+            .map(render_ir_fault_fact)
+            .collect();
+    }
+    reasons
+}
+
+/// 结构失败面：按 producer 顺序逐条渲染（精确重复条目重复输出，不去重、
+/// 不排序），只投影 typed 事实，集合本体零改写。
+pub(super) fn structure_blocking_reasons(set: &PlanningFailureSet) -> Vec<String> {
+    set.failures.iter().map(render_structure_failure).collect()
+}
+
+/// typed IR 事实的单行渲染：保留 work item 身份、定位身份、出错引用、
+/// 合法集合（原序）、期望形态；行号**仅在 `source_line` 在场时**写出，
+/// 缺行不伪造 0/占位。渲染确定：同一事实两次渲染逐字相等。
+fn render_ir_fault_fact(fault: &IrFault) -> String {
+    let locator = match &fault.locator {
+        IrFaultLocator::Task { task_id } => format!("task {task_id}"),
+        IrFaultLocator::Handoff => "handoff".to_string(),
+        IrFaultLocator::Criterion { criterion_id } => format!("criterion {criterion_id}"),
+    };
+    let mut fact = format!(
+        "ir_fault {} work_item={} locator={} offending_ref={} legal_refs=[{}]",
+        ir_fault_kind_code(&fault.kind),
+        fault.work_item_id,
+        locator,
+        fault.offending_ref,
+        fault.legal_refs.join("、"),
+    );
+    if let Some(line) = fault.source_line {
+        fact.push_str(&format!(" source_line={line}"));
+    }
+    fact.push_str(&format!(" expected_shape={}", fault.expected_shape));
+    fact
+}
+
+/// 四类 IR 故障的稳定码名（与 producer 写入的 diagnostic code 同名；枚举
+/// 变体 → 码名的显式映射，不从 message 反解析）。既有同名单源在
+/// `workspace_engine::prompts::sc_compile_teaching`（模块私有），P09 三文件
+/// 闭合内不得改它，故此处显式映射同名字符串。
+fn ir_fault_kind_code(kind: &IrFaultKind) -> &'static str {
+    match kind {
+        IrFaultKind::UnknownDoneWhenRef => "unknown_done_when_ref",
+        IrFaultKind::UnknownReviewerCheckRef => "unknown_reviewer_check_ref",
+        IrFaultKind::AcceptanceCriterionWithoutReviewerCheck => {
+            "acceptance_criterion_without_reviewer_check"
+        }
+        IrFaultKind::UnknownRequirementRef => "unknown_requirement_ref",
+    }
+}
+
+/// 结构失败的单行渲染：稳定码 + origin/stage + 诊断引用 + 受影响 ID
+/// （producer 原序，重复保留）+ details 每对 key/value（BTreeMap 键序）。
+/// 不解析 `Operational { stable_code, cause }` 的 cause 文本、不从 prose 造
+/// id、不重封集合——渲染是来源集合的纯函数。
+fn render_structure_failure(failure: &PlanningFailure) -> String {
+    let mut line = format!(
+        "planning_failure {} origin={:?} stage={:?} diagnostic_ref={}",
+        failure.kind.stable_code(),
+        failure.origin,
+        failure.stage,
+        failure.diagnostic_ref,
+    );
+    if !failure.evidence.affected_ids.is_empty() {
+        line.push_str(&format!(
+            " affected_ids=[{}]",
+            failure.evidence.affected_ids.join("、")
+        ));
+    }
+    if !failure.evidence.details.is_empty() {
+        let details = failure
+            .evidence
+            .details
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        line.push_str(&format!(" details=[{details}]"));
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::single_candidate_compile_preflight::{PreflightVerdict, TeachingVerdict};
