@@ -937,15 +937,6 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
         started = True
         return True
 
-    cli = WsClient("127.0.0.1", port,
-                   "/api/workspace-sessions/%s/ws" % session_id, origin)
-    stage_seq, blocked, gate_stage, started = [], None, None, False
-    frames_fh = open(frames_path, "a", encoding="utf-8")
-
-    def record(entry):
-        frames_fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        frames_fh.flush()
-
     record({"event": "ws_open", "session_id": session_id})
     try:
         cli.send_text(json.dumps({"type": "hello", "session_id": session_id,
@@ -1174,6 +1165,7 @@ def make_seed(binary, src, out_root, port, issue_input, case_root):
         "src": src,
         "state_root_src": src,
         "fixed_case_root": case_root,
+        "case_root_env": os.environ.get("WIG_CASE_ROOT"),
         "project_id": PROJECT,
         "scratch_home": home,
         "issue_input_path": issue_input["path"],
@@ -1196,6 +1188,12 @@ def make_seed(binary, src, out_root, port, issue_input, case_root):
         snap_before = member_snapshot(seed_ws)
         assert_three_members(snap_before, "seed")
         assert_fixed_case_paths(snap_before, case_root, "seed")
+        agg_root = os.path.abspath(snap_before.get("aggregate_root") or "").rstrip("/")
+        if agg_root and agg_root != case_root:
+            raise SystemExit(
+                "固定案例根与产品记录不一致：case_root=%s，snapshot.aggregate_root=%s。"
+                "唯一权威是 --case-root/WIG_CASE_ROOT（不静默纠正、不把 state root 当案例根）"
+                % (case_root, agg_root))
         changed, hits = repoint_state_root_refs(seed_ws, src)
         if changed:
             log("  状态根引用重指向: %d 个文件（字段 %s）" % (changed, hits))
