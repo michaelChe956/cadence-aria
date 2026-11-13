@@ -989,7 +989,7 @@ mod tests {
         // 完整行、总输出 ≤3,200B、每成员 ≤12 子项、截断说明完整收尾。
         let dir = TempDir::new().expect("temp repo");
         // 单段路径分量 ≤255B（Linux NAME_MAX），多段拼出 332B 多字节长前缀。
-        let long_prefix = vec!["业务网关成员仓相对前缀段"; 9].join("/");
+        let long_prefix = ["业务网关成员仓相对前缀段"; 9].join("/");
         let member_root = dir.path().join(&long_prefix);
         for child in 0..15 {
             std::fs::create_dir_all(member_root.join(format!("目录{child:02}")))
