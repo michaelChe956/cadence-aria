@@ -1,6 +1,6 @@
 # 提案：修复「页面点安装没有效果」与「聚合索引 codegraph 截断报错」
 
-> 状态：契约已获批并**已实施**（2026-11-13）；`tasks.md` 记录工作包与其实施状态（`[x]` 已落地 / `[ ]` 待办），未闭环项为 OpenSpec 归档同步、容器 E2E 复验与终审遗留跟踪条目（后者不在本 change 声称已实现）。
+> 状态：契约已获批并**已实施**（2026-11-13）；`tasks.md` 记录工作包与其实施状态（`[x]` 已落地 / `[ ]` 待办），未闭环项为 **OpenSpec 归档同步**（主规格漂移对齐 + CHANGELOG 留痕）与**容器 E2E 复验**；终审遗留项（第 13 包）**已由本 change 的修复波落地**，逐条附实现证据（提交 / 红测试）。
 > 依据：`cadence/plans/2026-11-13_计划文档_修复Provider安装无效果与聚合索引截断_v1.0.md`（提交 `c2929b02` / `d06c1d16` / `8b9012c9`）。
 > Owner 决策（2026-11-13，见 `.openspec.yaml` 的 `x-owner-decisions`）：D1/D2 装完判成功 + 平台命令可见 PATH overlay；D3 64 MiB 专用上限（额外旗标经 owner 裁决去掉：实测零收益 + 未来上游移除该旗标的风险）；D4 前端 `path_hint` 原样渲染；另增「更新语义」（owner 明确范围含更新）；另增「聚合索引成员覆盖验收改走 codegraph 库 API」（owner 2026-11-13 裁决）、「暴露到终端 PATH」显式动作（owner 2026-11-13 裁决）与「agent 专属环境变量补进子进程」（owner 2026-11-13 裁决「本轮做」，方案 §五 2.12）。
 
@@ -74,7 +74,7 @@
 | 5 | **安装提示与状态**：Kimi 官方脚本的安装目录 SHALL 可被平台识别并用于装后探测与提示；`path_hint` 原样呈现（前端 MUST NOT 二次包裹）；新增「装了但不在终端 PATH 上」的显式状态 |
 | 6 | **装后验证**：版本优先读 npm 包 `package.json`；除 `--version` 外 MUST 跑一个真实命令证明可执行；失败区分「没装上 / 装上但缺平台包 / 装上但不在 PATH」三种语义 |
 | 7 | **npm 安装参数**：`--allow-scripts=<pkg>`；装完探测失败时以 `--include=optional` 重试一次 |
-| 8 | **更新语义**（owner 2026-11-13 明确范围含更新）：更新 SHALL 装到**被更新对象当前所在的前缀**（已安装但不在 PATH 上时从已安装包真实路径反推 npm 前缀，MUST NOT 改装到别的前缀）；更新后版本未变 SHALL 明确报告「命令仍是旧版」，MUST NOT 静默成功；Kimi 更新沿用官方脚本原地替换并经装后验证 |
+| 8 | **更新语义**（owner 2026-11-13 明确范围含更新）：更新 SHALL 装到**被更新对象当前所在的前缀**（已安装但不在 PATH 上时从已安装包真实路径反推 npm 前缀，MUST NOT 改装到别的前缀）；更新后版本未变 SHALL 明确报告「命令仍是旧版」，MUST NOT 静默成功；**更新前后的版本取数 SHALL 同源同口径**（口径不一致 ⇒ 「版本未变」恒不成立 ⇒ 该判定在生产上永不触发）；Kimi 更新沿用官方脚本原地替换并经装后验证 |
 | 9 | **聚合索引成员覆盖验收改走库 API**（owner 2026-11-13 裁决，已实施）：成员覆盖判定经 codegraph **库 API**（`CodeGraph.open(root)` + 逐成员 `hasFilesUnder(member)`）逐成员目录级查询，载荷是成员级布尔事实（几百字节），MUST NOT 以全量文件清单为常规验收路径；目录边界 MUST 是目录语义；库 API 不可用（未安装 / 版本不兼容）时 MAY 回退既有 CLI 清单路径并留可审计痕迹，但 MUST NOT 把回退当常规路径；索引健康 SHALL 只告警不阻断激活 |
 | 10 | **「暴露到终端 PATH」显式动作**（owner 2026-11-13 裁决，已实施）：用户**显式触发**时，只在「已存在 + 真实可写 + 确实在用户终端 PATH 上」的目录里创建**单个**软链；MUST NOT 修改用户的 shell 配置文件；失败 MUST 如实报告（含各候选目录的不合格原因） |
 | 11 | **agent 专属环境变量补进子进程**（owner 2026-11-13 裁决「本轮做」，方案 §五 2.12；已实施）：启动期探测**交互式登录 shell**（2s 硬上限、不阻塞启动）取得 `PI_CODING_AGENT_DIR` / `CODEX_HOME` / `CLAUDE_CONFIG_DIR`，只在「调用方覆盖层与平台进程 env 都没有」时补进平台发起的子进程 env；探测失败/超时 SHALL 不阻塞任何流程 |
@@ -94,6 +94,7 @@
 | 9 | **不采纳 magpie 的「不代跑安装」做法**：owner 2026-11-13 明确 —— magpie 这一点不作为参照，目标不变，产品内一键安装必须真的装上并能用 |
 | 10 | **不把排除性查询改走库 API**：非成员目录 / `.worktrees` / `.aria` / 构建产物未被索引的负查询**保持既有 CLI 查询机制**（载荷小，本轮不动） |
 | 11 | **不因索引健康问题阻断激活**：健康闸只产告警，不改「不因健康问题阻断」的既有语义 |
+| 12 | **不为前端观察器轮询节律新立 capability**：终审要求的「dirty 补跑等待期内不得被 250ms 防抖顶掉」已由 `ea1434b1` 落地（含红测试），但该能力**归属待 owner 裁决**；本 change 只如实记录已落地的行为，不为它新立 capability，也不动主规格 |
 
 > 说明：上表原有「agent 专属环境变量注入不在本轮范围」条目**已撤销**（owner 2026-11-13 裁决「本轮做」，方案 §五 2.12 授权实现），该行为现已实施并纳入本 change 范围（范围第 11 项，契约见 REQ-PCI-12）。
 
@@ -130,3 +131,4 @@
 | 「暴露到终端 PATH」（已实施） | `src/product/provider_installation/expose.rs` + `src/web/handlers/provider_installation.rs`（`POST /api/providers/{target}/expose`）+ `web/src/api/provider-install.ts`（提交 `1daf65b2` / `37f53aa4` / `29511974`） |
 | agent 专属环境变量注入（已实施） | `src/cross_cutting/path_overlay.rs`（`SHELL_PROBE_VARS` 变量清单 `:155`、`probe_login_shell_env` 交互式 login 探测与 2s 硬上限、`shell_env_overrides` 合并优先级）+ 两个汇聚点 `src/cross_cutting/process_manager.rs`（`spawn_with_environment`）与 `src/cross_cutting/cli_adapter.rs`（`run_command_capture_with_stream`） |
 | 「不在终端 PATH 上」显式状态（已实施） | `src/web/handlers/provider_installation.rs`（`off_path` DTO 字段与 `resolve_off_path`）+ `web/src/api/types/provider.ts` + `web/src/components/lifecycle/ProviderCapabilityCard.tsx`（徽标；提交 `d7d759c7` / `621d3269`） |
+| 终审遗留项修复波（已实施） | `tasks.md` 第 13 包逐条括注：`0f69fe90`（真实命令参与完成判定 / 更新落点 visible 优先 / codegraph 改 `status --json` 验证 / Kimi 同版本判定）、`f9c776d8`（自带 node 三布局）、`84675998`（Node helper 只读打开索引）、`55296a8f`（overlay 合并序 Prepend→base→Append + 存储实现可注入）、`ada50bca`（off_path/expose 查找序并入服务进程 PATH + 恢复被删断言）、`ea1434b1`（观察器 dirty 补跑独立槽位）、`f165474e` / `60b2e064`（expose 入口对「已安装未核验」行可达） |

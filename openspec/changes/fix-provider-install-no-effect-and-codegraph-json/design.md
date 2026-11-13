@@ -80,11 +80,11 @@
 
 **背景**：overlay 只解决「本会话刚装的东西」。用户此前用 fnm / nvm / volta / pnpm / bun / cargo 等装的 CLI 在平台进程 PATH 上同样看不到。
 
-**决定**：服务启动时把**实际存在**的用户工具目录登记进 overlay，目录清单沿用 magpie 的 `userDirs` 口径（`~/.local/bin`、`~/.npm-global/bin`、`~/.npm/bin`、`~/.bun/bin`、`~/.volta/bin`、`~/.asdf/shims`、`~/.local/share/mise/shims`、`~/.cargo/bin`、`~/.deno/bin`、`~/Library/pnpm`、`~/.local/share/pnpm`、nvm 默认 node 的 bin、mise 的 node installs、fnm 目录（`~/.local/share/fnm`、`~/Library/Application Support/fnm`、`$FNM_DIR`）、`/opt/homebrew/bin`、`/usr/local/bin`），**外加本仓自有落点**：`npm prefix -g` 的 bin、`NPM_PREFIX/bin`、`<home>/.kimi-code/bin`。
+**决定**：服务启动时把**实际存在**的用户工具目录登记进 overlay（落点 `src/cross_cutting/path_overlay.rs` 的 `register_startup_overlay` → `register_existing_candidates` → `user_tool_dirs` + `host_absolute_tool_dirs`），目录清单沿用 magpie 的 `userDirs` 口径：固定清单（`~/.local/bin`、`~/.npm-global/bin`、`~/.npm/bin`、`~/.bun/bin`、`~/.volta/bin`、`~/.asdf/shims`、`~/.local/share/mise/shims`、`~/.cargo/bin`、`~/.deno/bin`、`~/Library/pnpm`、`~/.local/share/pnpm`、fnm 目录（`~/.local/share/fnm`、`~/Library/Application Support/fnm`、`$FNM_DIR`））+ 环境驱动项（`~/.npmrc` 的 `prefix=` bin、nvm 默认 node 的 bin、mise 的 node installs）+ 宿主绝对落点（`/opt/homebrew/bin`、`/usr/local/bin`）。**npm 全局前缀（`npm prefix -g`）的 bin、`NPM_PREFIX/bin`、`<home>/.kimi-code/bin` 不在启动清单内** —— 它们由**装后登记**（决策 5）按「该目录确实含刚装好的可执行文件」这一事实条件覆盖：登记条件以事实为准，才不会在默认目录被改过时误登记，也不必在启动期为一个可能尚不存在的目录做外部探针。
 
 **约束**：
 - **只登记、不写盘、不创建目录** —— 不存在的目录一律不登记（登记一个不存在的目录只会让 PATH 里出现幽灵条目）。
-- 启动路径上的 `npm prefix -g` 探针用 **≤3s 超时**（生产安装作业里的同类探针是 10s；**不得**在启动路径引入 10s 阻塞）。
+- **启动路径不执行外部探针**（只 stat 目录 + 读 `~/.npmrc`）：`npm prefix -g` 探针只发生在**安装作业**路径（`runner.rs` 的 `CommandNpmGlobalPrefixProbe`，短超时），不落在启动关键路径 ⇒ 启动零阻塞。
 - 登记动作挂在启动流程里「bind 成功之后、首次 provider health 刷新之前」—— bind 失败必须零副作用。
 
 **理由**：既让「用户早就装好的 CLI」对平台可见，又不引入写副作用与启动阻塞。
@@ -135,6 +135,8 @@
 3. **失败时区分三种语义**并给对应可行动提示：「没装上」/「装上但缺平台包」/「装上但不在 PATH」。
 
 **绝对路径兜底探测**：PATH 找不到 CLI 时，用 `<bin>/<command>` 绝对路径探测；该探测**必须经 `BoundedCommandRunner`**（否则 overlay 合并不生效），且其结果**只填 `installed_version`**，**不得**绕过 REQ-PCI-02「已装但探针未过」的语义（能力核验仍走既有通道）。
+
+**真实命令的选择**（实施口径，落点 `runner.rs` 的 `post_install_verification_argv`）：codegraph 用 `status --json`（实测 1.6.2 在未初始化目录 exit 0，而一切命令都经平台包自带 node + dist 启动 ⇒ 平台包缺失时 exit 1 ⇒ 既证明 bundle 真能用、又不把「未建索引」误判成失败）；provider CLI 用 `--help`（真正加载入口与依赖，缺依赖即非零退出）。MUST NOT 用 `codegraph files`（未初始化目录 exit 1 ⇒ 会把新装的健康 codegraph 判失败），MUST NOT 附带元数据抑制旗标（与 REQ-IND-01 已裁决「只带 `--json`」同类）。
 
 **理由**：`--version` 在 bundle 缺失时假绿 ⇒ 只跑它会把「装上但跑不起来」判成成功，用户体验仍是「没效果」。
 
@@ -192,7 +194,7 @@
    - 已安装且命令在宿主 PATH 上 ⇒ 更新装回**同一个前缀**（决策 5 的 visible 链即满足）。
    - 已安装但命令**不在**宿主 PATH 上 ⇒ 从**二进制的真实路径反推 npm 前缀**（形如 `.../node_modules/<pkg>/...` ⇒ 其 `lib` 目录的父目录即该前缀）⇒ **不得**改装到别的前缀。
    - 前缀候选与「可写」判定沿用决策 4 / 决策 5 的口径（真实写入探测、三级候选链），MUST NOT 为更新另开一套判定。
-2. **更新后版本未变 ⇒ 明确报告**：更新执行完成、但探测到的命令版本与更新前相同 ⇒ 报「命令仍是旧版」并给可行动诊断，**不得**静默判成功、不得把该结果呈现为「更新已完成」。
+2. **更新后版本未变 ⇒ 明确报告**：更新执行完成、但探测到的命令版本与更新前相同 ⇒ 报「命令仍是旧版」并给可行动诊断，**不得**静默判成功、不得把该结果呈现为「更新已完成」。**前后两次取数 MUST 同源同口径**（同一探测通道、同一解析口径）—— 口径不一致时「版本未变」恒不成立，这条判定在生产上永不触发。
 3. **Kimi 更新**：沿用官方脚本的**原地替换**通道（REQ-PCI-05 既有条款），并经决策 6 的装后三重验证确认更新后的命令真实可用。
 
 **理由**：更新语义的价值在于「用户敲的命令真的变新了」；落点漂移或版本未变被静默吞掉，都会让用户回到「点了没效果」的老症状，而这两点恰恰是安装链与更新链语义差异最大的地方。
@@ -205,7 +207,7 @@
 |---|---|
 | 落点反推 | 「已安装但不在 PATH 上」的反推口径 = 从**已安装包的真实路径**反推（`<prefix>/lib/node_modules/<pkg>` ⇒ 其 `lib` 目录的父目录即该前缀）；候选来自 npm 全局前缀与平台自身前缀，MUST NOT 靠「命令是否在 PATH 上」猜 |
 | 反推失败 | MUST 显式报错并给出可行动诊断，MUST NOT 静默改装到别的前缀 |
-| 版本比对 | 更新**前**先读该前缀下包的 `package.json` 取版本快照（不执行进程），更新**后**再取一次；两次相同 ⇒ 报「命令仍是旧版」并给可复制的修复命令，作业判失败（不得静默成功） |
+| 版本比对 | 更新**前**与更新**后**的版本取数 MUST **同源同口径**（同一探测通道、同一解析口径）：npm 类更新前读该前缀下包的 `package.json`（不执行进程），脚本类（Kimi 等）更新前走与装后同一套 `--version` 探测口径；更新后再取一次。**口径不一致 ⇒ 「版本未变」恒不成立 ⇒「命令仍是旧版」判定在生产上永不触发**（终审 R10）。两次相同 ⇒ 报「命令仍是旧版」并给可复制的修复命令，作业判失败（不得静默成功） |
 | Kimi 更新 | 走官方脚本原地替换，不进 npm 路径；更新后同样经装后三重验证 |
 | 实现落点 | `src/product/provider_installation/effective_prefix.rs`（`npm_prefix_from_real_path` / `prefix_bin_is_on_path` / `is_writable_dir`）、`src/product/provider_installation/runner.rs`（`resolve_effective_prefix` / `installed_prefix` / 版本快照与「仍是旧版」判定） |
 
@@ -218,7 +220,7 @@
 1. **逐成员目录级查询**：成员覆盖判定改走 codegraph **库 API** —— `CodeGraph.open(root)` 后逐成员 `hasFilesUnder(member)`，直接回答是/否，载荷是**成员级布尔事实**（几百字节量级）。
 2. **目录边界精确**：`hasFilesUnder` 是**目录语义**（`member-al` 对 `member-alpha` 返回 false），优于 CLI 清单路径的裸前缀匹配。
 3. **Node helper + codegraph 自带 Node**：库 API 是 npm 包的 CJS 入口（`npm-sdk.js`），普通脚本无法直接 import ⇒ helper 按**绝对路径** `import(<npm-sdk.js>)` 并做 CJS interop（`mod.default ?? mod` 取 `CodeGraph`）。helper 源码以 `include_str!` 内嵌随源码走，运行时落唯一临时文件、执行后清理（超时 60s；stdout 上限 1 MiB / stderr 上限 64 KiB）。
-   - **Node 解析顺序**：codegraph **平台包自带的 node** 优先（⇒ 不要求用户装 Node）→ 回退 PATH 上的 node，且实测版本 ≥ **22.5** 才采用。
+   - **Node 解析顺序**：codegraph **平台包自带的 node** 优先（⇒ 不要求用户装 Node）→ 回退 PATH 上的 node，且实测版本 ≥ **22.5** 才采用。自带 node 的解析 MUST 覆盖**当前平台 / 版本下**的三种布局（平台包内 nested、与主包同级的 hoisted、上游自愈缓存），并按平台名（`codegraph_platform_target()`）择优；node 不可用 ⇒ 映射为 `codegraph_sdk_incompatible` 并回退 CLI 清单验收。
    - **SDK 路径解析顺序**：① 平台自身安装前缀（npm 标准布局）→ ② `npm root -g` 探针（10s / 4096 B）→ ③ 从 `codegraph` 可执行真实路径反推包根。
 4. **回退保底**：SDK 找不到（`codegraph_sdk_not_found`）或与受支持版本不兼容（`codegraph_sdk_incompatible`）⇒ 回退既有 CLI 文件清单路径（**保留** 64 MiB 专用配额与 `codegraph_files_output_truncated` 专用截断码），并在索引激活记录上留**可审计 warning**。回退**不是**常规路径。
 5. **健康闸只告警不阻断**：`index.stale` / `index.pending > 0` / `index.state` 异常 / `stats.fileCount == 0` ⇒ 记 warning（随激活记录留存），MUST NOT 单独阻断激活（保持既有「不因健康问题阻断」的语义）；未知 state 值也计入信号 —— 宁可多一条可审计告警也不静默。

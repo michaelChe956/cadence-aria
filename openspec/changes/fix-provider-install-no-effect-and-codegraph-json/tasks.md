@@ -1,6 +1,6 @@
 # Tasks: fix-provider-install-no-effect-and-codegraph-json
 
-> **实施状态（2026-11-13）**：契约已获批并**已实施**；勾选状态按仓库实现证据记录（`[x]` = 已落地，`[ ]` = 待办）。未闭环项集中在第 11 包（归档同步）、第 12 包（容器 E2E 复验）与第 13 包（终审遗留跟踪，**本 change 不声称已实现**）。
+> **实施状态（2026-11-13）**：契约已获批并**已实施**；勾选状态按仓库实现证据记录（`[x]` = 已落地，`[ ]` = 待办）。未闭环项集中在第 11 包（归档同步：主规格漂移对齐与 CHANGELOG 留痕）与第 12 包（容器 E2E 复验）；第 13 包（终审遗留项）**已由本 change 的修复波落地**，逐条附实现证据（提交 / 红测试）。
 > 精确文件、命令、测试与提交步骤由 `writing-plans` 写入 `cadence/plans/`；本文件只记高层工作包，每个工作包映射到相关 requirement（编号逐字展开，一行一个）。
 > 依据：`cadence/plans/2026-11-13_计划文档_修复Provider安装无效果与聚合索引截断_v1.0.md`；owner 决策见 `.openspec.yaml` 的 `x-owner-decisions`。
 > 顺序约束：第 2 包必须早于第 5 包（装后登记依赖 overlay 就位）；第 4 包早于第 6 包（装后验证依赖前缀落点可信）；第 8 包依赖第 5 包的后端文案定稿；第 7 包依赖第 4 包与第 5 包（前缀落点与装后验证是更新语义的前提）；第 9 包依赖第 2 包与第 3 包（overlay 与登录 shell PATH 快照）；第 10 包与安装链无依赖。
@@ -41,7 +41,7 @@
 - MODIFIED REQ-PCI-05
 - ADDED REQ-PCI-12
 
-- [x] 3.1 服务启动时把**实际存在**的用户工具目录登记进 overlay（常见版本管理器 / 包管理器的用户级 bin 目录 + 本仓自有落点：npm 全局前缀 bin、`NPM_PREFIX` bin、Kimi 安装目录 bin）
+- [x] 3.1 服务启动时把**实际存在**的用户工具目录登记进 overlay（常见版本管理器 / 包管理器的用户级 bin 目录 + 环境驱动项：`~/.npmrc` 的 `prefix=` bin、nvm 默认 node 的 bin、mise 的 node installs、fnm 目录）；npm 全局前缀（`npm prefix -g`）/`NPM_PREFIX`/Kimi 安装目录**不在启动清单内** —— 由第 5 包的**装后登记**按「实际产物所在目录」覆盖
 - [x] 3.2 **只登记、不写盘、不创建目录**：不存在的目录 MUST NOT 被登记，MUST NOT 因此创建目录
 - [x] 3.3 启动路径上的前缀探针用**短超时**（不得引入与安装作业同量级的阻塞）
 - [x] 3.4 登记时机 MUST 在「监听就绪之后、首次 provider 健康刷新之前」；监听失败 MUST 保持零副作用
@@ -50,7 +50,7 @@
 - [x] 3.7 注入 MUST 在**两个命令汇聚点**（进程拉起通道 + 同步捕获通道，含「调用方未提供环境覆盖」那条路径）都生效；MUST NOT 只在其中一条生效；MUST NOT 因此改变 REQ-PCI-02 探针口径、REQ-PCI-08 的「不在终端 PATH 上」判定或 REQ-PCI-11 的暴露动作语义
 - [x] 3.8 探测失败 / 超时 / 不可用（未设 `SHELL` / shell 不可执行 / 输出不含标记行）MUST 是空操作：不注入、不阻塞，安装、装后探测、终端 PATH 判定与索引验收 SHALL 照常进行
 
-实施注记：启动期登记清单覆盖 `~/.local/bin` / `~/.npm-global/bin` / `~/.npmrc` 的 `prefix=` bin / nvm 默认 node bin / mise node installs 等**实际存在**的目录；`~/.kimi-code/bin` 不在启动清单内，由第 5 包的**装后登记**路径覆盖（Kimi 走官方脚本，安装时机才确定目录）。
+实施注记：启动期登记清单覆盖 `~/.local/bin` / `~/.npm-global/bin` / `~/.npmrc` 的 `prefix=` bin / nvm 默认 node bin / mise node installs / fnm 目录 / `/opt/homebrew/bin` / `/usr/local/bin` 等**实际存在**的目录（`src/cross_cutting/path_overlay.rs` 的 `user_tool_dirs` + `host_absolute_tool_dirs`）；`~/.kimi-code/bin`、npm 全局前缀与 `NPM_PREFIX` 不在启动清单内，由第 5 包的**装后登记**路径覆盖（Kimi 走官方脚本，安装时机才确定目录）。
 
 ## 4. 前缀候选收紧与真实可写性判定
 
@@ -241,9 +241,9 @@
 - [ ] 12.5 可见性证据 MUST 来自平台自身的探测结果；MUST NOT 用手工改 PATH 的方式冒充平台可见性
 - [ ] 12.6 清理本轮容器 / 镜像 / 临时资产（只删本次产物）；宿主 dotfiles 零改动
 
-## 13. 终审遗留跟踪（**本 change 不声称已实现**）
+## 13. 终审遗留项处置（**已由本 change 修复波落地**）
 
-> 来源：终审（k3-reviewer，审阅快照 `44a1b4c4`）判定的必修项。本小节**只登记跟踪**：条目均未在本 change 声称落地，实施与验证由后续工作包承接；勾选状态保持 `[ ]` 直到有实现证据。
+> 来源：终审（k3-reviewer，审阅快照 `44a1b4c4`）判定的必修项与补充建议。**修复波已在本 change 分支内逐条落地**（提交 `0f69fe90` / `f9c776d8` / `84675998` / `55296a8f` / `ada50bca` / `ea1434b1` / `f165474e` / `60b2e064`）；下列勾选状态按**仓库实现证据**记录，每条括注实现落点、提交与红测试。
 
 映射 requirement：
 
@@ -256,13 +256,15 @@
 - MODIFIED REQ-PCI-11
 - MODIFIED REQ-IND-01
 
-- [ ] 13.1 PATH overlay 合并顺序 MUST 为 **Prepend → base → Append**（装完目录抢在 base 之前、启动期发现目录排在 base 之后）；当前 `src/cross_cutting/path_overlay.rs` 的 `effective_path` 为 Prepend → Append → base ⇒ 待改（契约归属 REQ-PCI-02 / REQ-PCI-05）
-- [ ] 13.2 更新落点的两个独立触发 MUST 都成立（契约归属 REQ-PCI-09）：①「PATH 上可见且真实可写的前缀」须**优先于**「已离 PATH 的旧包所在前缀」；② 原始 npm 全局前缀**不得**先以「bin ∈ PATH」过滤再查已装位置 —— 过滤与已装位置查找是两个独立触发，不得互相短路
-- [ ] 13.3 装后验证 MUST 在**首次安装与 `--include=optional` 重试两条路径**都消费「真实命令」结果（`real_command_ok`）：真实命令失败 MUST NOT 判作业 `completed`；重试成功后 MUST 重算安装提示（契约归属 REQ-PCI-03 / REQ-PCI-05）
-- [ ] 13.4 codegraph 真实命令验证 MUST 不依赖「已建索引」且确实加载 bundle；MUST 移除 `src/product/provider_installation/runner.rs:353` 当前仍传入的元数据抑制旗标（与 REQ-IND-01 已裁决**只带 `--json`** 的同类问题）—— 与 REQ-PCI-05 的「真实命令」口径及 REQ-IND-01 的调用边界一致
-- [ ] 13.5 bundled node 解析 MUST 覆盖「当前平台 / 版本下」的 nested、hoisted 与自愈缓存三种布局（当前 `codegraph_coverage.rs` 的 `bundled_node_candidates` 只覆盖 `<sdk 包根>/node_modules/@colbymchenry/codegraph-*/node` 一种）（契约归属 REQ-IND-01）
-- [ ] 13.6 能力卡父级 MUST NOT 因「已安装但未核验」而卸载「暴露到终端 PATH」入口（否则 UI 主路径不可达）（契约归属 REQ-PCI-11）
-- [ ] 13.7 `off_path` 判定与 expose 的 CLI 发现范围 MUST 为**宿主 PATH ∪ 平台登记目录（overlay）**，MUST NOT 漏掉「仅宿主 PATH 可见」的 CLI（契约归属 REQ-PCI-08 / REQ-PCI-11）
-- [ ] 13.8 Kimi Code 的更新前版本快照当前恒为 `None` ⇒ 版本未变检测漏 Kimi；MUST 同样取快照并比对、未变时如实报告「命令仍是旧版」（契约归属 REQ-PCI-10）
-- [ ] 13.9 前端观察器 P2：dirty 补跑的等待期内再次收到普通唤醒时，MUST NOT 把 1s 最短间隔改写成 250ms —— **契约归属待 owner 裁决**（该行为属前端观察器目录轮询，不在本 change 的两个 capability 内；本 change 不改其能力边界）
-- [ ] 13.10 终审「补充建议」（非必修，登记备查）：① Node helper 应以 `CodeGraph.open(root, { readOnly: true })` 打开索引；② 测试用线程级存储与生产进程级全局的跨线程差异需有独立的生产路径测试；③ `off_path` 的「PATH 分支」夹具未实际建出 CLI，致否定断言无效；④ 被删除的两条既有 handler 断言应恢复
+- [x] 13.1 PATH overlay 合并顺序 MUST 为 **Prepend → base → Append**（装完目录抢在 base 之前、启动期发现目录排在 base 之后）—— **已落地**：`src/cross_cutting/path_overlay.rs` 的 `effective_path_in` 按 Prepend → base → Append 合并并去重；提交 `55296a8f`；红测试 `effective_path_append_never_preempts_base_entries`（契约归属 REQ-PCI-02 / REQ-PCI-05）
+- [x] 13.2 更新落点的两个独立触发 MUST 都成立（契约归属 REQ-PCI-09）—— **已落地**：`src/product/provider_installation/runner.rs` 的 `resolve_effective_prefix` 先取 visible（真实可写）前缀，①「PATH 上可见且真实可写的前缀」**优先于**「已离 PATH 的旧包所在前缀」；② `installed_prefix` 使用**未经过滤**的 `npm prefix -g` 原始结果（`bin ∈ PATH` 过滤只作用于新装候选），过滤与已装位置查找互不短路；提交 `0f69fe90`；红测试 `update_prefers_prefix_of_cli_visible_on_path_over_stale_fallback_copy` / `update_targets_raw_npm_global_install_when_its_bin_is_off_path`
+- [x] 13.3 装后验证 MUST 在**首次安装与 `--include=optional` 重试两条路径**都消费「真实命令」结果（`real_command_ok`）—— **已落地**：`runner.rs` 的完成判定为「版本可读 **且** 真实命令可跑」（`detected.filter(|_| real_command_ok)`），真实命令失败不判 `completed` 并转入重试；重试成功后按新结果重算安装提示；提交 `0f69fe90`；红测试 `real_command_failure_is_not_completed_and_retries_with_include_optional` / `installed_but_off_path_failure_is_distinguished_from_missing_platform_package`（契约归属 REQ-PCI-03 / REQ-PCI-05）
+- [x] 13.4 codegraph 真实命令验证 MUST 不依赖「已建索引」且确实加载 bundle；MUST NOT 传元数据抑制旗标（与 REQ-IND-01 已裁决**只带 `--json`** 的同类问题）—— **已落地**：`runner.rs` 的 `post_install_verification_argv` 对 codegraph 下发 `status --json`（实测 1.6.2 在未初始化目录 exit 0，且一切命令经平台包自带 node 启动 ⇒ 平台包缺失时 exit 1），**不带**任何元数据抑制旗标；提交 `0f69fe90`；红测试 `codegraph_real_command_does_not_require_an_index`（与 REQ-PCI-05 的「真实命令」口径及 REQ-IND-01 的调用边界一致）
+- [x] 13.5 bundled node 解析 MUST 覆盖「当前平台 / 版本下」的 nested、hoisted 与自愈缓存三种布局 —— **已落地**：`codegraph_coverage.rs` 的 `bundled_node_candidates` 按 `codegraph_platform_target()` 映射的平台名覆盖三种布局（nested / hoisted / 上游自愈缓存），node 不可用时映射为 `codegraph_sdk_incompatible` 并回退 CLI 清单验收；提交 `f9c776d8`；红测试 `bundled_node_resolves_nested_platform_layout` / `bundled_node_resolves_hoisted_platform_layout` / `bundled_node_resolves_self_heal_cache_layout`（契约归属 REQ-IND-01）
+- [x] 13.6 能力卡父级 MUST NOT 因「已安装但未核验」而卸载「暴露到终端 PATH」入口（否则 UI 主路径不可达）—— **已落地**：能力卡按 `cli_available && off_path` 渲染**行级** expose 入口（与安装块解耦 ⇒ 已装未核验行也可达），安装块内同义按钮由共享开关 `exposeEnabled={false}` 关闭；提交 `f165474e` / `60b2e064`；红测试 `web/src/components/lifecycle/ProviderCapabilityCard.test.tsx`（契约归属 REQ-PCI-11）
+- [x] 13.7 `off_path` 判定与 expose 的 CLI 发现范围 MUST 为**宿主 PATH ∪ 平台登记目录（overlay）**，MUST NOT 漏掉「仅宿主 PATH 可见」的 CLI —— **已落地**：handler 的 `install_search_dirs` = 服务进程生效 PATH（overlay 合并后）∪ 登录 shell PATH ∪ 已知落点（`~/.npm-global/bin`、`/usr/local/bin`），`expose.rs` 的二进制查找同口径；提交 `ada50bca`；红测试 `off_path_counts_service_process_path_as_platform_visible` / `expose_finds_binary_from_service_process_path`（契约归属 REQ-PCI-08 / REQ-PCI-11）
+- [x] 13.8 Kimi Code 的更新前版本快照 MUST 同样取快照并比对、未变时如实报告「命令仍是旧版」—— **已落地**：`runner.rs` 的 `version_before_update` 对脚本类（Kimi）取更新前版本快照，`before == after` ⇒ 作业判失败并报「命令仍是旧版」（不得静默成功）；提交 `0f69fe90`；红测试 `kimi_update_reports_still_old_version_when_script_keeps_same_version` / `kimi_update_completes_when_script_upgrades_version`（契约归属 REQ-PCI-10）
+  - **补充（终审 R10 新发现）**：更新**前**与更新**后**的版本取数 MUST **同源同口径**（同一探测通道、同一解析口径）—— 否则「版本未变」恒不成立，「命令仍是旧版」判定在生产上永不触发。该口径收口已在本 change 的**修复波**落地（提交待补），并补一条**不注入探针桩、走真实取数路径**的用例（同版本 ⇒ 失败「命令仍是旧版」；版本升级 ⇒ completed）
+- [x] 13.9 前端观察器 P2：dirty 补跑的等待期内再次收到普通唤醒时，MUST NOT 把 1s 最短间隔改写成 250ms —— **已落地**：`web/src/hooks/useWorkspaceSessionObservers.ts` 给 dirty 补跑单列 `dirtyTimer` 槽位（`DIRTY_RERUN_MIN_DELAY_MS = 1_000`），等待期内的新唤醒并入已排补跑、不另排 250ms 档；提交 `ea1434b1`；红测试 `useWorkspaceSessionObservers.polling.test.tsx` 的「keeps the dirty rerun at its minimum gap when another wake-up arrives (F9)」
+  - **能力归属**：该行为属前端观察器目录轮询，其**能力边界归属仍待 owner 裁决**；本 change **不为此新立 capability**（只按终审要求把已落地的行为如实记录）
+- [x] 13.10 终审「补充建议」（非必修）已随修复波逐条落地：① Node helper 以 `CodeGraph.open(root, { readOnly: true })` 打开索引（提交 `84675998`；`codegraph_coverage_helper.mjs`）；② 测试用线程级存储与生产进程级全局的跨线程差异已有独立的生产路径测试（提交 `55296a8f`；`path_overlay.rs` 的 `process_global_registry_is_shared_across_threads`）；③ `off_path` 的「PATH 分支」夹具已实际建出 CLI，否定分支真被测到（提交 `ada50bca`；`off_path_marks_installed_target_missing_from_login_shell_path`）；④ 被删除的两条既有 handler 断言已恢复（提交 `ada50bca`；`install_targets_endpoint_lists_five_targets_with_actions`）
