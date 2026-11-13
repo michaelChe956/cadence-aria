@@ -155,8 +155,12 @@ fn lc_resume_store_unavailable_frame(
 }
 
 /// B2b1(Task 5.2,5.1 移交项):fresh spawn 认领成功后,把 manager 活动 run
-/// 的节点绑定为 recovery `fresh_node_id`(仅 FreshRunning 且未绑定;kind
-/// 判别式守卫)。best-effort:并发让位/节点未建时不阻塞 dispatch——
+/// 的节点绑定为 recovery `fresh_node_id`(kind 判别式守卫)。P08:绑定只认
+/// dispatch 快照里的**当前 operation**——锁内重读后核 recovery_id/当前
+/// operation/FreshRunning/条目 Running,再把同一真实节点双向绑定到该
+/// operation 条目与 root(同值幂等;异值冲突);身份不符即冲突上浮且零写
+/// (不猜 ID、不改旧 operation)。
+/// best-effort:并发让位/节点未建时不阻塞 dispatch——
 /// 成功收口(`PlanSplitRunContext::finalize_launch_after_success`)按
 /// conversation last_node 补全;失败只 `warn`。
 async fn lc_bind_fresh_node_after_spawn(
@@ -165,11 +169,17 @@ async fn lc_bind_fresh_node_after_spawn(
     run_kind: &ProviderRunKind,
     recovery: &crate::product::models::LcResumeRecoveryRecord,
 ) {
-    use crate::product::models::LcResumeRecoveryState;
+    use crate::product::models::{LcFreshOperationState, LcResumeRecoveryState};
 
     if recovery.state != LcResumeRecoveryState::FreshRunning {
         return;
     }
+    // P08：绑定只认「dispatch 快照里的当前 operation」——无 operation_id 即不猜
+    // ID、不写盘（不把旧 operation 的 node 绑到当前 operation）。
+    let Some(expected_operation_id) = recovery.operation_id.clone() else {
+        return;
+    };
+    let expected_recovery_id = recovery.recovery_id.clone();
     let Some(node_id) = run_context
         .manager
         .active_run()
@@ -200,15 +210,55 @@ async fn lc_bind_fresh_node_after_spawn(
                     },
                 );
             }
-            if let Some(recovery) = record.lc_resume_recovery.as_mut()
-                && recovery.state == LcResumeRecoveryState::FreshRunning
-                && recovery.fresh_node_id.is_none()
+            // P08：锁内重读后按 dispatch 快照核当前 operation——身份不符即冲突
+            // 上浮且零写（不猜 ID、不改旧 operation）。
+            let binding_conflict = || {
+                crate::product::json_store::ProductStoreError::Conflict {
+                    kind: "lc_fresh_operation_binding".to_string(),
+                    id: expected_operation_id.clone(),
+                }
+            };
+            let recovery = record
+                .lc_resume_recovery
+                .as_mut()
+                .ok_or_else(|| binding_conflict())?;
+            if recovery.recovery_id != expected_recovery_id
+                || recovery.state != LcResumeRecoveryState::FreshRunning
+                || recovery.operation_id.as_deref() != Some(expected_operation_id.as_str())
             {
-                recovery.fresh_node_id = Some(node_id.clone());
-                recovery.updated_at = now.clone();
-                record.updated_at = now;
-                crate::product::json_store::write_json(&record_path, &record)?;
+                return Err(binding_conflict());
             }
+            let operation = recovery
+                .fresh_operations
+                .iter_mut()
+                .find(|operation| operation.operation_id == expected_operation_id)
+                .ok_or_else(|| binding_conflict())?;
+            if operation.state != LcFreshOperationState::Running {
+                return Err(binding_conflict());
+            }
+            // item 与 root 双向绑定同一真实节点：None→Some；同值幂等；异值冲突。
+            let mut changed = false;
+            if matches!(&operation.fresh_node_id, Some(bound) if bound != &node_id) {
+                return Err(binding_conflict());
+            }
+            if operation.fresh_node_id.is_none() {
+                operation.fresh_node_id = Some(node_id.clone());
+                operation.updated_at = now.clone();
+                changed = true;
+            }
+            if matches!(&recovery.fresh_node_id, Some(bound) if bound != &node_id) {
+                return Err(binding_conflict());
+            }
+            if recovery.fresh_node_id.is_none() {
+                recovery.fresh_node_id = Some(node_id.clone());
+                changed = true;
+            }
+            if !changed {
+                return Ok(());
+            }
+            recovery.updated_at = now.clone();
+            record.updated_at = now;
+            crate::product::json_store::write_json(&record_path, &record)?;
             Ok(())
         });
     if let Err(error) = result {

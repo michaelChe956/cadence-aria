@@ -1055,6 +1055,10 @@ impl LifecycleStore {
                 recovery.state = LcResumeRecoveryState::FreshReserved;
                 recovery.operation_id = Some(operation_id.to_string());
                 recovery.fresh_operations.push(operation.clone());
+                // P08：当前 operation 镜像清空——旧物理 node/seq/native 只属旧 operation（历史 fresh_operations 逐字段不动，新 operation 自行绑定）。
+                recovery.fresh_node_id = None;
+                recovery.fresh_role_run_seq = None;
+                recovery.fresh_native_session_id = None;
                 recovery.updated_at = now.clone();
                 session.updated_at = now;
                 write_json(&session_path, &session)?;

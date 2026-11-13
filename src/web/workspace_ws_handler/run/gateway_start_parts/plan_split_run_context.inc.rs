@@ -21,10 +21,48 @@ pub(crate) struct PlanSplitRunContext {
     /// 公共契约）。prepare 阶段据此核对「本 run 属于哪个 operation」，
     /// 避免旧 context 把自己的 seq 绑给新 operation。普通（非 fresh）run
     /// 为 `None`，保持原路径。
-    ///
-    /// RED 阶段该字段尚未接线（构造器恒 `None`），行为与接线前一致。
-    #[cfg_attr(not(test), allow(dead_code))]
     fresh_operation: Option<(String, String)>,
+}
+
+/// P08：从真实 session record 捕获**当前 fresh operation 身份快照**
+/// `(recovery_id, operation_id)`——仅当 recovery 为 FreshRunning 且当前
+/// operation 存在 Running 条目时捕获；普通（非 fresh）run 为 `None`
+/// （保持原路径，不替新 FreshRunning 代绑 seq）。
+fn fresh_operation_snapshot_of(
+    session: &crate::product::models::WorkspaceSessionRecord,
+) -> Option<(String, String)> {
+    use crate::product::models::{LcFreshOperationState, LcResumeRecoveryState};
+    let recovery = session.lc_resume_recovery.as_ref()?;
+    if recovery.state != LcResumeRecoveryState::FreshRunning {
+        return None;
+    }
+    let operation_id = recovery.operation_id.as_ref()?;
+    let operation = recovery
+        .fresh_operations
+        .iter()
+        .find(|operation| &operation.operation_id == operation_id)?;
+    if operation.state != LcFreshOperationState::Running {
+        return None;
+    }
+    Some((recovery.recovery_id.clone(), operation_id.clone()))
+}
+
+/// P08：begin 构造时读取真实 session 捕获当前 fresh operation 身份——读取
+/// 失败即 Err（不猜 operation ID，不静默降级为「无快照」）。
+fn capture_fresh_operation_snapshot(
+    lifecycle: &crate::product::lifecycle_store::LifecycleStore,
+    project_id: &str,
+    issue_id: &str,
+    workspace_session_id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let session_path = lifecycle
+        .workspace_sessions_root(project_id, issue_id)
+        .join(format!("{workspace_session_id}.json"));
+    let session: crate::product::models::WorkspaceSessionRecord =
+        crate::product::json_store::read_json(&session_path).map_err(|error| {
+            format!("fresh operation snapshot read failed for {workspace_session_id}: {error}")
+        })?;
+    Ok(fresh_operation_snapshot_of(&session))
 }
 
 /// begin handle:分配 run-bound 身份(sink 绑定与审计文件 key 同源)。
@@ -35,6 +73,10 @@ pub(crate) fn begin_plan_split_run(
     provider: &crate::product::models::ProviderName,
     workspace_session_id: &str,
 ) -> Result<PlanSplitRunContext, String> {
+    // P08：构造时捕获真实 session 的当前 fresh operation 身份（读失败 Err）——
+    // 先于 begin，避免捕获失败留下孤儿 split run 记录。
+    let fresh_operation =
+        capture_fresh_operation_snapshot(lifecycle, project_id, issue_id, workspace_session_id)?;
     let handle = lifecycle
         .begin_work_item_split_provider_run(project_id, issue_id, provider, workspace_session_id)
         .map_err(|error| error.to_string())?;
@@ -44,9 +86,7 @@ pub(crate) fn begin_plan_split_run(
         project_id: project_id.to_string(),
         issue_id: issue_id.to_string(),
         provider: provider.clone(),
-        // P08 RED：构造时快照尚未接线（GREEN 才在此读取真实 session 的
-        // 当前 fresh operation 身份）。
-        fresh_operation: None,
+        fresh_operation,
     })
 }
 
@@ -166,9 +206,8 @@ pub(crate) fn plan_split_run_for_handle(
         project_id: project_id.to_string(),
         issue_id: issue_id.to_string(),
         provider: provider.clone(),
-        // P08 RED：构造时快照尚未接线（GREEN 才在此读取真实 session 的
-        // 当前 fresh operation 身份）。
-        fresh_operation: None,
+        // P08：恢复路径已读真实 session——直接据此捕获当前 fresh operation 身份。
+        fresh_operation: fresh_operation_snapshot_of(&session),
     })
 }
 
@@ -213,16 +252,21 @@ impl PlanSplitRunContext {
     /// §4.2.1 prepared-map-before-start:同源 validated policy 冻结 digest 在
     /// session spawn 前按 `(role=Author, provider, role_run_seq)` 持久化
     /// (basis=FullLcProjectionV2;native/node 在 Prepared 阶段留空,不伪造);
-    /// 同锁内绑定 FreshRunning recovery 的 `fresh_role_run_seq`(§4.1 fresh
-    /// run/node/native 绑定;仅 FreshRunning 且未绑定时推进,不覆写既成事实)。
+    /// P08:同锁内**先核当前 operation 身份**——以构造时快照的
+    /// `(recovery_id, operation_id)` 为准(recovery_id/当前 operation/FreshRunning/
+    /// 条目 Running 全等),再把 `role_run_seq` 双向绑定到该 operation 条目与
+    /// root `fresh_role_run_seq`(None→Some;同值幂等;异值冲突)。失配即
+    /// `lc_fresh_operation_binding` 冲突上浮且零写(指纹尚未落盘),绝不把旧
+    /// context 的 seq 绑给新 operation;普通(非 fresh)context 快照 None,
+    /// 保持原普通路径不代绑。
     /// 既有同 (role,provider,seq) 记录原样保留(幂等,不降级不复活)。
     pub(crate) fn persist_prepared_launch_identity(
         &self,
         fingerprint_digest: &str,
     ) -> Result<(), crate::product::json_store::ProductStoreError> {
         use crate::product::models::{
-            LcResumeRecoveryState, LogicalLaunchBasis, LogicalLaunchFingerprintRecord,
-            LogicalLaunchFingerprintState, ProviderConversationRole,
+            LcFreshOperationState, LcResumeRecoveryState, LogicalLaunchBasis,
+            LogicalLaunchFingerprintRecord, LogicalLaunchFingerprintState, ProviderConversationRole,
         };
 
         let role = ProviderConversationRole::Author;
@@ -230,6 +274,57 @@ impl PlanSplitRunContext {
         let role_run_seq = self.handle.role_run_seq;
         let now = chrono::Utc::now().to_rfc3339();
         self.with_session_record_mut(move |record| {
+            // P08：fresh 绑定先核「构造时快照的当前 operation」身份——失配即冲突
+            // 上浮（零写：指纹尚未落盘），绝不把旧 context 的 seq 绑给新 operation。
+            if let Some((expected_recovery_id, expected_operation_id)) =
+                self.fresh_operation.clone()
+            {
+                let binding_conflict = || {
+                    crate::product::json_store::ProductStoreError::Conflict {
+                        kind: "lc_fresh_operation_binding".to_string(),
+                        id: expected_operation_id.clone(),
+                    }
+                };
+                let recovery = record
+                    .lc_resume_recovery
+                    .as_mut()
+                    .ok_or_else(|| binding_conflict())?;
+                if recovery.recovery_id != expected_recovery_id
+                    || recovery.state != LcResumeRecoveryState::FreshRunning
+                    || recovery.operation_id.as_deref() != Some(expected_operation_id.as_str())
+                {
+                    return Err(binding_conflict());
+                }
+                let operation = recovery
+                    .fresh_operations
+                    .iter_mut()
+                    .find(|operation| operation.operation_id == expected_operation_id)
+                    .ok_or_else(|| binding_conflict())?;
+                if operation.state != LcFreshOperationState::Running {
+                    return Err(binding_conflict());
+                }
+                // item 与 root 双向绑定同一 seq：None→Some；同值幂等；异值冲突。
+                match operation.role_run_seq {
+                    Some(bound) if bound != role_run_seq => {
+                        return Err(binding_conflict());
+                    }
+                    Some(_) => {}
+                    None => {
+                        operation.role_run_seq = Some(role_run_seq);
+                        operation.updated_at = now.clone();
+                    }
+                }
+                match recovery.fresh_role_run_seq {
+                    Some(bound) if bound != role_run_seq => {
+                        return Err(binding_conflict());
+                    }
+                    Some(_) => {}
+                    None => {
+                        recovery.fresh_role_run_seq = Some(role_run_seq);
+                    }
+                }
+                recovery.updated_at = now.clone();
+            }
             let exists = record.logical_launch_fingerprints.iter().any(|entry| {
                 entry.role == role
                     && entry.provider == provider
@@ -258,13 +353,6 @@ impl PlanSplitRunContext {
                         created_at: now.clone(),
                         updated_at: now.clone(),
                     });
-            }
-            if let Some(recovery) = record.lc_resume_recovery.as_mut()
-                && recovery.state == LcResumeRecoveryState::FreshRunning
-                && recovery.fresh_role_run_seq.is_none()
-            {
-                recovery.fresh_role_run_seq = Some(role_run_seq);
-                recovery.updated_at = now.clone();
             }
             Ok(())
         })
