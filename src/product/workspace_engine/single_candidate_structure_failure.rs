@@ -337,6 +337,7 @@ impl crate::product::workspace_engine::WorkspaceEngine {
         &mut self,
         lifecycle: &crate::product::lifecycle_store::LifecycleStore,
         mut failure: PlanningCompileFailure,
+        structure_failures: PlanningFailureSet,
         source_ref: &str,
         ir_ref: &str,
         allow_structure_rerun: bool,
@@ -357,13 +358,17 @@ impl crate::product::workspace_engine::WorkspaceEngine {
         // 必有一次真实尝试记录（重驱轮同样落一行——通过率读数靠它）。
         self.record_candidate_compile_failure(&failure);
         if allow_structure_rerun {
-            // 恰一次教学重驱槽位仍空闲：不开人工门、不硬失败，把可执行修复
-            // 指令交还 runner 重驱作者一次。重驱是 runner 的 provider 通道，
-            // 不是引擎 prerevision 路由——此处同样不虚记自动重写预算，且
-            // durable `auto_rewrite` 不得留 running（未委托即对账）。
+            // 恰一次教学重驱槽位仍空闲：不开人工门、不硬失败，把 **sealed 的
+            // 原失败身份 ＋ 原 typed 结构失败集** 交还 runner 重驱作者一次。
+            // 修复指令正文由 runner 用既有 `author_structure_repair_prompt(&failure)`
+            // 生成（引擎侧不再提前造 prompt——避免二次渲染与文本反解析）。
+            // 重驱是 runner 的 provider 通道，不是引擎 prerevision 路由——此处同样
+            // 不虚记自动重写预算，且 durable `auto_rewrite` 不得留 running
+            // （未委托即对账）。
             self.reconcile_auto_rewrite_not_delegated().await;
             return SingleCandidateAuthorCompletion::Rejected {
-                repair_prompt: author_structure_repair_prompt(&failure),
+                failure,
+                structure_failures,
             };
         }
         // 与 Final Compile 同一条路由出口。作者阶段的候选 refs **尚未提升**，

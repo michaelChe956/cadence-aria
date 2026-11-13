@@ -26,17 +26,25 @@ use crate::web::workspace_ws_types::{ReviewGate, ReviewVerdict, ReviewVerdictTyp
 ///
 /// - [`Self::Candidate`]：候选合法并通过结构门，已提升 current refs 并进入
 ///   既有评审/确认链（`item_count` 为编译出的候选 item 数）；
-/// - [`Self::Rejected { repair_prompt }]`：候选被 SG3a.1 系统门拒收且
+/// - [`Self::Rejected { failure, structure_failures }`]：候选被 SG3a.1 系统门拒收且
 ///   调用方传入 `allow_structure_rerun=true`（Task 6 起恒 true：重驱资格
 ///   由调用方消费同一耐久教学窗口的 claim 结果决定，不再有进程内独立
-///   槽位）——durable 诊断 + 尝试流水已落盘，可执行修复指令随本形态上交
-///   runner 重驱作者一次；不开人工门；
+///   槽位）——durable 诊断 + 尝试流水已落盘；**sealed 的原失败身份**
+///   （kind／stable_code／failure_id／detail 逐字不变）与**原 typed 结构失败集**
+///   （多成员不丢、序不变）随本形态上交；修复指令由 runner 用既有
+///   `author_structure_repair_prompt(&failure)` 生成（引擎侧不再提前造 prompt）；
+///   不开人工门；
 /// - [`Self::Routed`]：拒收且调用方判定不再重驱（`allow_structure_rerun=false`）
 ///   ——平台已在自动重写或人工门态，调用方**不得**再把它当硬失败。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum SingleCandidateAuthorCompletion {
     Candidate { item_count: usize },
-    Rejected { repair_prompt: String },
+    Rejected {
+        /// 已 seal 的原失败身份（kind／stable_code／failure_id／detail 逐字不变）。
+        failure: crate::product::workspace_engine::types::PlanningCompileFailure,
+        /// 原 typed 结构失败集（原样透传，不重算、不从文本反解析）。
+        structure_failures: crate::product::planning_failure::PlanningFailureSet,
+    },
     Routed,
 }
 
@@ -733,6 +741,7 @@ impl WorkspaceEngine {
                     .route_author_structure_gate_failure(
                         &lifecycle,
                         failure,
+                        failures.clone(),
                         &source_ref,
                         &ir_ref,
                         allow_structure_rerun,
