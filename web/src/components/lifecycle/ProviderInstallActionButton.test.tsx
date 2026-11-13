@@ -707,4 +707,33 @@ describe("暴露到终端 PATH（§五 2.11）", () => {
       screen.queryByTestId("provider-install-expose-result-claude_code"),
     ).toBeNull();
   });
+
+  // F3 收口（终审授权）：`exposeEnabled=false` ⇒ 本组件**不**渲染暴露按钮
+  // （暴露入口改由能力卡按 off_path 口径自己渲染，避免同一动作两个同义
+  // 入口）；默认（不传该 prop）⇒ 仍渲染，其它宿主（codegraph 安装入口 /
+  // 注册向导）行为完全不变。
+  it("exposeEnabled=false 时不渲染暴露按钮；默认仍渲染（向后兼容）", () => {
+    exposeFetchRouter({ target: "claude_code" });
+    const view = renderButton({
+      target: "claude_code",
+      cliAvailable: true,
+      capabilityConfirmed: true,
+      exposeEnabled: false,
+    });
+    expect(
+      screen.queryByTestId("provider-install-expose-claude_code"),
+    ).toBeNull();
+
+    // 不传该 prop ⇒ 仍渲染暴露按钮（既有宿主行为不变）。
+    view.rerender(
+      <ProviderInstallActionButton
+        target="claude_code"
+        cliAvailable={true}
+        capabilityConfirmed={true}
+      />,
+    );
+    expect(
+      screen.getByTestId("provider-install-expose-claude_code"),
+    ).toBeTruthy();
+  });
 });

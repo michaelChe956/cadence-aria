@@ -522,6 +522,7 @@ export function ProviderCapabilityCard() {
                           }
                           latestVersion={installView.latest_version}
                           capabilityConfirmed={confirmed}
+                          exposeEnabled={false}
                           onSettled={() => {
                             void reload();
                             void reloadInstallTargets();
@@ -530,17 +531,16 @@ export function ProviderCapabilityCard() {
                       </div>
                     ) : null}
                     {/* 「暴露到终端 PATH」不是安装动作（是「让用户终端能直接跑
-                        CLI」的动作）⇒ 已安装但**未核验**的行走不到上面的安装块
-                        （既有 gate：`!cli_available || confirmed`），入口随之
-                        不可达（用户刚装完就看不到）。这里按行独立渲染入口，
-                        且只在「已安装且不在终端 PATH 上」（off_path=true）时出现
-                        —— 已在 PATH 上（off_path=false）时用户终端本来就能跑，
-                        不加噪音；已核验的行由安装块内的既有入口承担，同一动作
-                        不渲染两个按钮。 */}
+                        CLI」的动作）⇒ 不挂在安装块里（已安装但**未核验**的行走
+                        不到安装块，入口随之不可达）。这里按行独立渲染入口，
+                        口径统一为「已安装 + 不在终端 PATH 上」（off_path=true，
+                        无论是否已核验）；已在 PATH 上（off_path=false）时用户
+                        终端本来就能跑，不加噪音；未安装没有可暴露的东西。
+                        安装块内的同义按钮已由 exposeEnabled={false} 关掉，
+                        同一动作只留一个入口。 */}
                     {installView &&
                     installView.cli_available &&
-                    installView.off_path &&
-                    !confirmed ? (
+                    installView.off_path ? (
                       <button
                         type="button"
                         data-testid={`provider-capability-expose-${providerType}`}

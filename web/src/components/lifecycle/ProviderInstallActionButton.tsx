@@ -44,6 +44,10 @@ export interface ProviderInstallActionButtonProps {
   localVersion?: string | null;
   latestVersion?: string | null; // Kimi 恒 null → 永不显示「更新」
   capabilityConfirmed: boolean;
+  /** 是否渲染「暴露到终端 PATH」按钮（默认 true ⇒ 既有宿主行为不变）。
+   *  false ⇒ 本组件**不**渲染该按钮（暴露入口由父级自己按需渲染，避免同一
+   *  动作出现两个同义入口）。 */
+  exposeEnabled?: boolean;
   /** 作业进入终态（completed/failed）后回调：父级据此重读 health 投影。 */
   onSettled?: () => void;
   /** 可选扩展：父级把既有「核验」通道（POST capability-revalidate）接进来。
@@ -57,6 +61,7 @@ export function ProviderInstallActionButton({
   localVersion,
   latestVersion,
   capabilityConfirmed,
+  exposeEnabled = true,
   onSettled,
   onVerify,
 }: ProviderInstallActionButtonProps): React.ReactElement | null {
@@ -258,7 +263,7 @@ export function ProviderInstallActionButton({
             当前 {localVersion} → 最新 {latestVersion}
           </span>
         ) : null}
-        {cliAvailable ? (
+        {cliAvailable && exposeEnabled ? (
           <button
             type="button"
             data-testid={`provider-install-expose-${target}`}
