@@ -129,19 +129,32 @@ fn anchor_t17_fresh_revision_prompt_carries_previous_source_and_review_context()
         "[previous_source]",
         "t17 上一版 source 全文",
         "不依赖任何历史会话",
-        // review 完整上下文与既有返修段同源保留。
+        // review 结构化回灌段同源保留（B4 新契约：raw comments/summary 散文
+        // 只留审计面，不进作者 prompt——见下方 forbidden 断言）。
         "[review_revision]",
-        "t17 reviewer 意见：WI-001 契约缺口需返修",
-        "t17 SC 返修轮",
         "[review_findings]",
         "t17 finding: capability 缺口",
-        "补 capability 声明",
+        "evidence: WI-001 Outputs",
+        "required_action: 补 capability 声明",
         "[revision_directives]",
     ] {
         assert!(
             fresh.contains(required),
             "fresh 返修 prompt 必须自足携带 {required}；prompt 尾部：{}",
             &fresh[fresh.len().saturating_sub(600)..]
+        );
+    }
+    // B4（REQ-WSC-12 窄例外·五入口之五）：raw comments/summary 散文不进作者面，
+    // 不得把建议或范围外事实复活成必须修复项。
+    for forbidden_prose in [
+        "Reviewer 审核意见:",
+        "Reviewer 摘要:",
+        "t17 reviewer 意见：WI-001 契约缺口需返修",
+        "t17 SC 返修轮",
+    ] {
+        assert!(
+            !fresh.contains(forbidden_prose),
+            "raw 散文 {forbidden_prose} 不得进入 fresh 返修 prompt: {fresh}"
         );
     }
     // previous_source 小节必须先于 review 回灌段（先看旧稿再逐条修复）。
@@ -166,6 +179,10 @@ fn anchor_t17_fresh_revision_prompt_carries_previous_source_and_review_context()
         "正常 resume 修订 prompt 不得携带 previous_source 小节（行为零变化）"
     );
     assert!(ordinary.contains("t17 finding: capability 缺口"));
+    assert!(
+        !ordinary.contains("t17 reviewer 意见：WI-001 契约缺口需返修"),
+        "raw 散文不得进入正常 resume 修订 prompt（B4：散文只留审计面）"
+    );
 }
 
 #[test]
