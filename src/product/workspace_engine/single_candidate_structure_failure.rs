@@ -107,9 +107,9 @@ pub(crate) fn author_gate_summary(failure: &PlanningCompileFailure) -> String {
 ///   witness 不完整时退化为 `rewrite_guidance` 的通用消环要点，不虚构位次）；
 /// - 非环结构拒收给通用结构修正指令（不套用「环」措辞——不虚构原因）；
 /// - 保护项（不得删除真实业务数据流、不得改仓序）；
-/// - 输出口径沿用 [`REVISION_TEACHING`]（完整修订版 markdown，不得输出
-///   diff/patch）——与门内修订同一教学，不另立第二套修订纪律。
-pub(crate) fn author_structure_repair_prompt(failure: &PlanningCompileFailure) -> String {
+/// - 此处只构造指令面；legacy 摘要正文和完整 prompt 分别在尾部追加
+///   同一 [`REVISION_TEACHING`]，不得改变既有摘要输入字节。
+fn render_author_structure_repair_instructions(failure: &PlanningCompileFailure) -> String {
     let durable = durable_failure(failure);
     let mut prompt = format!(
         "候选没有通过候选结构门（稳定码 {code}），请立即修复后重新输出完整候选。\n\
@@ -151,8 +151,43 @@ pub(crate) fn author_structure_repair_prompt(failure: &PlanningCompileFailure) -
         "\n保护项：不得删除真实业务数据流（canonical Inputs 引用）来消除校验失败；\
          不得改动仓序本身（仓序由 owner 在 design 侧决定，plan 内只能调整归属与依赖）。",
     );
-    prompt.push_str(REVISION_TEACHING);
     prompt
+}
+
+/// 结构臂 instruction_digest 的永久输入；逐字保留 source cutover 前的指令正文。
+/// 不加入 typed 全因或 source 元数据，避免同一失败因 prompt 扩充而改变指令摘要。
+pub(crate) fn legacy_author_structure_repair_body(failure: &PlanningCompileFailure) -> String {
+    let mut body = render_author_structure_repair_instructions(failure);
+    body.push_str(REVISION_TEACHING);
+    body
+}
+
+/// 事实、typed 全集、完整失败 source 与最终输出纪律；预算只由最终 facade 裁决。
+pub(crate) fn author_structure_repair_prompt(
+    failure: &PlanningCompileFailure,
+    structure_failures: &PlanningFailureSet,
+    previous_source: &str,
+    source: &crate::product::workspace_engine::ScTeachingSourceMetadata<'_>,
+) -> Result<String, crate::product::workspace_engine::ScTeachingPromptError> {
+    let source_block = crate::product::workspace_engine::render_sc_previous_source_block(
+        previous_source,
+        source,
+    )?;
+    let mut prompt = render_author_structure_repair_instructions(failure);
+    prompt.push_str("\n结构失败事实（按原失败集顺序逐项保留）：\n");
+    for structure_failure in &structure_failures.failures {
+        // PlanningFailure 只包含可序列化的字符串、整数、枚举、序列及字符串键 map。
+        // 不投影成首个环、不去重；证据与来源字段也随每条 typed 记录保留。
+        prompt.push_str(
+            &serde_json::to_string(structure_failure)
+                .expect("PlanningFailure contains only JSON-serializable facts"),
+        );
+        prompt.push('\n');
+    }
+    prompt.push_str(&source_block);
+    prompt.push('\n');
+    prompt.push_str(REVISION_TEACHING);
+    Ok(prompt)
 }
 
 /// typed 失败 → durable 失败事实（与 `candidate_compile_status` 同一派生，
@@ -360,7 +395,7 @@ impl crate::product::workspace_engine::WorkspaceEngine {
         if allow_structure_rerun {
             // 恰一次教学重驱槽位仍空闲：不开人工门、不硬失败，把 **sealed 的
             // 原失败身份 ＋ 原 typed 结构失败集** 交还 runner 重驱作者一次。
-            // 修复指令正文由 runner 用既有 `author_structure_repair_prompt(&failure)`
+            // 修复指令正文由 runner 用 `author_structure_repair_prompt` 携完整失败 source
             // 生成（引擎侧不再提前造 prompt——避免二次渲染与文本反解析）。
             // 重驱是 runner 的 provider 通道，不是引擎 prerevision 路由——此处同样
             // 不虚记自动重写预算，且 durable `auto_rewrite` 不得留 running
