@@ -833,6 +833,11 @@ pub async fn serve_web(
     work_item_plan_single_candidate: bool,
 ) -> anyhow::Result<()> {
     let product_paths = ProductAppPaths::new(workspace_root.join(".aria"));
+    // 生产 tracing subscriber：服务形态唯一的日志落盘入口。没有它，
+    // `tracing::info!/warn!` 是 no-op——安装作业决策链 / 聚合索引覆盖判定
+    // 在客户机上不会留下任何证据。放在一切启动动作之前（早期失败也有
+    // 日志）；幂等，文件不可写只降级到 stderr，不阻断启动。
+    let _tracing_init = crate::cross_cutting::logging_setup::init_web_tracing(product_paths.root());
     ensure_product_data_schema(&product_paths)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
