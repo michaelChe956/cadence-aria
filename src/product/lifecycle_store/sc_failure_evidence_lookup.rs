@@ -13,7 +13,7 @@ use super::{
     ScFailureEvidenceEvent, ScFailureEvidenceRead, CODE_LOG_CORRUPT, CODE_SCOPE_MISMATCH,
     SC_FAILURE_EVIDENCE_DIR, SC_FAILURE_EVIDENCE_LOG,
 };
-use crate::omigo::lifecycle_store::LifecycleStore;
+use crate::product::lifecycle_store::LifecycleStore;
 use crate::product::json_store::ProductStoreError;
 use crate::product::models::WorkspaceType;
 use crate::product::work_item_plan_policy::WorkItemPlanFlowKind;
