@@ -137,6 +137,11 @@ async fn sc_failure_package_compile_terminal_publishes_durable_package() {
     assert_eq!(terminal[0]["event"]["terminal_class"], "compile");
 
     // 生产终局发布的 durable A4 版本（当前 P19d 未接线 ⇒ 真实 RED）。
+    assert_eq!(
+        durable_sc_package_versions(&run.fixture).len(),
+        1,
+        "A4 missing; already captured production WS Error: {message}"
+    );
     let version = published_failure_package(&run.fixture);
     let package = &version["payload"]["sc_failure_repair_package"];
     assert_eq!(package["chain_id"], chain_id, "A4 包必须绑定本轮真实失败链");
@@ -241,6 +246,11 @@ async fn sc_failure_package_second_failure_keeps_both_rounds_in_durable_package(
         "次轮 typed 原因在场: {second_reasons:?}"
     );
 
+    assert_eq!(
+        durable_sc_package_versions(&run.fixture).len(),
+        1,
+        "A4 missing; already captured production WS Error: {message}"
+    );
     let version = published_failure_package(&run.fixture);
     let package = &version["payload"]["sc_failure_repair_package"];
     assert_eq!(package["chain_id"], chain_id, "A4 包必须绑定本轮真实失败链");
