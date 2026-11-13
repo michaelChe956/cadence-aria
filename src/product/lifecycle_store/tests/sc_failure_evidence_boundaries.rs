@@ -411,7 +411,7 @@ fn sc_failure_boundary_structure_gate_source_is_canonical_revision() {
     let mut revision = SourceRevisionRecord {
         id: "source-0001".to_string(),
         source: source_text.to_string(),
-        source_revision_hash: sha256_hex(source_text.as_bytes()),
+        source_revision_hash: sha256_hex(source_text),
         content_hash: String::new(),
     };
     revision.content_hash = revision.content_hash().expect("content hash");
@@ -444,7 +444,7 @@ fn sc_failure_boundary_structure_gate_source_is_canonical_revision() {
     let mut foreign = SourceRevisionRecord {
         id: "source-foreign-0001".to_string(),
         source: foreign_text.to_string(),
-        source_revision_hash: sha256_hex(foreign_text.as_bytes()),
+        source_revision_hash: sha256_hex(foreign_text),
         content_hash: String::new(),
     };
     foreign.content_hash = foreign.content_hash().expect("content hash");
