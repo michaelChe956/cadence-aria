@@ -585,7 +585,3 @@ mod publication_tests;
 #[cfg(test)]
 #[path = "tests/sc_failure_publication_rebuild.rs"]
 mod publication_rebuild_tests;
-
-#[cfg(test)]
-#[path = "/tmp/wig-a4-ui-export.rs"]
-mod ui_export;
