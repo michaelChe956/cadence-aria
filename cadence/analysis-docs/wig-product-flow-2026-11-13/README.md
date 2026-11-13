@@ -101,7 +101,9 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
 
 - 两处都没给 ⇒ `缺少固定案例根：显式给 --case-root <…> 或环境变量 WIG_CASE_ROOT…`；
 - `--case-root` 与 src 相同 ⇒ 直接拒绝（混用会误判成员身份）；
-- 成员 `canonical_path` 不在该根下 ⇒ `成员 busi 的 canonical_path=… 不在固定案例根 … 之下`。
+- 成员 `canonical_path` 不在该根下 ⇒ `成员 busi 的 canonical_path=… 不在固定案例根 … 之下`；
+- 快照缺 `aggregate_root` ⇒ fail closed（不猜）；有值但与 `--case-root` 不等 ⇒ 同样拒绝。
+- scratch HOME 必须是 `/tmp` 下的**专属子目录**：`/tmp` 本身与真实 HOME 都拒绝。
 
 上述三种失败都会先写 `<out>/seed-manifest.json`（`valid=false` +
 `invalid_reason`）并保留已复制的 `seed-workspace` 作为证据；脚本永不删除、永不
@@ -165,9 +167,14 @@ story_spec_0009 等已确认 seed）。**该目录现已不存在**（2026-11-13
   `$CODEX_HOME/config.toml`（缺省 `$HOME/.codex/config.toml`）中
   `[projects."<root>"]` 的 `trust_level`，**不打印 config 内容**。
   - 默认（未授权）：显式失败，并给出 controller 需追加的完整 TOML 片段与路径；
-  - 仅当 controller 置 `WIG_TRUST_AUTHORIZED=1` **且** scratch HOME 真实位于
-    `/tmp` 时，装置才登记缺失条（0600 追加，绝不覆盖既有 `untrusted` 条目），
-    然后**显式重试一次** start_generation；
+  - 仅当 controller 置 `WIG_TRUST_AUTHORIZED=1` **且** scratch HOME 是 `/tmp` 下的
+    专属子目录时，装置才登记缺失条（0600 追加，绝不覆盖既有 `untrusted` 条目），
+    然后**显式重试一次** start_generation；登记来源只有冻结快照里的 4 条
+    （1 个聚合根 `provider_context_root` + 3 个成员 `canonical_path`），
+    **不解析 error 文本里的路径**；
+  - 若 expected roots 现已全部 trusted，则后续 `trust_missing_guidance` 指导帧或
+    同一条重复拒绝视为**已消费（consumed）**：不退出、也不再发 start，继续等
+    已发 retry 的真实结果；只有**签名不同的新拒绝**才落阻塞；
   - 装置不复制任何凭据/secret、不写真实 HOME；隔离环境一律由 controller 的
     `prepare_env.sh` 提供（`source <setup>/env.sh` 后再跑装置）。
 - 真实可用性只由 durable `provider_start_ledger` 非空证明（seed 与每臂 plan
@@ -267,8 +274,20 @@ python3 $D/harvest_by_role.py /tmp/aria-wig/out-seed /tmp/aria-wig/out-seed/sequ
 
 `--seed` 拒绝覆盖已存在的 `<out>/seed-workspace`；失败的 seed 目录里会留
 `seed-manifest.json`（`valid=false` + `invalid_reason`）与已复制的
-`seed-workspace`，**原样保留作为证据**。装置没有「半程 resume」：arm 模式只接受
-`valid=true` 的 seed-manifest，因此恢复方式是**换新 out 根完整重跑 seed**：
+`seed-workspace`，**原样保留作为证据**。
+
+- **首选 `--resume`（同一 prepared session，不新建 issue/spec/session）**：
+  只读既有 `<out>/seed-manifest.json` 与其记录的 issue/story/session，核对
+  案例根 / issue 输入 digest / 成员快照未变后附着同一 session；若 story 已
+  confirmed 且有 provider 账目 ⇒ **零模型调用**，直接补同一 manifest；
+  否则仅在 `provider_start_ledger` 为空（证明从未启动）时才发一次 start，成功
+  后仍写同一 manifest。
+  ```bash
+  python3 $D/run_arms.py --resume /tmp/aria-wig/out-seed \
+    /tmp/aria-wig-pinned/after-07a0df79 4709 \
+    --case-root "$WIG_CASE_ROOT" --issue-input $SETUP/issue_input.md
+  ```
+- 若既有 session 已不可用，则换新 out 根完整重跑 seed（脚本无半程重跑语义）：
 
 ```bash
 # 例：/tmp/aria-wig 里已有失败的 seed-workspace ⇒ 用 out-seed2 重跑

@@ -98,8 +98,9 @@ MEMBER_SNAP_SCHEMA = "wig-member-snapshot/1"
 SKIP_TREE_DIRS = {".codegraph"}      # 聚合索引缓存：读会改 sqlite 附属文件，不计入
 ISSUE_INPUT_ANCHORS = ("公告删除",) + tuple(
     "REQ-%03d" % i for i in range(1, 8)) + tuple("AC-%03d" % i for i in range(1, 7))
-TRUST_HINTS = ("trust_level", "trust entry", "trust 条目", "workspace trust",
-               "untrusted", "not trusted", "trust 缺失")
+TRUST_HINTS = ("trust_level", "trust entry", "trust_entry", "trust 条目",
+               "workspace trust", "provider_trust", "untrusted", "not trusted",
+               "trust 缺失")
 
 
 def http(method, url, body=None, timeout=60):
@@ -163,10 +164,11 @@ def assert_scratch_home():
             "controller 需先 source <setup>/env.sh（scratch HOME 必须在 /tmp 下）"
             % home)
     real = os.path.realpath(home)
-    if not (real == "/tmp" or real.startswith("/tmp/")):
+    if not real.startswith("/tmp/") or real == "/tmp":
         raise SystemExit(
-            "scratch HOME 必须位于 /tmp（当前 realpath=%s）：装置不写真实 HOME。"
-            "\ncontroller 需用 prepare_env 提供的隔离 HOME" % real)
+            "scratch HOME 必须是 /tmp 下的专属子目录（当前 realpath=%s）：/tmp 本身与"
+            "真实 HOME 都不接受，装置不写真实 HOME。\ncontroller 需用 prepare_env 提供的隔离 HOME"
+            % real)
     return real
 
 
@@ -822,10 +824,11 @@ def register_trust_entry(root):
 
 
 def trust_roots(run):
-    """trust 观测面：聚合根 + 每个成员的 canonical_path（去重、保序）。
+    """trust 观测面 = 冻结快照里的 **1 个聚合根 + 3 个成员 canonical_path**（共 4 条）。
 
-    codex 的 trust key 是「provider 在该目录下运行」的 canonical root；装置不猜
-    唯一根，而是把观测到的候选全部列出/登记。
+    全部来自产品 durable 快照（`provider_context_root` + 每个成员
+    `checkouts` 的 `canonical_path`），**不解析 error 文本里的任意 URL/路径**，
+    也不写快照之外的 root。去重、保序。
     """
     snap = member_snapshot(run)
     cand = []
@@ -914,18 +917,24 @@ def observed_provider_fields(session_rec, sent_cfg):
 
 
 def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
-                             frames_path, budget_s=ARM_TIMEOUT_S):
+                             frames_path, budget_s=ARM_TIMEOUT_S,
+                             allow_start=True):
     """WS hello → start_generation → 等确认门 → HTTP confirm → durable 验证。
 
     返回证据 dict；任何未知权限/信任/选择门 ⇒ SystemExit（明确阻塞，不自动批准）。
-    trust 缺项按 resolve_trust_gate 处理：未授权只报命令片段；已授权登记后
-    **显式重试一次** start_generation。
+    trust 门是一次性事务：缺项已授权则登记并**重试一次** start；之后服务端可能
+    仍补发 `trust_missing_guidance` 指导帧或重复同一条拒绝——只要 expected roots
+    现在全部 trusted，这类帧**不是终止条件**（等待已发 retry 的真实结果），
+    只有新的（签名不同的）拒绝才落阻塞。
+
+    allow_start=False（resume）时只附着既有 session，不新发 start。
     """
     origin = "http://127.0.0.1:%d" % port
     cli = WsClient("127.0.0.1", port,
                    "/api/workspace-sessions/%s/ws" % session_id, origin)
     stage_seq, blocked, gate_stage, started = [], None, None, False
     trust_retried = False
+    last_trust_sig = None
     sent_cfg = {"author": PROVIDER, "reviewer": PROVIDER, "review_rounds": 1,
                 "permission_modes": {"author": "auto", "reviewer": "auto"}}
     frames_fh = open(frames_path, "a", encoding="utf-8")
@@ -938,20 +947,31 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
         return {"type": "start_generation", "provider_config": sent_cfg,
                 "reviewer_enabled": False}
 
+    def trust_signature(msg):
+        blob = ("%s|%s" % (msg.get("code") or "",
+                           msg.get("message") or ""))[:400]
+        return blob
+
     def handle_trust(where):
+        """返回 "retried" / "consumed" / "registered_wait"；未授权缺项 ⇒ SystemExit。
+
+        already-trusted（含旧 guidance）⇒ "consumed"：算已消费、不再发 start。
+        """
         nonlocal trust_retried, started
         resolution, missing = resolve_trust_gate(trust_roots(run))
         record({"event": "trust_gate", "where": where,
                 "missing_count": len(missing), "resolution": resolution})
-        if resolution != "registered" or trust_retried:
-            return False
+        if resolution != "registered":
+            return "consumed"           # 已全部 trusted：旧 guidance/重复拒绝算已消费，不再发 start
+        if trust_retried or not allow_start:
+            return "registered_wait"    # 已补登记：等待（resume 不再发 start）
         trust_retried = True
         log("  trust 门（%s）：按 controller 授权登记 %d 条，显式重试 start_generation"
             % (where, len(missing)))
         cli.send_text(json.dumps(start_payload()))
         record({"event": "start_generation_retry", "reason": "trust_registered"})
         started = True
-        return True
+        return "retried"
 
     record({"event": "ws_open", "session_id": session_id})
     try:
@@ -976,7 +996,7 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
                 if not stage_seq or stage_seq[-1] != stage:
                     stage_seq.append(stage)
                 record({"event": "session_state", "stage": stage})
-                if stage == "prepare_context" and not started:
+                if stage == "prepare_context" and not started and allow_start:
                     started = True
                     payload = start_payload()
                     cli.send_text(json.dumps(payload))
@@ -999,8 +1019,16 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
                                         msg.get("message") or "")).lower()
                 record({"event": "server_reject", "code": msg.get("code"),
                         "message": str(msg.get("message"))[:300]})
-                if any(h in text_blob for h in TRUST_HINTS) and handle_trust(t):
-                    continue          # 已按授权登记并显式重试 start
+                if any(h in text_blob for h in TRUST_HINTS):
+                    sig = trust_signature(msg)
+                    res = handle_trust(t)
+                    if res == "consumed" and sig != last_trust_sig:
+                        last_trust_sig = sig
+                        blocked = ("provider 仍拒绝（trust 已全部 trusted，本次为重试后的"
+                                   "新拒绝）: %s" % str(msg.get("message"))[:300])
+                        break
+                    last_trust_sig = sig   # 已处理过的拒绝/已登记：继续等真实结果
+                    continue
                 blocked = "服务端 %s: code=%s message=%s" % (
                     t, msg.get("code"), str(msg.get("message"))[:300])
                 break
@@ -1018,9 +1046,12 @@ def drive_story_to_confirmed(run, port, issue_id, session_id, story_id,
                 break
             elif t and "trust" in str(t).lower():
                 record({"event": "trust_frame", "type": t})
-                if handle_trust("frame:%s" % t):
+                res = handle_trust("frame:%s" % t)
+                if res in ("retried", "consumed", "registered_wait"):
+                    # 指导帧本身不是终止条件：等已发 retry 的真实结果（stage/终态）
+                    record({"event": "trust_guidance_continue", "resolution": res})
                     continue
-                blocked = ("%s 到达且无法自行解决：装置不自动批准（需 controller 登记 "
+                blocked = ("%s 到达且 trust 未满足：装置不自动批准（需 controller 登记 "
                            "codex workspace trust 或授权后重跑）" % t)
                 break
             else:
@@ -1204,8 +1235,11 @@ def make_seed(binary, src, out_root, port, issue_input, case_root):
         snap_before = member_snapshot(seed_ws)
         assert_three_members(snap_before, "seed")
         assert_fixed_case_paths(snap_before, case_root, "seed")
-        agg_root = os.path.abspath(snap_before.get("aggregate_root") or "").rstrip("/")
-        if agg_root and agg_root != case_root:
+        raw_agg = snap_before.get("aggregate_root")
+        if not raw_agg:
+            raise SystemExit("快照缺 aggregate_root：无法核对固定案例根（fail closed）")
+        agg_root = os.path.abspath(raw_agg).rstrip("/")
+        if agg_root != case_root:
             raise SystemExit(
                 "固定案例根与产品记录不一致：case_root=%s，snapshot.aggregate_root=%s。"
                 "唯一权威是 --case-root/WIG_CASE_ROOT（不静默纠正、不把 state root 当案例根）"
@@ -1456,6 +1490,161 @@ def _finish_arm(manifest, run, tag, arm, port):
 
 
 
+# ───────────────────────── resume（同一 prepared seed/session，不新建） ─────────────────────────
+
+def discover_prepared_story(seed_ws):
+    """从落盘发现已 prepare 的 (issue_id, story_spec_id, story_session_id)。
+
+    只读；不创建 issue / story spec / session，也不触发任何模型调用。
+    """
+    issues = os.path.join(seed_ws, ".aria", "projects", PROJECT, "issues")
+    if not os.path.isdir(issues):
+        raise SystemExit("resume 失败：找不到 issues 目录（%s）" % issues)
+    for issue in sorted(os.listdir(issues)):
+        idir = os.path.join(issues, issue)
+        sdir = os.path.join(idir, "story-specs")
+        sess_dir = os.path.join(idir, "workspace-sessions")
+        if not os.path.isdir(sdir) or not os.path.isdir(sess_dir):
+            continue
+        specs = sorted(n[:-5] for n in os.listdir(sdir) if n.endswith(".json"))
+        sessions = sorted(n[:-5] for n in os.listdir(sess_dir)
+                          if n.endswith(".json") and "auto_" not in n)
+        if specs and sessions:
+            return issue, specs[0], sessions[0]
+    raise SystemExit("resume 失败：未发现已 prepare 的 story spec + workspace session")
+
+
+def resume_seed(binary, out_root, port, issue_input, case_root):
+    """在同一 prepared seed 工作区/会话上续跑，不新建 issue / spec / session。
+
+    - story 已 confirmed 且有版本正文 + provider 启动账目 ⇒ **零模型调用**，
+      只补齐 manifest；
+    - 否则附着同一 session 继续驱动（最多一次 start_generation），仍是同一
+      session，不产生新的 seed issue/story。
+    """
+    home = assert_scratch_home()
+    out_root = os.path.abspath(out_root).rstrip("/")
+    seed_ws = os.path.join(out_root, "seed-workspace")
+    mpath = os.path.join(out_root, "seed-manifest.json")
+    if not os.path.isdir(seed_ws):
+        raise SystemExit("resume 需要既有 seed 工作区: %s" % seed_ws)
+    prev = read_json(mpath) or {}
+    if prev.get("schema") and prev.get("schema") != "wig-seed-manifest/1":
+        raise SystemExit("既有 manifest schema 不符: %s" % mpath)
+    issue_id, story_id, session_id = discover_prepared_story(seed_ws)
+    # 优先使用既有 manifest 记录的 ID（必须仍在落盘存在），否则回落到发现值
+    def _exists(*parts):
+        return os.path.exists(os.path.join(seed_ws, ".aria", "projects", PROJECT,
+                                           "issues", issue_id, *parts))
+    rec_issue = prev.get("issue_id")
+    if rec_issue and os.path.isdir(os.path.join(seed_ws, ".aria", "projects", PROJECT,
+                                                "issues", rec_issue)):
+        issue_id = rec_issue
+    rec_story = prev.get("story_spec_id")
+    if rec_story and _exists("story-specs", "%s.json" % rec_story):
+        story_id = rec_story
+    rec_sess = prev.get("story_session_id")
+    if rec_sess and _exists("workspace-sessions", "%s.json" % rec_sess):
+        session_id = rec_sess
+    log("=== resume: issue=%s story=%s session=%s（沿用既有记录，不新建 issue/spec/session）"
+        % (issue_id, story_id, session_id))
+
+    snap = prev.get("member_snapshot") or member_snapshot(seed_ws)
+    assert_three_members(snap, "resume")
+    assert_fixed_case_paths(snap, case_root, "resume")
+    raw_agg = snap.get("aggregate_root")
+    if not raw_agg:
+        raise SystemExit("既有快照缺 aggregate_root：无法核对固定案例根（fail closed）")
+    agg = os.path.abspath(raw_agg).rstrip("/")
+    if agg != case_root:
+        raise SystemExit("固定案例根与产品记录不一致：case_root=%s，aggregate_root=%s"
+                         % (case_root, agg))
+    cur = member_snapshot(seed_ws)
+    drift = snapshot_diff(snap, cur)
+    if drift:
+        raise SystemExit("resume 前成员快照已漂移（%s）：拒绝续跑（不是同一输入）"
+                         % drift[:6])
+
+    sess_path = os.path.join(seed_ws, ".aria", "projects", PROJECT, "issues",
+                             issue_id, "workspace-sessions", "%s.json" % session_id)
+    spec_path = os.path.join(seed_ws, ".aria", "projects", PROJECT, "issues",
+                             issue_id, "story-specs", "%s.json" % story_id)
+    spec = read_json(spec_path) or {}
+    rec = read_json(sess_path) or {}
+    ledger = len(rec.get("provider_start_ledger") or [])
+    version = spec.get("current_version")
+    if spec.get("confirmation_status") == "confirmed" and version and ledger > 0:
+        log("  已 confirmed 且 provider 账目=%d：resume 不触发任何模型调用" % ledger)
+        digest = story_version_digest(seed_ws, issue_id, story_id, version)
+        observed = observed_provider_fields(rec, None)
+    else:
+        # ledger 非空 = 该 session 已启动过 ⇒ 不再发 start（避免重复模型调用），
+        # 只附着等待既有运行/终态；ledger 为空才允许发一次 start。
+        allow_start = (ledger == 0)
+        log("  续跑同一 session（status=%s, ledger=%d, allow_start=%s）：不新建 issue/spec"
+            % (rec.get("status"), ledger, allow_start))
+        proc = start_daemon(binary, seed_ws, port)
+        try:
+            wait_health(port, proc)
+            ev = drive_story_to_confirmed(
+                seed_ws, port, issue_id, session_id, story_id,
+                os.path.join(seed_ws, "story-ws-frames.jsonl"),
+                allow_start=allow_start)
+            if ev["provider_start_ledger"] <= 0:
+                raise SystemExit("provider_start_ledger 为空：story 未发生真实 provider 启动")
+            version = ev["story_version"]
+            digest = {"story_version_ref": ev["story_version_ref"],
+                      "version_file_sha256": ev["version_file_sha256"],
+                      "markdown_sha256": ev["markdown_sha256"],
+                      "markdown_bytes": ev["markdown_bytes"]}
+            observed = ev["observed"]
+        finally:
+            stop_daemon(proc)
+
+    manifest = dict(prev)
+    manifest.update({
+        "schema": "wig-seed-manifest/1",
+        "mode": "seed",
+        "created_at": prev.get("created_at") or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "resumed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "binary": binary,
+        "binary_sha256": sha256_bin(binary),
+        "resume": True,
+        "issue_id": issue_id,
+        "story_spec_id": story_id,
+        "story_session_id": session_id,
+        "story_version": version,
+        "story_version_ref": digest["story_version_ref"],
+        "story_markdown_sha256": digest["markdown_sha256"],
+        "story_markdown_bytes": digest["markdown_bytes"],
+        "story_version_file_sha256": digest["version_file_sha256"],
+        "fixed_case_root": case_root,
+        "case_root_env": os.environ.get("WIG_CASE_ROOT"),
+        "scratch_home": home,
+        "issue_input_path": issue_input["path"],
+        "issue_input_sha256": issue_input["sha256"],
+        "issue_input_bytes": issue_input["bytes"],
+        "member_snapshot": cur,
+        "member_snapshot_sha256": hashlib.sha256(
+            json.dumps(cur, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        ).hexdigest(),
+        "observed": observed,
+        "provider_start_ledger": max(ledger, 1),
+        "valid": True,
+        "invalid_reason": None,
+    })
+    with open(mpath, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=1)
+    log("resume 完成：%s（valid=true，issue/story/session 未新建）" % mpath)
+    print(json.dumps({k: manifest[k] for k in
+                      ("issue_id", "story_spec_id", "story_version",
+                       "story_version_ref", "story_session_id",
+                       "provider_start_ledger", "issue_input_sha256",
+                       "story_markdown_sha256", "valid")},
+                     ensure_ascii=False, indent=1))
+    return manifest
+
+
 # ───────────────────────── main ─────────────────────────
 
 def _write_failed_manifest(out_root, arm, tag, port, binary, seed_ws,
@@ -1531,6 +1720,28 @@ def main():
         log("state root=%s（会被克隆）  fixed case root=%s（成员仓所在）"
             % (os.path.abspath(src), case_root))
         make_seed(binary, src, out_root, port, issue_input, case_root)
+        return
+    if args and args[0] == "--resume":
+        if len(args) < 2:
+            raise SystemExit("用法: run_arms.py --resume <既有out根> [binary] [端口] "
+                             "--case-root <案例根> --issue-input <file>")
+        out_root = args[1]
+        prev = read_json(os.path.join(os.path.abspath(out_root).rstrip("/"),
+                                      "seed-manifest.json")) or {}
+        binary = args[2] if len(args) > 2 else (prev.get("binary") or "")
+        port = int(args[3]) if len(args) > 3 else 4709
+        if not binary:
+            raise SystemExit("resume 需要二进制（参数或既有 manifest.binary）")
+        issue_input = load_issue_input(issue_input_path)
+        if prev.get("issue_input_sha256") and \
+                prev["issue_input_sha256"] != issue_input["sha256"]:
+            raise SystemExit("issue 输入与既有 seed 记录的 digest 不一致：%s vs %s"
+                             % (issue_input["sha256"], prev["issue_input_sha256"]))
+        case_root = resolve_case_root(case_root_cli)
+        os.makedirs(out_root, exist_ok=True)
+        log_path = os.path.join(out_root, "sequence.log")
+        log("resume out=%s binary=%s case_root=%s" % (out_root, binary, case_root))
+        resume_seed(binary, out_root, port, issue_input, case_root)
         return
     if len(args) < 5:
         raise SystemExit("用法: run_arms.py <before二进制> <after二进制> <seed工作区> "
