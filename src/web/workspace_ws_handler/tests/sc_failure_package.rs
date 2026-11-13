@@ -27,8 +27,7 @@ use super::sc_failure_driver_fixture::{
     author_start_count, candidate_attempts, chain_ids, durable_artifact_versions,
     durable_sc_package_versions, events_of, evidence_entries, failure_message,
     markdown_duplicate_trusted_command, markdown_missing_five_sections,
-    markdown_unknown_requirement_ref, only_chain_id, session_json_bytes, start_run, start_run_with,
-    window_snapshot,
+    markdown_unknown_requirement_ref, only_chain_id, start_run, start_run_with, window_snapshot,
 };
 use super::single_candidate_provider_run::{ProviderRunFixture, wait_for_single_candidate_phase};
 use super::*;
@@ -67,9 +66,23 @@ fn published_failure_package(fixture: &ProviderRunFixture) -> serde_json::Value 
         "A4 版本号必须是 durable 版本表里的实际序号（实测 {version_number}，表内最大 {durable_max}）"
     );
     let expected_ref = format!("artifact_version_{version_number:03}");
-    assert!(
-        session_json_bytes(fixture).contains(&expected_ref),
+    // `session_state` 对 WorkItemPlan 会话不内联 AuthorRun 节点详情，故节点引用只能
+    // 从 durable node detail 读（与发布器的写入面同源），不从公开帧字符串推断。
+    let node_id = version["source_node_id"]
+        .as_str()
+        .expect("A4 版本必须记录来源节点");
+    let detail = fixture
+        .lifecycle
+        .load_node_detail(&fixture.record.id, node_id)
+        .expect("读取来源节点详情");
+    let reference = detail.artifact_ref.expect("来源节点必须登记发布引用");
+    assert_eq!(
+        reference.artifact_id, expected_ref,
         "节点 artifact_ref 必须指向实际发布的版本（{expected_ref}）"
+    );
+    assert_eq!(
+        reference.version, version_number as u32,
+        "节点引用版本必须等于 A4 版本号"
     );
     version
 }

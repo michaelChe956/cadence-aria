@@ -138,10 +138,28 @@ async fn sc_failure_package_teaching_started_without_delivery_records_sent_promp
         })
         .expect("首轮 compile 失败事实");
 
-    // durable prompt 审计：处置必须是 sent；正文哈希/引用与已准备正文一致。
+    // durable prompt 审计：prompt 槽按 disposition 分键，教学轮真实发送后应有
+    // `prepared`（首次写读）与 `sent`（实际发出）两条，且正文 locator/digest 同源。
     let prompts = events_of(&entries, "prompt_prepared");
-    assert_eq!(prompts.len(), 1, "恰一条 durable 教学提示审计");
-    let evidence = &prompts[0]["event"]["evidence"];
+    let prepared: Vec<_> = prompts
+        .iter()
+        .filter(|entry| entry["event"]["evidence"]["disposition"] == "prepared")
+        .collect();
+    let sent: Vec<_> = prompts
+        .iter()
+        .filter(|entry| entry["event"]["evidence"]["disposition"] == "sent")
+        .collect();
+    assert_eq!(prepared.len(), 1, "恰一条 prepared 处置的教学提示审计");
+    assert_eq!(
+        sent.len(),
+        1,
+        "教学轮已物理启动（prompt 已交给 provider）⇒ 必须另有恰一条 sent 处置"
+    );
+    assert_eq!(
+        prepared[0]["event"]["evidence"]["prompt"], sent[0]["event"]["evidence"]["prompt"],
+        "prepared 与 sent 必须指向同一份已审计正文（同 locator/摘要/字节数）"
+    );
+    let evidence = &sent[0]["event"]["evidence"];
     assert_eq!(
         evidence["disposition"], "sent",
         "教学轮已物理启动（prompt 已交给 provider）⇒ 处置必须是 sent，不得停在 prepared"

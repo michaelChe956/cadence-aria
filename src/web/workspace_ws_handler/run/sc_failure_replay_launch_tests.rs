@@ -196,8 +196,9 @@ fn teaching_round_classifies_ready_completed_and_waiting() {
     }
     assert_eq!(actual_starts(&lifecycle, &scope.session_id), 0);
 
-    // audited start + no delivery ⇒ Waiting（不落 Failed、不 err）。
-    // ordinal 2 = 教学轮(1) 的下一轮：用教学轮身份推进入参，不是再重放 ordinal 1。
+    // audited start + no delivery ⇒ 重放**该轮**必须 Waiting（不落 Failed、不 err）。
+    // 顺序：先按真实入口造出下一轮（新 seq ⇒ Ready），为该 seq 记真实 provider_start
+    // 审计，再重放同一轮 —— 此时 RoundBound 已存在且有启动审计 ⇒ 分类器必须 Waiting。
     let third = match begin_sc_failure_round(
         &lifecycle,
         &original.chain.scope,
@@ -207,33 +208,27 @@ fn teaching_round_classifies_ready_completed_and_waiting() {
         &ProviderName::Fake,
         teaching.round.round_ordinal + 1,
     )
-    .expect("ordinal 2 binds")
+    .expect("next ordinal binds")
     {
         ScRoundEntry::Ready(bound) => bound,
-        _ => panic!("ordinal 2 must start Ready"),
+        _ => panic!("a never-started next round must start Ready"),
     };
     audited_start(&lifecycle, &scope.session_id, third.round.role_run_seq);
-    let previous_third = (
-        ScEvidenceRef::Missing {
-            code: "sc_failure_raw_missing".to_string(),
-            detail: "not delivered".to_string(),
-            round_id: third.round.round_id.clone(),
-        },
-        third.round.clone(),
-    );
-    match begin_sc_teaching_round(
+    match begin_sc_failure_round(
         &lifecycle,
-        &original,
-        Some(&previous_third),
+        &original.chain.scope,
+        &original.chain.business_key,
+        Some(&original.chain),
         NODE_ID,
         &ProviderName::Fake,
+        teaching.round.round_ordinal + 1,
     )
-    .expect("teaching replay resolves")
+    .expect("audited round replay resolves")
     {
         ScRoundEntry::Waiting { reason_code, .. } => {
             assert_eq!(reason_code, SC_ROUND_LAUNCH_UNKNOWN)
         }
-        _ => panic!("audited teaching start must classify Waiting"),
+        _ => panic!("audited started round replay must classify Waiting"),
     }
     // 一轮 RoundBound 一行：原轮 + 教学 1 + 教学 2。
     assert_eq!(evidence_rows(&lifecycle, &original.chain), 3);
