@@ -8,7 +8,7 @@
 | 口径 | 真实含义 | 本 change 的处置 |
 |---|---|---|
 | **262,144 B** | 生产作者 prompt 硬兜底（`prompts.rs:39,362`） | 不调整 |
-| **23,500 B** | 现有**短动态 fixture** 的全 prompt 质量界线（`#[cfg(test)]` 下）；「余 52 B」是**该 fixture** 的余量，不是生产余量 | **不提额**，继续守 `<23_500` |
+| **23,500 B** | 现有**短动态 fixture** 的全 prompt 质量界线（`#[cfg(test)]` 下）；具体余量（如 52 B / 18~40 B）是**运行期 `eprintln!` 打印值**，不同 fixture 与批次可能不同 ⇒ **一律以最近一次绿色输出的实测值为准**，静态不可测 | **不提额**，继续守 `<23_500` |
 | **32,000 B** | `confirmed_context` 动态上下文总额（`sc_baseline_tree.rs:13`）；story/design 各 14,400、structure **3,200**、baseline 段 ≤8,000 且受实际余量夹紧 | **不扩大**；成员事实**替换** structure 的 3,200，不追加第五段 |
 
 **教学面当前没有字节闸**：`sc_compile_teaching.rs` 与 `build_typed_compile_reredrive_prompt`（`single_candidate_compile_preflight.rs:809-820`）均无 MAX/LIMIT 常量。A1 **新增**的边界仅是「新增的 parse 诊断事实块 ≤32,000 B」，**不是**假称整个教学 prompt 已有该闸。
@@ -68,7 +68,7 @@ A1 单独交付时可证「预算内每条带齐 field/example + 省略条目数
 
 ### 描述段压缩依据（裁决 §2.1）
 
-REQ-WSC-12 的描述段由主规格现值压缩到 **489 字符**（门禁 ≤500）：把**已由既有场景承载**的细则下沉到场景（`值非法 MUST 按既有 invalid_finding_field 判不合规` 已有专属场景「非法 disposition 值判不合规」；`历史记录 MUST 照旧可解析` 已有场景「缺失 disposition 的历史记录仍阻断」；`actionable / advisory` 的语义注解已有场景「本 Work Item 的验收标准缺口仍是 actionable」），**保留全部 MUST/MAY 义务**（含 `finding MAY 携带 target_work_item_id`）与**活的交叉引用**（`契约类缺口的平台加固见 REQ-WSC-17` —— 主规格 REQ-WSC-17 确含「`contract_gap` / `self_contradiction` MUST NOT 仅凭模型标 `advisory` 获得免阻断」，该引用**不失效**、**必须保留**）。窄例外的**边界**由新增场景「窄例外的边界（契约类与强严重度仍按既有语义）」承载（场景是 requirement 的规范组成部分）。
+REQ-WSC-12 的描述段由主规格现值压缩到 **489 字符**（门禁 ≤500）：把**已由既有场景承载**的细则下沉到场景（`值非法 MUST 按既有 invalid_finding_field 判不合规` 已有专属场景「非法 disposition 值判不合规」；`历史记录 MUST 照旧可解析` 已有场景「缺失 disposition 的历史记录仍阻断」；`actionable / advisory` 的语义注解已有场景「本 Work Item 的验收标准缺口仍是 actionable」），**保留全部 MUST/MAY 义务**（含 `finding MAY 携带 target_work_item_id`）与**活的交叉引用**（`契约类缺口的平台加固见 REQ-WSC-17` —— 主规格 REQ-WSC-17 确含「`contract_gap` / `self_contradiction` MUST NOT 仅凭模型标 `advisory` 获得免阻断」，该引用**不失效**、**必须保留**）。窄例外的**边界**由新增场景「窄例外的边界（契约类与强严重度仍按既有语义）」承载（场景是 requirement 的规范组成部分）。**交叉引用收窄声明**：主规格 REQ-WSC-12 原描述段为「**返修触发路径与**契约类缺口的平台加固见 REQ-WSC-17」，本 delta 收窄为「契约类缺口的平台加固见 REQ-WSC-17」——**无 MUST 被削弱**（返修触发路径的义务由 REQ-WSC-17 自身承载，主规格 `spec.md:651-653`），仅去掉一处重复指引。
 
 ### 统一命名
 
@@ -154,17 +154,18 @@ apply_sc_effective_review_verdict(verdict: ReviewVerdict) -> ReviewVerdict      
 | `product/workspace_engine/review/disposition_override.rs` | **B1** | 独占 |
 | `product/workspace_engine/session_state_parts/historical_review.inc.rs` | **B1** | 独占 |
 | `product/workspace_engine/prompts/review_context.rs` | **B2** | 独占（D1 的 helper 局部在 include 目标，**不共写**） |
-| `product/workspace_engine/review/routing.rs` / `review/routing_scope.rs`（1200/1200） | **B3** | 独占（序 1 已归档、序 6 未做 ⇒ 本 change 合法写入 `review/` 家族） |
+| `product/workspace_engine/review/routing.rs` / `review/routing_scope.rs`（1200/1200） | **B3** | 独占（序 1 已归档、**序 6 已 `--skip-specs` 归档（未实施）** ⇒ 本 change 合法写入 `review/` 家族） |
 | `product/work_item_split_engine/prompts/sc_revision.rs` | **B4** | 独占 |
 | `product/work_item_split_engine/context.rs` / `prompts.rs`（1162） | **C1** | 独占（`prompts.rs` 的四个 legacy 调用不改） |
 | `product/workspace_engine/prompts/review_parts/single_candidate_input.inc.rs` | **D1** | 独占 |
 
+⇒ **路径约定**：本文件中的路径一律省略 `src/` 前缀（`web/...`、`product/...`、`tests/...` 均在 `src/` 下）；
 ⇒ **本 change 不改** `work_item_plan_policy/classify.rs`（裁决 §2.3：isolate → close 串行）⇒ ⇒ **会话投影改 disposition 后，现有 `classify` 的 advisory 优先逻辑自动生效** ⇒ ⇒ 这就是「不改中央 classifier、只在会话层投影」的实现依据。
-⇒ **本 change 不新增**任何 change 的 requirement 所有权冲突：REQ-WSC-06（承接自 `deliver-d5-d6-fact-injection`）、REQ-WSC-32（承接自 `teach-sc-compile-reredrive-feedback`）、REQ-WSC-12（MODIFIED）三者**互不相同**，且无其它 active change 声明。
+⇒ **本 change 不新增**任何 change 的 requirement 所有权冲突：REQ-WSC-06（**最新态经 `deliver-d5-d6-fact-injection` 同步进主规格**，本 change 对其为 MODIFIED）、REQ-WSC-32（承接自 `teach-sc-compile-reredrive-feedback`）、REQ-WSC-12（MODIFIED）三者**互不相同**，且无其它 active change 声明。
 
 ## 7. 容量与波次
 
-- **8 个 Task × 5 工作包 = 40 个工作包**（W1 反例/不变量测试 · W2 实现 · W3 定向红/绿证据 · W4 独立只读评审与修正 · W5 固定提交与回执）。**不是**把文档/准备伪装成代码 Task。
+- **8 个 Task × 5 阶段 = 35 个编号工作包**（W1 反例/不变量测试 · W2 实现 · W3 定向红/绿证据 · W4 独立只读评审与修正 · W5 固定提交与回执；每个 Task 的末条合并承载 W3/W4/W5）。**不是**把文档/准备伪装成代码 Task。
 - 每 Task ≤3 个文件且 <4 h。**首波 A1 / B1 / C1 / D1**；**第二波 B2 / B3 / B4 / C2**（B2/B3/B4 依赖 B1 的谓词接口但文件闭集独立 ⇒ 可并行；C2 依赖 C1；C2 另承接 A1 的审计接入 ⇒ A1 必须先于 C2）。
 - 容量三档（含完整 8 次串行真机）：乐观 7.7 h / **现实 9.5 h** / 保守 12.2 h。若 owner 给 10 h 硬终点：今天做 8 Task + 全部确定性门禁 + 整审，**真机与 owner 验收归档明日**。
 
@@ -184,6 +185,6 @@ apply_sc_effective_review_verdict(verdict: ReviewVerdict) -> ReviewVerdict      
 6. **返修轮逐字节重发首轮全文** — 事实：`sc_revision.rs` 仍以首轮完整 prompt 为底；现状：未做（B4 只改「作者收哪些条目」，不改上下文构造）；归谁：集成 owner；落点：后续新 change。
 7. **跨仓写范围冲突假阳性（29 条里 27 条）** — 现状：未做；归谁：集成 owner；落点：后续新 change 的机械命名域。
 8. **多成员基线树只覆盖一个仓** — 事实：66 个真实 IR 误判率 = 0（4 条引用全为真越界）⇒ 构造可达的潜在缺陷；现状：未做；归谁：集成 owner；落点：`plan-baseline-multi-member`（链尾，四端全迁）。
-9. **8.12 第二轮三臂测量脚手架拆除** — 事实：`Cargo.toml` 的 3 个 default feature + 5 处生产 `cfg!` 门控仍在；现状：未做；归谁：本 change（C1 改 `validate.rs`，可顺带处理）或集成 owner；落点：**拆除前必须补 feature-off 回归**（`cfg!` 是运行期分支，feature-off 路径从未单独验证）；**需 owner 对「改 `Cargo.toml`」的纪律例外裁决**。
+9. **8.12 第二轮三臂测量脚手架拆除** — 事实：`Cargo.toml` 的 3 个 default feature + 5 处生产 `cfg!` 门控仍在；现状：未做；归谁：**集成 owner**（C1 的文件闭集**不含** `validate.rs` ⇒ 本 change 不承接；拆除需改 `Cargo.toml`，属**需 owner 裁决的纪律例外**）；落点：**拆除前必须补 feature-off 回归**（`cfg!` 是运行期分支，feature-off 路径从未单独验证）；**需 owner 对「改 `Cargo.toml`」的纪律例外裁决**。
 10. **真机效果复测** — 事实：8 次串行 ≈3.5 h，同 proxy 并发被判不可归因；现状：今日不做；归谁：owner/集成 owner；落点：明日固定二进制、同装置、串行交替。
-11. **序4 effort 冻结策略** — 事实：T1 半成品已 park 于 `wip/wig-seq4-t1`（`1a1dd521`）；现状：未接续；归谁：集成 owner；落点：下一批（17 处 `E0063` 字面量构造点；`lifecycle_store/workspace.rs` 已 1730/1730 ⇒ 计划书的「净增 +2」必须改**净零**）。
+11. **序4 effort 冻结策略** — 事实：T1 半成品已 park 于 `wip/wig-seq4-t1`（`1a1dd521`）；现状：未接续；归谁：集成 owner；落点：下一批（**预计 ≤10 处字面量构造点**（序4 计划书 `…WIG作者努力档位显式化_v1.0.md:148`「字面量构造点预计 ≤10 处，多为 `#[cfg(test)]` 夹具」）；补字段后**将出现** `E0063`，现树中并不存在该错误；`lifecycle_store/workspace.rs` 已 1730/1730 ⇒ 计划书的「净增 +2」必须改**净零**）。

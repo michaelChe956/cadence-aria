@@ -1,6 +1,6 @@
 # Tasks: repair-wig-fact-projections
 
-> **40 个工作包 = 8 个 Task × 5 个工作包**。每个 Task 的五包固定为：
+> **8 个 Task × 5 个阶段 = 35 个编号工作包**（每个 Task 的末条合并承载 W3/W4/W5）。每个 Task 的五阶段固定为：
 > **W1** 红测/不变量测试（先红，失败原因须为断言缺失而非编译错误）· **W2** 实现 · **W3** controller 定向红/绿证据 · **W4** 独立只读评审与修正 · **W5** 固定提交与回执。
 > **不是**把文档、准备或评审伪装成代码 Task。**每 Task ≤3 个文件且 <4 h。**
 >
@@ -10,8 +10,8 @@
 ## 0. 契约与归属（controller，非代码 Task）
 
 - [x] 0.1 **契约双审**：proposal / design / specs delta / tasks 四件齐备；一致性裁决 + 接地审查各一轮。验证：双评审结论与修正记录
-- [x] 0.2 **requirement 归属唯一**：本 change 声明 REQ-WSC-06（承接自 `deliver-d5-d6-fact-injection`）、REQ-WSC-32（承接自 `teach-sc-compile-reredrive-feedback`）、REQ-WSC-12（MODIFIED）三者互不相同；无其它 active change 声明同一 requirement。验证：`openspec list` + 全目录 grep
-- [x] 0.3 **描述段门禁前置**：三个 requirement 的描述段实测 REQ-WSC-06 = **480**、REQ-WSC-12 = **489**、REQ-WSC-32 = **349** 字符（均 ≤500）。验证：python 实测
+- [x] 0.2 **requirement 归属唯一**：本 change 声明 REQ-WSC-06（**最新态经 `deliver-d5-d6-fact-injection` 同步进主规格**，本 change 对其为 MODIFIED）、REQ-WSC-32（承接自 `teach-sc-compile-reredrive-feedback`）、REQ-WSC-12（MODIFIED）三者互不相同；无其它 active change 声明同一 requirement。验证：`openspec list` + 全目录 grep
+- [x] 0.3 **描述段门禁前置**：三个 requirement 的描述段按 **openspec 自身解析口径**实测（`openspec show … --deltas-only` → `requirement.text` 长度）REQ-WSC-06 = **479**、REQ-WSC-12 = **488**、REQ-WSC-32 = **349** 字符（均 ≤500；裸 markdown 计法为 480/489/349，差异 ≤1 字符源于段落间空白归并）。验证：python 实测 + openspec 解析复核
 - [x] 0.4 **既有场景逐字保全**：主规格 REQ-WSC-06 的 **34 个**场景、REQ-WSC-12 的 **5 个**场景标题与正文**逐字**进入 delta。验证：脚本比对（主规格侧零改动）
 - [x] 0.5 **已发现的规格缺陷与修正（评审前自查发现）**：S0 拆分 `deliver-d5-d6-fact-injection` 时，主规格 REQ-WSC-06 出现**两个同名场景**——「注入前轮结构化清单」「重复判定不靠记忆」各有**弱版**（原有 28 场景内）与**强化版**（D5/D6 交付内容，多出「SHALL 附本轮机械复算状态」「且按内容身份去重」「SHALL 以平台给出的复算分区事实为准」等 SHALL）。**同名两版并存 ⇒ 规范歧义（哪一版 binding 不定）。** **修正**：以「交付行为为准」保留**强化版**、删除弱版 ⇒ 主规格 REQ-WSC-06 由 36 场景收敛为 **34 场景**（28 − 2 + 8）。**义务零丢失**（强化版是弱版的**严格超集**，只增不减 SHALL）；其余 **26 个原有场景逐字未变**。**同步修正**：归档拆分件 delta（36 → 34）与本 change 的 delta（REQ-WSC-06 = 34 + 4 新 = 38）。验证：脚本比对「主规格 REQ-WSC-06 标题集合 == 归档拆分件标题集合」、重复标题零命中、26 个原有场景正文逐字比对通过
 - [x] 0.6 **delta 形态归一**：`## MODIFIED Requirements` 与 `## ADDED Requirements` 各**一个**头，其下挂多个 `### Requirement:` 块（此前 REQ-WSC-06 与 REQ-WSC-12 各带一个重复头，虽 openspec 可容忍，但非规范形态）。验证：`grep '^## '` 仅两行
@@ -19,7 +19,7 @@
 
 ## 1. A1 · 预算内事实不丢字段（3 文件）
 
-> 独占文件：`web/workspace_ws_handler/run/single_candidate_compile_preflight.rs`（1141/1200，≤+40）· `product/workspace_engine/prompts/sc_compile_teaching.rs`（357/1200，+150～250）· `web/workspace_ws_handler/run/single_candidate_structure_reredrive.rs`（679/1200，+100～180）。详测**内联**进后两文件。
+> 独占文件：`web/workspace_ws_handler/run/single_candidate_compile_preflight.rs`（1141/1200，≤+40）· `product/workspace_engine/prompts/sc_compile_teaching.rs`（357/1200，**+180～300**；原 +150～250 偏乐观）· `web/workspace_ws_handler/run/single_candidate_structure_reredrive.rs`（679/1200，+100～180）。详测**内联**进后两文件。
 
 - [ ] 1.1 **W1 红测**：多条**同 message、不同 field** 的真实形状 fixture ⇒ 最终教学 prompt 逐条含原 `code:line:message` 三段 + 精确 `field` + `repair_example`；原三段逐字在场。验证：红测存在且失败原因为断言缺失
 - [ ] 1.2 **W2 实现**：保留 `TeachingPayload.parse_reasons: Vec<String>` 与既有 builder 签名（**不引入新持久 schema、不引入 patch 协议**）；每条附 field/example；**仅** `unknown_structured_key` 分支按需附 40 个合法 `STRUCTURED_KEYS`。不解析 message 猜字段、不填业务值
@@ -48,7 +48,7 @@
 
 ## 4. B3 · 路由收口（3 文件，含顶格净零）
 
-> 独占文件：`product/workspace_engine/review/routing.rs`（1367，登记上限 **1391**，≤+10）· `product/workspace_engine/review/routing_scope.rs`（**1200/1200 ⇒ ≤0**）· `product/workspace_engine/tests/tests_policy_routing.rs`（987/1200，≤+180）。
+> 独占文件：`product/workspace_engine/review/routing.rs`（1367，登记上限 **1391**，≤+10）· `product/workspace_engine/review/routing_scope.rs`（**1200/1200 ⇒ ≤0**）· `product/workspace_engine/review/tests_policy_routing.rs`（987/1200，≤+180）。
 
 - [ ] 4.1 **W1 红测**：前后两轮重复集合**同源**；「只建议 revise / needs_human」在 Initial 与 Verification 均**不驱动作者**、不因重复或耗尽而升级人工；真 `must_fix` / 契约类 finding **仍阻断**
 - [ ] 4.2 **W2 实现**：两侧重复集合使用同一会话视图；**只在有效 review 与 mechanical 均无非 Advisory 义务时**才绕过人工耗尽捷径，仍**继续执行** `evaluate.rs:235-273` 的状态/scope/transition 检查，**不提前 return Pass**、不增加 provider 调用
@@ -80,7 +80,7 @@
 
 - [ ] 7.1 **W1 红测**：捕获**真实 provider 输入** ⇒ 首轮 prompt 的 `structure:` 内含全部成员身份头、预算不越界、**无额外 provider 启动**；单仓路径逐字不变
 - [ ] 7.2 **W2 实现**：聚合根取 **`lc_plan_launch.working_dir`**（**不是** `repository.path` —— focus 可能是成员 checkout）；前缀复用 `plan_member_checkout_prefixes`；旧摘要分支换专用 helper；**runner 改动净零**（不靠压空行/合语句）
-- [ ] 7.3 **W2 实现（A1 审计接入）**：在 `run/single_candidate.rs:850-874` 附近接入 A1 的审计写入（该处同已有完整 `diagnostics` + `payload` + `reredrive_prompt` + 记录调用）；**净零**；审计**不进 prompt**、不改窗口/启动/schema；**A1 单独交付时不可声称「可完整取回」，C2 接入后才成立**
+- [ ] 7.3 **W2 实现（A1 审计接入）**：在 `run/single_candidate.rs:850-874` 附近接入 A1 的审计写入（该处同已有完整 `diagnostics` + `payload` + `reredrive_prompt` + 记录调用）；**净零**；**审计组装只落 A1 的 `single_candidate_structure_reredrive.rs`，runner 只透传既有 `&diagnostics`（不得把审计拼装写进 runner，否则破线）**；审计**不进 prompt**、不改窗口/启动/schema；**A1 单独交付时不可声称「可完整取回」，C2 接入后才成立**
 - [ ] 7.4 **W3–W5**：定向红/绿证据 → 独立只读评审与修正 → 固定提交与回执
 
 ## 8. D1 · reviewer 无损紧凑序列化（2 文件）

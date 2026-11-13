@@ -229,13 +229,13 @@ workitem author/reviewer prompt SHALL 仅承载产物规格（任务上下文、
 
 #### Scenario: SC 会话内建议级非契约项不单独驱返修
 
-- **WHEN** 服务端可信会话确认为 WorkItemPlan 且为单候选，某 finding 的 `severity=Suggestion`、category 显式属于完备度/验证不可归因/其它、且 `class_hint=Repairable`
+- **WHEN** 服务端可信会话确认为 WorkItemPlan 且为单候选，某 finding 的 `severity=Suggestion`、category 显式属于完备度/验证不可归因/其它、且 `class_hint=Repairable`，且该轮 verdict 为 `Pass`/`Revise`、无 `structured_output_diagnostic`、该 finding 无 `machine_repair`/`owner_question`/`owner_options`
 - **THEN** 会话有效视图 MUST 将该 finding 投影为 `advisory`，MUST NOT 计入必关闭 finding 清单，MUST NOT 单独驱动作者返修，且该投影 MUST NOT 回写 durable 记录
 
 #### Scenario: 窄例外的边界（契约类与强严重度仍按既有语义）
 
-- **WHEN** 同一 finding 的 category 为契约类缺口或自相矛盾，或 `severity` 为 `must_fix`/`blocking`，或 category 缺失或未知，或该 finding 带机器修复许可或 owner 问句
-- **THEN** 平台 MUST NOT 适用该窄例外，MUST 按既有语义处理（契约类仍必关闭、强严重度维持既有分类行为、未知类别按既有 fail-closed 口径）
+- **WHEN** 同一 finding 的 category 为契约类缺口或自相矛盾，或 `severity` 为 `must_fix`/`blocking`，或 category 缺失或未知，或该 finding 带 `machine_repair`/`owner_question`/`owner_options`，或该轮 verdict 为 `NeedsHuman`，或该轮携带 `structured_output_diagnostic`
+- **THEN** 平台 MUST NOT 适用该窄例外，MUST 按既有语义处理（契约类仍必关闭、强严重度维持既有分类行为、未知类别按既有 fail-closed 口径、**原生 NeedsHuman 与带机械诊断的轮次仍按既有语义**）
 
 #### Scenario: 缺 disposition 时仅在窄例外命中时降级
 
