@@ -414,3 +414,286 @@ pub(crate) async fn dispatch_lc_fresh_recovery_run(
         }
     }
 }
+
+/// P08「当前 operation 归属」RED 契约（node 绑定面）：fresh spawn 后的
+/// node 绑定必须落在「dispatch 快照里的当前 operation」上——快照 operation
+/// 与 durable 记录当前 operation 不一致时零写（不猜 ID、不改旧
+/// operation）；一致时 root 与当前 operation 双向绑定同一真实 node。
+///
+/// 同模块另提供 prepare 面（`PlanSplitRunContext`）复用的真实 store 夹具。
+#[cfg(test)]
+mod fresh_operation_binding_tests {
+    use super::*;
+    use crate::product::lifecycle_store::{CreateWorkspaceSessionInput, LifecycleStore};
+    use crate::product::models::{
+        LcFreshOperationResult, LcFreshOperationState, LcRecoveryBusinessContext,
+        LcRecoveryRunContext, LcResumeRecoveryRecord, LcResumeRecoveryState,
+        ProviderConversationRole, ProviderName, WorkspaceSessionRecord, WorkspaceType,
+    };
+
+    pub(super) const RECOVERY_ID: &str = "recovery_fresh_binding_0001";
+    pub(super) const OLD_NODE_ID: &str = "timeline_node_old_0001";
+    pub(super) const FRESH_NODE_ID: &str = "timeline_node_fresh_0001";
+
+    /// 真实 store 会话夹具（durable record 落盘，断言一律回读真实 record）。
+    pub(super) fn session_fixture() -> (
+        tempfile::TempDir,
+        LifecycleStore,
+        WorkspaceSessionRecord,
+    ) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = LifecycleStore::new(crate::product::app_paths::ProductAppPaths::new(
+            tmp.path().join(".aria"),
+        ));
+        let record = store
+            .create_workspace_session(CreateWorkspaceSessionInput {
+                project_id: "project_0001".to_string(),
+                issue_id: "issue_0001".to_string(),
+                entity_id: "plan_0001".to_string(),
+                workspace_type: WorkspaceType::WorkItemPlan,
+                author_provider: ProviderName::Fake,
+                reviewer_provider: Some(ProviderName::Fake),
+                review_rounds: 1,
+                superpowers_enabled: false,
+                openspec_enabled: false,
+                work_item_plan_options: None,
+            })
+            .expect("create workspace session");
+        (tmp, store, record)
+    }
+
+    /// fresh operation 历史条目（未绑定物理 run）。
+    pub(super) fn operation(
+        operation_id: &str,
+        state: LcFreshOperationState,
+    ) -> LcFreshOperationResult {
+        LcFreshOperationResult {
+            operation_id: operation_id.to_string(),
+            state,
+            fresh_node_id: None,
+            reason_code: None,
+            role_run_seq: None,
+            accepted_at: "2026-11-13T00:00:00Z".to_string(),
+            updated_at: "2026-11-13T00:00:00Z".to_string(),
+        }
+    }
+
+    /// fresh recovery 夹具（`operation_id`＝记录当前 operation；`operations`
+    /// ＝历史 operation 列表）。
+    pub(super) fn recovery_fixture(
+        record: &WorkspaceSessionRecord,
+        state: LcResumeRecoveryState,
+        operation_id: Option<&str>,
+        operations: Vec<LcFreshOperationResult>,
+    ) -> LcResumeRecoveryRecord {
+        LcResumeRecoveryRecord {
+            schema_version: 1,
+            recovery_id: RECOVERY_ID.to_string(),
+            failed_provider_node_id: OLD_NODE_ID.to_string(),
+            reason_code: "resume_fingerprint_mismatch".to_string(),
+            role: ProviderConversationRole::Author,
+            provider: record.author_provider.clone(),
+            superseded_native_session_id: Some("native_old_0001".to_string()),
+            previous_fingerprint_digest: Some("sha256:old".to_string()),
+            previous_session_status: record.status.clone(),
+            previous_stage: "revision".to_string(),
+            run_context: LcRecoveryRunContext::ReviewerRevision {
+                business: LcRecoveryBusinessContext {
+                    entity_id: record.entity_id.clone(),
+                    plan_id: None,
+                    workspace_type: record.workspace_type.clone(),
+                    business_repository_physical_id: None,
+                    business_repository_logical_id: None,
+                    business_checkout_id: None,
+                    business_repository_path: None,
+                    source_story_ids: Vec::new(),
+                    source_design_ids: Vec::new(),
+                    plan_options_ref: None,
+                    artifact_refs: Vec::new(),
+                    review_refs: Vec::new(),
+                    author_provider: record.author_provider.clone(),
+                    effective_reviewer_provider: record.reviewer_provider.clone(),
+                    original_node_id: Some(OLD_NODE_ID.to_string()),
+                    original_role_run_seq: None,
+                },
+                original_feedback: None,
+            },
+            state,
+            operation_id: operation_id.map(|id| id.to_string()),
+            fresh_node_id: None,
+            fresh_native_session_id: None,
+            fresh_role_run_seq: None,
+            fresh_operations: operations,
+            detected_at: "2026-11-13T00:00:00Z".to_string(),
+            updated_at: "2026-11-13T00:00:00Z".to_string(),
+        }
+    }
+
+    /// 把 recovery 落盘（整记录 CAS，真实 store 路径）。
+    pub(super) fn seed_recovery(
+        store: &LifecycleStore,
+        record: &WorkspaceSessionRecord,
+        recovery: LcResumeRecoveryRecord,
+    ) -> WorkspaceSessionRecord {
+        store
+            .compare_and_save_lc_resume_state(record, recovery)
+            .expect("seed lc resume recovery")
+    }
+
+    /// 真实 run 上下文夹具：manager 登记一个带 node 的活动 run。
+    fn run_context_fixture(
+        tmp: &tempfile::TempDir,
+        store: &LifecycleStore,
+        record: &WorkspaceSessionRecord,
+    ) -> ProviderRunContext {
+        let (event_tx, _event_rx) =
+            tokio::sync::mpsc::channel::<crate::product::workspace_engine::EngineEvent>(8);
+        let checkpoint_store = Arc::new(crate::product::checkpoint_store::CheckpointStore::new(
+            tmp.path().join("checkpoints"),
+        ));
+        let engine = Arc::new(tokio::sync::Mutex::new(
+            crate::product::workspace_engine::WorkspaceEngine::new(
+                checkpoint_store,
+                event_tx,
+                crate::product::workspace_engine::WorkspaceSession::from_record(record.clone()),
+            ),
+        ));
+        ProviderRunContext::test_fixture(
+            Arc::new(crate::cross_cutting::provider_registry::ProviderRegistry::new()),
+            engine,
+            crate::web::state::WorkspaceRunRegistry::default(),
+            record.id.clone(),
+            store.app_paths(),
+            record.clone(),
+        )
+    }
+
+    /// RED③：快照 operation 与记录当前 operation 不一致 → 零写（不把旧
+    /// 快照的 node 绑到当前 operation，也不改任何 operation 条目）。
+    #[tokio::test]
+    async fn fresh_operation_binding_node_bind_rejects_stale_operation_snapshot() {
+        let (tmp, store, record) = session_fixture();
+        let current = recovery_fixture(
+            &record,
+            LcResumeRecoveryState::FreshRunning,
+            Some("op_current_0001"),
+            vec![
+                operation("op_old_0001", LcFreshOperationState::Running),
+                operation("op_current_0001", LcFreshOperationState::Running),
+            ],
+        );
+        seed_recovery(&store, &record, current);
+        // dispatch 持有的快照：旧 operation。
+        let snapshot = recovery_fixture(
+            &record,
+            LcResumeRecoveryState::FreshRunning,
+            Some("op_old_0001"),
+            vec![operation("op_old_0001", LcFreshOperationState::Running)],
+        );
+        let run_context = run_context_fixture(&tmp, &store, &record);
+        let run_kind = ProviderRunKind::WorkItemPlanBatch;
+        run_context
+            .manager
+            .try_start_run_if_idle(run_kind.clone(), Some(FRESH_NODE_ID.to_string()))
+            .await
+            .expect("claim idle run")
+            .expect("run claimed");
+
+        lc_bind_fresh_node_after_spawn(&store, &run_context, &run_kind, &snapshot).await;
+
+        let after = store
+            .get_workspace_session(&record.id)
+            .expect("record after stale bind");
+        let current = after.lc_resume_recovery.expect("recovery kept");
+        assert_eq!(
+            current.fresh_node_id, None,
+            "旧 operation 快照不得把 node 绑到当前 operation"
+        );
+        assert!(
+            current
+                .fresh_operations
+                .iter()
+                .all(|operation| operation.fresh_node_id.is_none()),
+            "任何 operation 条目都不得被旧快照改写 node"
+        );
+    }
+
+    /// RED④：快照 operation 与记录当前 operation 一致 → root 与当前
+    /// operation 双向绑定同一真实 node；旧 operation 不受影响；同值重放
+    /// 幂等。
+    #[tokio::test]
+    async fn fresh_operation_binding_node_bind_binds_current_operation() {
+        let (tmp, store, record) = session_fixture();
+        let current = recovery_fixture(
+            &record,
+            LcResumeRecoveryState::FreshRunning,
+            Some("op_current_0001"),
+            vec![
+                operation("op_old_0001", LcFreshOperationState::Running),
+                operation("op_current_0001", LcFreshOperationState::Running),
+            ],
+        );
+        seed_recovery(&store, &record, current);
+        let snapshot = recovery_fixture(
+            &record,
+            LcResumeRecoveryState::FreshRunning,
+            Some("op_current_0001"),
+            vec![operation("op_current_0001", LcFreshOperationState::Running)],
+        );
+        let run_context = run_context_fixture(&tmp, &store, &record);
+        let run_kind = ProviderRunKind::WorkItemPlanBatch;
+        run_context
+            .manager
+            .try_start_run_if_idle(run_kind.clone(), Some(FRESH_NODE_ID.to_string()))
+            .await
+            .expect("claim idle run")
+            .expect("run claimed");
+
+        lc_bind_fresh_node_after_spawn(&store, &run_context, &run_kind, &snapshot).await;
+
+        let after = store
+            .get_workspace_session(&record.id)
+            .expect("record after bind");
+        let current = after.lc_resume_recovery.expect("recovery kept");
+        assert_eq!(
+            current.fresh_node_id.as_deref(),
+            Some(FRESH_NODE_ID),
+            "root 镜像必须绑定真实节点"
+        );
+        let bound = current
+            .fresh_operations
+            .iter()
+            .find(|operation| operation.operation_id == "op_current_0001")
+            .expect("current operation entry");
+        assert_eq!(
+            bound.fresh_node_id.as_deref(),
+            Some(FRESH_NODE_ID),
+            "当前 operation 必须与 root 双向绑定同一节点"
+        );
+        let old = current
+            .fresh_operations
+            .iter()
+            .find(|operation| operation.operation_id == "op_old_0001")
+            .expect("old operation entry");
+        assert_eq!(
+            old.fresh_node_id, None,
+            "旧 operation 的 node 归属不得被改写"
+        );
+
+        // 同值重放幂等（零新增绑定、零改写）。
+        let before = std::fs::read(
+            store
+                .workspace_sessions_root(&record.project_id, &record.issue_id)
+                .join(format!("{}.json", record.id)),
+        )
+        .expect("read record bytes");
+        lc_bind_fresh_node_after_spawn(&store, &run_context, &run_kind, &snapshot).await;
+        let after = std::fs::read(
+            store
+                .workspace_sessions_root(&record.project_id, &record.issue_id)
+                .join(format!("{}.json", record.id)),
+        )
+        .expect("read record bytes");
+        assert_eq!(before, after, "同值重放必须幂等（不改记录字节）");
+    }
+}

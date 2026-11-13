@@ -16,6 +16,15 @@ pub(crate) struct PlanSplitRunContext {
     project_id: String,
     issue_id: String,
     provider: crate::product::models::ProviderName,
+    /// P08：构造时读取的**当前 fresh operation 身份快照**
+    /// `(recovery_id, operation_id)`——私有、非 wire 字段（不序列化、不进
+    /// 公共契约）。prepare 阶段据此核对「本 run 属于哪个 operation」，
+    /// 避免旧 context 把自己的 seq 绑给新 operation。普通（非 fresh）run
+    /// 为 `None`，保持原路径。
+    ///
+    /// RED 阶段该字段尚未接线（构造器恒 `None`），行为与接线前一致。
+    #[cfg_attr(not(test), allow(dead_code))]
+    fresh_operation: Option<(String, String)>,
 }
 
 /// begin handle:分配 run-bound 身份(sink 绑定与审计文件 key 同源)。
@@ -35,6 +44,9 @@ pub(crate) fn begin_plan_split_run(
         project_id: project_id.to_string(),
         issue_id: issue_id.to_string(),
         provider: provider.clone(),
+        // P08 RED：构造时快照尚未接线（GREEN 才在此读取真实 session 的
+        // 当前 fresh operation 身份）。
+        fresh_operation: None,
     })
 }
 
@@ -154,6 +166,9 @@ pub(crate) fn plan_split_run_for_handle(
         project_id: project_id.to_string(),
         issue_id: issue_id.to_string(),
         provider: provider.clone(),
+        // P08 RED：构造时快照尚未接线（GREEN 才在此读取真实 session 的
+        // 当前 fresh operation 身份）。
+        fresh_operation: None,
     })
 }
 
@@ -408,5 +423,186 @@ impl PlanSplitRunContext {
         self.lifecycle
             .fail_work_item_split_provider_run(&self.handle, reason)
             .map_err(|error| error.to_string())
+    }
+}
+
+/// P08「当前 operation 归属」RED 契约（prepare 面）：prepared launch 身份
+/// 落盘时，seq 必须绑定到**构造时快照的当前 operation**——旧 context（快照
+/// op-A）在记录已成 op-B 后不得绑定 seq、不得写 fingerprint（冲突上浮）；
+/// 快照一致的当前 operation 才双向绑定 item/root；普通（非 fresh）context
+/// 保持原路径（快照 None）。
+#[cfg(test)]
+mod fresh_operation_binding_prepare_tests {
+    use super::fresh_operation_binding_tests::{
+        operation, recovery_fixture, seed_recovery, session_fixture,
+    };
+    use super::*;
+    use crate::product::json_store::ProductStoreError;
+    use crate::product::models::{LcFreshOperationState, LcResumeRecoveryState};
+
+    /// RED⑤：旧 context 快照（op-A）与记录当前 operation（op-B）不一致 →
+    /// 冲突上浮且零写（无 fingerprint、无 seq 绑定）。
+    #[test]
+    fn fresh_operation_binding_prepare_rejects_stale_operation_snapshot() {
+        let (_tmp, store, record) = session_fixture();
+        let current = recovery_fixture(
+            &record,
+            LcResumeRecoveryState::FreshRunning,
+            Some("op_a_0001"),
+            vec![operation("op_a_0001", LcFreshOperationState::Running)],
+        );
+        seed_recovery(&store, &record, current);
+        // 构造 context：此刻记录当前 operation ＝ op-A。
+        let context = begin_plan_split_run(
+            &store,
+            &record.project_id,
+            &record.issue_id,
+            &record.author_provider,
+            &record.id,
+        )
+        .expect("begin plan split run");
+        let snapshot_operation = context
+            .fresh_operation
+            .as_ref()
+            .map(|(_, operation_id)| operation_id.clone());
+        assert_eq!(
+            snapshot_operation.as_deref(),
+            Some("op_a_0001"),
+            "构造时必须快照当前 fresh operation 身份"
+        );
+        // 记录被新 operation 取代（op-B）。
+        let latest = store
+            .get_workspace_session(&record.id)
+            .expect("latest record");
+        let next = recovery_fixture(
+            &latest,
+            LcResumeRecoveryState::FreshRunning,
+            Some("op_b_0001"),
+            vec![
+                operation("op_a_0001", LcFreshOperationState::Running),
+                operation("op_b_0001", LcFreshOperationState::Running),
+            ],
+        );
+        seed_recovery(&store, &latest, next);
+
+        let error = context
+            .persist_prepared_launch_identity("sha256:stale")
+            .expect_err("旧 operation 快照不得绑定 seq");
+        match error {
+            ProductStoreError::Conflict { kind, .. } => {
+                assert_eq!(kind, "lc_fresh_operation_binding");
+            }
+            other => panic!("期望 lc_fresh_operation_binding 冲突，实际: {other:?}"),
+        }
+        // 零写：fingerprint 未 push、root/item 未绑定 seq。
+        let after = store
+            .get_workspace_session(&record.id)
+            .expect("record after stale prepare");
+        assert!(
+            after.logical_launch_fingerprints.is_empty(),
+            "冲突前不得写 fingerprint"
+        );
+        let current = after.lc_resume_recovery.expect("recovery kept");
+        assert_eq!(current.fresh_role_run_seq, None, "冲突前不得绑定 root seq");
+        assert!(
+            current
+                .fresh_operations
+                .iter()
+                .all(|operation| operation.role_run_seq.is_none()),
+            "冲突前不得绑定任何 operation 的 seq"
+        );
+    }
+
+    /// RED⑥：快照与记录当前 operation 一致 → item 与 root 同时绑定真实 seq。
+    #[test]
+    fn fresh_operation_binding_prepare_binds_current_operation_seq() {
+        let (_tmp, store, record) = session_fixture();
+        let current = recovery_fixture(
+            &record,
+            LcResumeRecoveryState::FreshRunning,
+            Some("op_b_0001"),
+            vec![operation("op_b_0001", LcFreshOperationState::Running)],
+        );
+        seed_recovery(&store, &record, current);
+        let context = begin_plan_split_run(
+            &store,
+            &record.project_id,
+            &record.issue_id,
+            &record.author_provider,
+            &record.id,
+        )
+        .expect("begin plan split run");
+        let snapshot_operation = context
+            .fresh_operation
+            .as_ref()
+            .map(|(_, operation_id)| operation_id.clone());
+        assert_eq!(
+            snapshot_operation.as_deref(),
+            Some("op_b_0001"),
+            "构造时必须快照当前 fresh operation 身份"
+        );
+
+        context
+            .persist_prepared_launch_identity("sha256:current")
+            .expect("prepare current operation");
+
+        let after = store
+            .get_workspace_session(&record.id)
+            .expect("record after prepare");
+        let current = after.lc_resume_recovery.expect("recovery kept");
+        assert_eq!(
+            current.fresh_role_run_seq,
+            Some(context.handle.role_run_seq),
+            "root 必须绑定当前 operation 的 seq"
+        );
+        let bound = current
+            .fresh_operations
+            .iter()
+            .find(|operation| operation.operation_id == "op_b_0001")
+            .expect("current operation entry");
+        assert_eq!(
+            bound.role_run_seq,
+            Some(context.handle.role_run_seq),
+            "当前 operation 必须与 root 绑定同一 seq"
+        );
+        assert_eq!(
+            after.logical_launch_fingerprints.len(),
+            1,
+            "prepared 指纹必须落盘"
+        );
+    }
+
+    /// RED⑦ 守卫：普通（非 fresh）context 保持原路径——快照为 None、prepared
+    /// 指纹照常落盘、recovery 不被创建。
+    #[test]
+    fn fresh_operation_binding_prepare_keeps_normal_context_path() {
+        let (_tmp, store, record) = session_fixture();
+        let context = begin_plan_split_run(
+            &store,
+            &record.project_id,
+            &record.issue_id,
+            &record.author_provider,
+            &record.id,
+        )
+        .expect("begin plan split run");
+        assert!(
+            context.fresh_operation.is_none(),
+            "普通 run 不得快照 fresh operation"
+        );
+        context
+            .persist_prepared_launch_identity("sha256:normal")
+            .expect("prepare normal run");
+        let after = store
+            .get_workspace_session(&record.id)
+            .expect("record after prepare");
+        assert_eq!(
+            after.logical_launch_fingerprints.len(),
+            1,
+            "普通路径必须照常写 prepared 指纹"
+        );
+        assert!(
+            after.lc_resume_recovery.is_none(),
+            "普通路径不得创建 fresh recovery"
+        );
     }
 }
