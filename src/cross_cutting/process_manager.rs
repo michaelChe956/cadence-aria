@@ -633,6 +633,9 @@ mod tests {
     #[tokio::test]
     async fn spawn_inherits_host_environment_when_env_map_is_empty() {
         use tokio::io::AsyncReadExt;
+        // overlay 是进程级共享状态：并行用例登记目录会让「子进程 PATH ==
+        // 宿主 PATH」的逐字断言失真 ⇒ 持锁清空后断言（计划 §6.1）。
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
 
         let host_home = std::env::var("HOME").expect("host HOME");
         let host_path = std::env::var("PATH").expect("host PATH");
@@ -741,6 +744,49 @@ mod tests {
 
         process.child.terminate().await;
         assert_eq!(process_start_time_ticks(pid), None);
+    }
+
+    /// 计划 2026-11-13 包 2.4：PATH overlay 合并点——spawn 的可执行性判定
+    /// 与子进程 env 的 PATH 都必须用合并后的 PATH：overlay 内的裸名命令可
+    /// 解析，且子进程 PATH 首目录即 overlay 目录（Prepend 语义）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_merges_path_overlay_into_resolvability_and_child_env() {
+        use tokio::io::AsyncReadExt;
+
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
+
+        let dir = tempfile::tempdir().expect("overlay dir");
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("create overlay bin dir");
+        let probe = bin_dir.join("aria-overlay-probe");
+        fs::write(&probe, "#!/bin/sh\nprintf '%s' \"$PATH\"\n").expect("write probe fixture");
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755))
+            .expect("chmod probe fixture");
+        crate::cross_cutting::path_overlay::register(
+            &bin_dir,
+            crate::cross_cutting::path_overlay::OverlayPosition::Prepend,
+        );
+
+        let mut process = ProcessManager::spawn(
+            "aria-overlay-probe",
+            &[],
+            dir.path(),
+            &BTreeMap::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("overlay 内的裸名命令必须经合并后的 PATH 解析成功");
+
+        let mut stdout = String::new();
+        let mut reader = std::pin::pin!(process.stdout);
+        reader.read_to_string(&mut stdout).await.expect("read PATH");
+        let _ = process.child.wait().await.expect("wait probe fixture");
+        assert_eq!(
+            std::env::split_paths(&stdout).next(),
+            Some(bin_dir),
+            "子进程 PATH 首目录必须是 overlay 目录(Prepend): {stdout}"
+        );
     }
 }
 
