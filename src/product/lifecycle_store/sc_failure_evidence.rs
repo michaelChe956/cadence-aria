@@ -274,6 +274,33 @@ impl LifecycleStore {
             conflict.verified_prefix = Some(Box::new(read));
             return Err(conflict);
         }
+        // 正文不可变：同一 (failed_round_id, target_round_ordinal) 的既有正文摘要必须
+        // 一致 —— disposition 只是事件槽的区分，不是换正文的后门（跨 disposition
+        // 换正文同样冲突，且冲突前不落正文文件、不改日志）。
+        let mut body_conflict = false;
+        for entry in &read.entries {
+            let ScFailureEvidenceEvent::PromptPrepared { evidence }
+            | ScFailureEvidenceEvent::PromptUnavailable { evidence } = &entry.event
+            else {
+                continue;
+            };
+            if evidence.failed_round_id != failed_round_id
+                || evidence.target_round_ordinal != target_round_ordinal
+            {
+                continue;
+            }
+            if let ScEvidenceRef::Available { sha256: recorded, .. } = &evidence.prompt
+                && recorded != &digest
+            {
+                body_conflict = true;
+                break;
+            }
+        }
+        if body_conflict {
+            let mut conflict = entry_conflict_error(STEP, Some(failed_round_id.to_string()), "同一教学提示槽位已存在不同正文");
+            conflict.verified_prefix = Some(Box::new(read));
+            return Err(conflict);
+        }
         self.sc_failure_validate_event(chain, &read, &event, STEP)?;
         write_sc_failure_prompt_file(
             &directory
@@ -336,6 +363,19 @@ impl LifecycleStore {
         if round.run_ref.is_empty() || round.workspace_session_id.is_empty() {
             return Err(locator_invalid_error(STEP, Some(round.round_id.clone()), "round 身份不完整（run_ref / workspace_session_id）"));
         }
+        // scope 必须等于该 session 的真实归属（project / issue / plan）。
+        let session = self
+            .get_workspace_session(&round.workspace_session_id)
+            .map_err(|failure| match failure {
+                ProductStoreError::NotFound { .. } => scope_mismatch_error(STEP, Some(round.round_id.clone()), "round 的 workspace_session_id 没有对应会话"),
+                other => io_error(STEP, Some(round.round_id.clone()), format!("读取会话失败: {other}")),
+            })?;
+        if session.project_id != scope.project_id
+            || session.issue_id != scope.issue_id
+            || session.entity_id != scope.plan_id
+        {
+            return Err(scope_mismatch_error(STEP, Some(round.round_id.clone()), "scope 与真实会话归属不一致"));
+        }
         let handle = WorkItemSplitProviderRunHandle {
             run_ref: round.run_ref.clone(),
             workspace_session_id: round.workspace_session_id.clone(),
@@ -344,6 +384,29 @@ impl LifecycleStore {
         let directory = self
             .work_item_split_provider_run_dir(&handle)
             .map_err(|failure| io_error(STEP, Some(round.round_id.clone()), format!("定位 split run 目录失败: {failure}")))?;
+        // run.json 身份核对：调用方的 run_ref 必须就是盘上这条 run 的 provider_run_id
+        // （错绑 → locator_invalid）；盘上 session/seq 被改写 → 盘上元数据不属于该
+        // round（scope_mismatch）。
+        let run_path = directory.join("run.json");
+        let run_bytes = match std::fs::read(&run_path) {
+            Ok(bytes) => bytes,
+            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+                return Err(raw_missing_error(STEP, Some(round.round_id.clone()), "split run 记录不存在"));
+            }
+            Err(failure) => {
+                return Err(raw_missing_error(STEP, Some(round.round_id.clone()), format!("读取 split run 记录失败: {failure}")));
+            }
+        };
+        let run: serde_json::Value = serde_json::from_slice(&run_bytes).map_err(|failure| raw_missing_error(STEP, Some(round.round_id.clone()), format!("split run 记录不是合法 JSON: {failure}")))?;
+        let recorded_ref = run.get("provider_run_id").and_then(serde_json::Value::as_str).unwrap_or_default();
+        if recorded_ref != round.run_ref {
+            return Err(locator_invalid_error(STEP, Some(round.round_id.clone()), "split run 的 provider_run_id 与 round.run_ref 不符"));
+        }
+        let recorded_session = run.get("workspace_session_id").and_then(serde_json::Value::as_str).unwrap_or_default();
+        let recorded_seq = run.get("role_run_seq").and_then(serde_json::Value::as_u64).unwrap_or_default();
+        if recorded_session != round.workspace_session_id || recorded_seq != round.role_run_seq {
+            return Err(scope_mismatch_error(STEP, Some(round.round_id.clone()), "split run 记录的 session/seq 与 round 不符"));
+        }
         let path = directory.join("structured_output.json");
         let bytes = match std::fs::read(&path) {
             Ok(bytes) => bytes,
