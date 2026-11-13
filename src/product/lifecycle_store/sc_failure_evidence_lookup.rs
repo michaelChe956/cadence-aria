@@ -28,7 +28,6 @@ impl LifecycleStore {
     ///
     /// 读门与既有读路径同口径：会话必须是真实的 SC single-candidate
     /// WorkItemPlan，且 scope 的 project/issue/plan 与真实会话身份一致。
-    #[allow(dead_code)] // 恢复面入口:生产接线（P08）未落地,当前由单测覆盖。
     pub(crate) fn find_sc_failure_round(
         &self,
         scope: &ScFailureScope,
