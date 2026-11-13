@@ -287,9 +287,16 @@ export function ProviderInstallActionButton({
           {job.outcome?.installed_version
             ? `：${job.outcome.installed_version}`
             : ""}
-          {job.outcome?.path_hint
-            ? `；若命令不在 PATH，可把 ${job.outcome.path_hint} 加入 PATH`
-            : ""}
+          {job.outcome?.path_hint ? (
+            // 后端 path_hint 本身是完整句子（2026-11-13 契约）：原样渲染，
+            // 前端不再二次包裹（否则用户看到破碎双句，误判「安装没效果」）。
+            <span
+              data-testid={`provider-install-path-hint-${target}`}
+              className="mt-1 block break-words"
+            >
+              {job.outcome.path_hint}
+            </span>
+          ) : null}
         </p>
       ) : null}
 
