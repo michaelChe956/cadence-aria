@@ -319,14 +319,57 @@ async fn kimi_update_completes_when_script_upgrades_version() {
     crate::cross_cutting::path_overlay::clear();
 }
 
-/// 更新前后版本**必须同源同口径**（REQ-PCI-10 复审 R10）：装前走
-/// `version_before_update`（`--version` 原始首个非空行），装后 Kimi 走
-/// provider health 的 `parse_version_token`。若装前不解析 token，则
-/// 「`kimi 2.6.1` vs `2.6.1`」**永不相等** ⇒ 脚本 exit 0 但版本没变时仍判
-/// completed。
+/// S-B：codegraph 的**真实命令**验证（`status --json`）在 3.1 GB 级索引上是
+/// 读写打开（会触发上游 WAL 自愈），耗时可能远超 5s ⇒ 必须**单独**放宽
+/// 时限；否则健康安装被误判「真实命令失败」→ 无谓 `--include=optional`
+/// 重试 → failed。其它 provider 的真实命令探测口径不得被改动。
+#[tokio::test]
+async fn codegraph_real_command_probe_has_wider_timeout_than_providers() {
+    let root = tempdir().expect("root");
+    let runner = Arc::new(AlwaysFailingRunner::default());
+    let prober = health_prober(root.path(), runner.clone());
+    let _ = prober
+        .refresh_after_install(InstallTarget::CodeGraph, None)
+        .await
+        .expect("probe");
+    let codegraph_verify = runner
+        .requests()
+        .into_iter()
+        .find(|request| request.argv == vec!["status".to_string(), "--json".to_string()])
+        .expect("codegraph 必须跑 `status --json` 真实命令");
+    assert!(
+        codegraph_verify.timeout >= Duration::from_secs(30),
+        "codegraph 真实命令探针必须单独放宽到 30s 量级（3.1 GB 索引上 status 可能 >5s）: {:?}",
+        codegraph_verify.timeout
+    );
+
+    let provider_runner = Arc::new(AlwaysFailingRunner::default());
+    let provider_prober = health_prober(root.path(), provider_runner.clone());
+    let _ = provider_prober
+        .refresh_after_install(InstallTarget::Provider(ProviderName::Codex), None)
+        .await
+        .expect("probe");
+    let provider_verify = provider_runner
+        .requests()
+        .into_iter()
+        .find(|request| request.argv == vec!["--help".to_string()])
+        .expect("provider 必须跑 `--help` 真实命令");
+    assert_eq!(
+        provider_verify.timeout,
+        Duration::from_secs(1),
+        "其它 provider 的真实命令探测超时口径不得被改动"
+    );
+}
+
+/// 更新前后版本**必须同源同口径**（REQ-PCI-10 复审 R10）：装前
+/// （`version_before_update`）与装后（provider health 快照）都必须走
+/// `version_token_from_output`（首条非空行 → 版本 token）。若装前不解析
+/// token，则「`kimi 2.6.1` vs `2.6.1`」**永不相等** ⇒ 脚本 exit 0 但版本没变
+/// 时仍判 completed。
 ///
 /// 本用例**不注入 `SpyProber.before_version`**：before / after 都走生产装配的
-/// `HealthRefreshProber`（真实取数路径），断言的是生产口径而不是调用点。
+/// `HealthRefreshProber`（真实取数路径），断言的是生产口径而不是调用点；
+/// 该 runner 按「安装脚本是否已跑过」切换 `--version` 输出。
 struct InstallAwareVersionRunner {
     before_output: String,
     after_output: String,
