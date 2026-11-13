@@ -518,7 +518,7 @@ mod tests {
 
     /// SC single-candidate WorkItemPlan session (store admission requires
     /// flow_kind == SingleCandidate and scope.plan_id == session.entity_id).
-    fn sc_round_fixture() -> (tempfile::TempDir, LifecycleStore, ScFailureScope) {
+    pub(super) fn sc_round_fixture() -> (tempfile::TempDir, LifecycleStore, ScFailureScope) {
         let tmp = tempfile::tempdir().expect("temp root");
         let lifecycle = LifecycleStore::new(ProductAppPaths::new(tmp.path().join(".aria")));
         let record = lifecycle
@@ -548,7 +548,7 @@ mod tests {
     }
 
     /// Durable physical provider starts (claim placeholders excluded).
-    fn actual_starts(lifecycle: &LifecycleStore, session_id: &str) -> usize {
+    pub(super) fn actual_starts(lifecycle: &LifecycleStore, session_id: &str) -> usize {
         lifecycle
             .get_workspace_session(session_id)
             .expect("session readable")
@@ -808,3 +808,16 @@ mod tests {
         })
     }
 }
+
+/// P08 replay-safe 分类红测（一）：`Ready` / `Completed`（durable raw 逐字复用）。
+///
+/// 复本文件守护 1200 行硬线；fixture/启动计数复用父模块 `tests` 的既有 helper
+/// （`pub(super)`），不复制第二份。
+#[cfg(test)]
+#[path = "sc_failure_replay_completed_tests.rs"]
+mod replay_completed_tests;
+
+/// P08 replay-safe 分类红测（二）：审计启动事实 → `Waiting`（含教学轮 ordinal≥1）。
+#[cfg(test)]
+#[path = "sc_failure_replay_launch_tests.rs"]
+mod replay_launch_tests;
