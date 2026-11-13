@@ -424,11 +424,38 @@ fn codegraph_platform_target() -> String {
 /// ② **hoisted** —— 与主包**同级**的 `<node_modules>/@colbymchenry/codegraph-<target>/node`
 ///    （实测 1.6.2 真实布局：`libtest/node_modules/@colbymchenry/` 下
 ///    `codegraph` 与 `codegraph-linux-x64` 并列，且 node 在平台包里）；
-/// ③ **自愈缓存** —— `~/.codegraph/bundles/<target>-<version>/node`
-///    （`npm-shim.js` 下载缓存，同平台多版本时版本高者优先）。
+/// ③ **自愈缓存** —— `<缓存根>/bundles/<target>-<version>/node`
+///    （`npm-shim.js` 下载缓存，同平台多版本时版本高者优先；缓存根见
+///    [`codegraph_cache_root`]）。
 ///
 /// 目录名按**当前平台** `<platform>-<arch>` 匹配（不得硬编码单一平台）。
 fn bundled_node_candidates(sdk_path: &Path, home_dir: Option<&Path>) -> Vec<PathBuf> {
+    let cache_root = codegraph_cache_root(
+        home_dir,
+        std::env::var_os("CODEGRAPH_INSTALL_DIR").map(PathBuf::from),
+    );
+    bundled_node_candidates_with_cache_root(sdk_path, cache_root)
+}
+
+/// 自愈缓存根（`bundles` 的父目录）：`CODEGRAPH_INSTALL_DIR` 优先，否则
+/// `<home>/.codegraph`。
+///
+/// 与上游同口径（`scripts/npm-shim.js:113`
+/// `path.join(process.env.CODEGRAPH_INSTALL_DIR || path.join(os.homedir(), '.codegraph'), 'bundles')`；
+/// `scripts/npm-sdk.js:68` 同）：只硬编码 `~/.codegraph` 会漏掉自定义安装目录
+/// 里的自愈 bundle。空值视为未设置（宿主把变量设成空串时不改变默认根）。
+fn codegraph_cache_root(home_dir: Option<&Path>, install_dir: Option<PathBuf>) -> Option<PathBuf> {
+    install_dir
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .or_else(|| home_dir.map(|home| home.join(".codegraph")))
+}
+
+/// 同 [`bundled_node_candidates`]，但自愈缓存根**显式**给出（测试 seam，
+/// 避免依赖进程环境）。
+fn bundled_node_candidates_with_cache_root(
+    sdk_path: &Path,
+    cache_root: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let Some(package_root) = sdk_path.parent() else {
         return Vec::new();
     };
@@ -452,14 +479,20 @@ fn bundled_node_candidates(sdk_path: &Path, home_dir: Option<&Path>) -> Vec<Path
         }
     }
     // ③ 自愈缓存。
-    if let Some(home) = home_dir {
-        candidates.extend(cached_bundle_nodes(home, &target));
+    if let Some(root) = cache_root {
+        candidates.extend(cached_bundle_nodes(&root, &target));
     }
     candidates
 }
 
 /// 作用域目录里与主包同级的平台包自带 node：**当前平台优先**，其余
 /// `codegraph-*` 兜底（排序保证确定性）。
+///
+/// 兜底候选（目录名不是当前平台）只在**可执行格式校验通过**时才采用：异平台
+/// 残留包里的 node 在 `+x` 口径下同样「可执行」（`is_executable_file` 只看权限
+/// 位），被采用后必然 exec 失败 ⇒ 聚合验收硬失败，且绕过 CLI 回退（只有
+/// `codegraph_node_unavailable` 才回退）。多版本共存/手工安置的**本机格式**
+/// 兜底包仍然可以采用。
 fn platform_package_nodes(scoped: &Path, target: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(scoped) else {
         return Vec::new();
@@ -474,14 +507,21 @@ fn platform_package_nodes(scoped: &Path, target: &str) -> Vec<PathBuf> {
     names.sort_by_key(|name| *name != exact);
     names
         .into_iter()
+        // 异平台兜底包（目录名 ≠ 当前平台）只有**可执行格式校验通过**才采用；
+        // 当前平台的包沿用原口径（由采纳点再做 `is_executable_file` 校验）。
+        .filter(|name| {
+            *name == exact
+                || is_native_executable(&scoped.join(name).join(node_executable_name()))
+        })
         .map(|name| scoped.join(name).join(node_executable_name()))
+        .filter(|node| is_executable_file(node))
         .collect()
 }
 
-/// 自愈缓存里的自带 node：`<home>/.codegraph/bundles/<target>-<version>/node`
+/// 自愈缓存里的自带 node：`<缓存根>/bundles/<target>-<version>/node`
 /// （同平台多版本 ⇒ 版本高者优先）。
-fn cached_bundle_nodes(home: &Path, target: &str) -> Vec<PathBuf> {
-    let bundles = home.join(".codegraph").join("bundles");
+fn cached_bundle_nodes(cache_root: &Path, target: &str) -> Vec<PathBuf> {
+    let bundles = cache_root.join("bundles");
     let Ok(entries) = std::fs::read_dir(&bundles) else {
         return Vec::new();
     };
@@ -532,6 +572,49 @@ fn is_executable_file(path: &Path) -> bool {
     {
         true
     }
+}
+
+/// 文件头是否属于**当前平台**的可执行格式（ELF / Mach-O / PE）。
+///
+/// `is_executable_file` 只验「文件 + `+x` 位」：异平台残留包里的 node 同样
+/// 通过（例如 linux 上残留的 `codegraph-darwin-arm64/node`），被采用后必然
+/// exec 失败 ⇒ 聚合验收硬失败、且绕过 CLI 回退（只有
+/// `codegraph_node_unavailable` 才回退）。兜底候选必须过这道格式校验。
+fn is_native_executable(path: &Path) -> bool {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut magic = [0_u8; 4];
+    if file.read_exact(&mut magic).is_err() {
+        return false;
+    }
+    native_executable_magic(&magic)
+}
+
+#[cfg(target_os = "linux")]
+fn native_executable_magic(magic: &[u8; 4]) -> bool {
+    magic == b"\x7fELF"
+}
+
+#[cfg(target_os = "macos")]
+fn native_executable_magic(magic: &[u8; 4]) -> bool {
+    // Mach-O 32/64 位（大小端两种表示）与 universal (fat) 头。
+    matches!(
+        u32::from_be_bytes(*magic),
+        0xfeed_face | 0xfeed_facf | 0xcefa_edfe | 0xcffa_edfe | 0xcafe_babe | 0xbebafeca
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn native_executable_magic(magic: &[u8; 4]) -> bool {
+    magic.starts_with(b"MZ")
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn native_executable_magic(_magic: &[u8; 4]) -> bool {
+    // 未覆盖的平台：不做格式校验（保持既有兜底行为，不制造新的不可用路径）。
+    true
 }
 
 /// PATH 回退 node 的版本闸：`node --version` 实测 ≥ 22.5 才采用
