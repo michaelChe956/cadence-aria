@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::time::Duration;
 
 /// overlay 目录的合并位置：装完的目录用 `Prepend`（置于合并 PATH 最前）；
 /// 启动期发现的目录用 `Append`（不抢占用户已有工具）。
@@ -104,11 +105,165 @@ pub fn clear() {
     lock_registry().clear();
 }
 
-/// 启动期把**实际存在**的用户工具目录登记进 overlay（计划 2.4b）。候选
-/// 清单沿用 magpie `internal/proc/path_other.go` 的 `userDirs`。只登记、
-/// 不写盘、不创建目录。
+/// 登录 shell PATH 探测的硬上限（计划 2.4c：2s，超时不阻塞启动）。
+const LOGIN_SHELL_PATH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 计划 2.4b：启动期把**实际存在**的用户工具目录登记进 overlay（bind
+/// 成功后、首次 provider 探活前调用一次）。候选清单沿用 magpie
+/// `internal/proc/path_other.go` 的 `userDirs`，全部 `Append`（不抢占用户
+/// 已有工具）。只登记、不写盘、不创建目录。2.4c 第二档：登录 shell 的
+/// PATH 异步探测（不阻塞启动，2s 硬上限），完成后把其中实际存在的绝对
+/// 路径目录以 `Append` 追加。
+pub async fn register_startup_overlay() {
+    register_existing_candidates(user_home_dir().as_deref());
+    tokio::spawn(async {
+        if let Some(path_value) = probe_login_shell_path().await {
+            for dir in std::env::split_paths(&path_value) {
+                if dir.is_absolute() {
+                    register(&dir, OverlayPosition::Append);
+                }
+            }
+        }
+    });
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 fn register_existing_candidates(home: Option<&Path>) {
-    let _ = home;
+    let mut candidates = host_absolute_tool_dirs();
+    if let Some(home) = home {
+        candidates.extend(user_tool_dirs(home));
+    }
+    for dir in candidates {
+        register(&dir, OverlayPosition::Append);
+    }
+}
+
+fn host_absolute_tool_dirs() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ]
+}
+
+/// 已知用户工具目录清单（magpie `userDirs`）：固定清单 + 环境驱动
+/// （`$FNM_DIR`、`~/.npmrc` prefix、nvm 默认 node、mise node installs）。
+fn user_tool_dirs(home: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![
+        home.join(".local/bin"),
+        home.join(".npm-global/bin"),
+        home.join(".npm/bin"),
+        home.join(".bun/bin"),
+        home.join(".volta/bin"),
+        home.join(".asdf/shims"),
+        home.join(".local/share/mise/shims"),
+        home.join(".cargo/bin"),
+        home.join(".deno/bin"),
+        home.join("Library/pnpm"),
+        home.join(".local/share/pnpm"),
+        home.join(".local/share/fnm"),
+        home.join("Library/Application Support/fnm"),
+    ];
+    if let Some(fnm_dir) = std::env::var_os("FNM_DIR").filter(|value| !value.is_empty()) {
+        dirs.push(PathBuf::from(fnm_dir));
+    }
+    if let Some(prefix) = npmrc_prefix(home) {
+        dirs.push(prefix.join("bin"));
+    }
+    if let Some(bin_dir) = nvm_default_node_bin(home) {
+        dirs.push(bin_dir);
+    }
+    dirs.extend(mise_node_bins(home));
+    dirs
+}
+
+/// `~/.npmrc` 的 `prefix=` 值（`~/` 前缀按 home 展开；其余只接受绝对路径）。
+fn npmrc_prefix(home: &Path) -> Option<PathBuf> {
+    let npmrc = std::fs::read_to_string(home.join(".npmrc")).ok()?;
+    let prefix = npmrc
+        .lines()
+        .find_map(|line| {
+            let value = line.trim().strip_prefix("prefix")?;
+            Some(value.trim().strip_prefix('=')?.trim().to_string())
+        })
+        .filter(|value| !value.is_empty())?;
+    if let Some(rest) = prefix.strip_prefix("~/") {
+        return Some(home.join(rest));
+    }
+    Path::new(&prefix)
+        .is_absolute()
+        .then(|| PathBuf::from(prefix))
+}
+
+/// nvm 默认 node 的 bin（`~/.nvm/alias/default` 指向的版本目录）。仅接受
+/// 可直接解析的 `v<版本>` / `<版本>` 形态；`lts/*`、`node` 等别名无法低成本
+/// 解析，跳过（best-effort）。
+fn nvm_default_node_bin(home: &Path) -> Option<PathBuf> {
+    let alias = std::fs::read_to_string(home.join(".nvm/alias/default"))
+        .ok()?
+        .trim()
+        .to_string();
+    if alias.is_empty() {
+        return None;
+    }
+    let is_version = |value: &str| value.starts_with(|c: char| c.is_ascii_digit());
+    let version = if let Some(rest) = alias.strip_prefix('v') {
+        is_version(rest).then(|| alias.clone())?
+    } else {
+        is_version(&alias).then(|| format!("v{alias}"))?
+    };
+    Some(home.join(format!(".nvm/versions/node/{version}/bin")))
+}
+
+/// mise 的 node installs（`<数据目录>/mise/installs/node/<版本>/bin`）。
+fn mise_node_bins(home: &Path) -> Vec<PathBuf> {
+    let mut bins = Vec::new();
+    for installs_root in [
+        home.join(".local/share/mise/installs/node"),
+        home.join("Library/Application Support/mise/installs/node"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&installs_root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            bins.push(entry.path().join("bin"));
+        }
+    }
+    bins
+}
+
+/// 登录 shell PATH 探测（计划 2.4c 第二档）：交互式 login shell 打印其
+/// PATH，2s 硬上限（`kill_on_drop` 兜底回收）；失败/超时返回 None。rc
+/// 文件的 banner 污染由调用侧「绝对路径过滤 + register 只收存在目录」兜底。
+async fn probe_login_shell_path() -> Option<String> {
+    let shell = std::env::var("SHELL").ok()?;
+    let output = tokio::time::timeout(
+        LOGIN_SHELL_PATH_PROBE_TIMEOUT,
+        tokio::process::Command::new(&shell)
+            .args(["-i", "-l", "-c", "printf %s \"$PATH\""])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .rev()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        })
 }
 
 /// 进程级 overlay 测试锁：一切触碰注册表的用例（含其他文件里的合并点
