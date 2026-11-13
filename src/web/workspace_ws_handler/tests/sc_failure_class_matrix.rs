@@ -12,7 +12,7 @@ use super::sc_failure_driver_fixture::{
 use super::single_candidate_provider_run::{
     single_candidate_markdown, wait_for_single_candidate_phase, ProviderRunFixture,
 };
-use super::*;
+use super::single_candidate_provider_run::*;
 use crate::product::models::SingleCandidatePhase;
 use crate::product::work_item_plan_policy::{ScTeachingWindowRequest, WorkItemPlanFlowKind};
 use serde_json::Value;
@@ -121,8 +121,19 @@ fn assert_rounds(package: &Value, entries: &[Value], expected: &[Class]) {
         assert_eq!(fact["source"]["status"], "available");
         assert!(!fact["blocking_reasons"].as_array().unwrap().is_empty());
         if matches!(class, Class::Compile) {
+            // 「原因不截断」：五段缺失的真实诊断必须多于四条全部落盘。
             assert!(fact["blocking_reasons"].as_array().unwrap().len() > 4);
-            assert!(fact["repair_instructions"].as_array().unwrap().len() > 4);
+            // 该样本（五段 section 缺失）在生产上**不产出** contract-autorepair 指令
+            // （真实为 0 条），故这里只钉「若存在指令，则不得是截断摘要」；否则测试
+            // 会与真实产出矛盾。`>4 条指令不截断` 的边界由
+            // `MAX_AUTOREPAIR_INSTRUCTION_LINES` 的自身单测覆盖，本矩阵不重复。
+            let instructions = fact["repair_instructions"].as_array().unwrap();
+            assert!(
+                !instructions.iter().any(|line| line
+                    .as_str()
+                    .is_some_and(|line| line.contains("条契约修复指令"))),
+                "证据里的修复指令不得是截断摘要：{instructions:?}"
+            );
         }
         if matches!(class, Class::Structure) {
             assert!(!fact["source"]["locator"].as_str().unwrap().starts_with("sc-split-output/"));

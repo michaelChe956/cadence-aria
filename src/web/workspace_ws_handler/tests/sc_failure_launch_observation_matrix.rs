@@ -184,7 +184,11 @@ async fn sc_failure_nonterminal_five_cases_publish_no_failure_package() {
         if scenario == "admission_waiting" {
             assert!(!failure_message(&mut run.outbound).await.is_empty());
             let record = run.fixture.lifecycle.get_workspace_session(&run.fixture.record.id).unwrap();
-            assert_eq!(record.single_candidate_phase, Some(SingleCandidatePhase::Prepare));
+            // 成员语言规则缺失属「准入期 fail-closed，先于 provider 启动」：
+            // 既有产品用例 `single_candidate_author_rejects_missing_language_rules_before_provider_start`
+            // 明确要求 phase = Failed 且零 provider 输入（本矩阵已断言 received_count()==0）。
+            // 该路径没有观察到机械失败 ⇒ 不应产生终局包（下方 assert_no_terminal_package）。
+            assert_eq!(record.single_candidate_phase, Some(SingleCandidatePhase::Failed));
         } else {
             wait_for_stage(&run.fixture.engine, WorkspaceStage::HumanConfirm).await;
         }
