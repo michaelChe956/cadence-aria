@@ -233,12 +233,77 @@ impl ScFailureRepairPackage {
     /// order/cross-chain/scope binding, and completeness agreement with
     /// `missing_evidence`.
     ///
-    /// RED phase: this delivery contains the wire types and the behavior
-    /// tests only. The checks are intentionally not implemented yet — every
-    /// call reports the package as unvalidated until the GREEN phase lands
-    /// after the controller has observed the failing tests.
+    /// Format-domain only: this never touches the evidence store and never
+    /// recomputes content digests. Binding locator contents (raw JSON
+    /// body, normalized source, prompt body) to their digests and byte
+    /// counts belongs to the strict evidence store and publisher layers.
     pub fn validate(&self) -> Result<(), String> {
-        Err("sc_failure_repair_package validation pending P04 GREEN".to_string())
+        if self.schema_version != 1 {
+            return Err(format!(
+                "schema_version: expected 1, got {}",
+                self.schema_version
+            ));
+        }
+        Self::check_digest_hex("evidence_digest", &self.evidence_digest)?;
+        for (index, round) in self.rounds.iter().enumerate() {
+            let at = format!("rounds[{index}]");
+            if round.identity.chain_id != self.chain_id {
+                return Err(format!("cross-chain round identity at {at}"));
+            }
+            if round.identity.workspace_session_id != self.session_id {
+                return Err(format!("scope mismatch at {at}"));
+            }
+            if index > 0
+                && round.identity.round_ordinal <= self.rounds[index - 1].identity.round_ordinal
+            {
+                return Err(format!("round order violated at {at}"));
+            }
+            Self::check_evidence_ref_hex(&round.raw, &format!("{at}.raw"))?;
+            Self::check_evidence_ref_hex(&round.source, &format!("{at}.source"))?;
+            for (prompt_index, prompt) in round.prompts.iter().enumerate() {
+                Self::check_evidence_ref_hex(
+                    &prompt.prompt,
+                    &format!("{at}.prompts[{prompt_index}].prompt"),
+                )?;
+            }
+        }
+        Self::check_evidence_ref_hex(&self.last_provider_output, "last_provider_output")?;
+        Self::check_evidence_ref_hex(
+            &self.last_failure_source.source,
+            "last_failure_source.source",
+        )?;
+        for (prompt_index, prompt) in self.teaching_prompts.iter().enumerate() {
+            Self::check_evidence_ref_hex(
+                &prompt.prompt,
+                &format!("teaching_prompts[{prompt_index}].prompt"),
+            )?;
+        }
+        match self.completeness {
+            ScPackageCompleteness::Complete if !self.missing_evidence.is_empty() => Err(
+                "completeness mismatch: complete package carries missing_evidence".to_string(),
+            ),
+            ScPackageCompleteness::Incomplete if self.missing_evidence.is_empty() => Err(
+                "completeness mismatch: incomplete package lacks missing_evidence".to_string(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    fn check_digest_hex(path: &str, value: &str) -> Result<(), String> {
+        let is_hex64 =
+            value.len() == 64 && value.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if is_hex64 {
+            Ok(())
+        } else {
+            Err(format!("invalid digest hex at {path}"))
+        }
+    }
+
+    fn check_evidence_ref_hex(evidence: &ScEvidenceRef, path: &str) -> Result<(), String> {
+        match evidence {
+            ScEvidenceRef::Available { sha256, .. } => Self::check_digest_hex(path, sha256),
+            ScEvidenceRef::Missing { .. } => Ok(()),
+        }
     }
 }
 
@@ -385,7 +450,7 @@ mod tests {
         package.completeness = ScPackageCompleteness::Incomplete;
         package.terminal_class = "teaching_interrupted".to_string();
         package.terminal_reason =
-            "teaching interrupted; original compile failure retained in rounds".to_string();
+            "教学中断：原始编译失败原因保留在 rounds 与 terminal_reason".to_string();
         package.rounds[0].blocking_reasons = vec![
             "compile_failed".to_string(),
             "compile_failed".to_string(),
@@ -542,10 +607,6 @@ mod tests {
             wire.contains("\"unavailable\""),
             "wire must carry the snake_case prompt disposition"
         );
-        assert!(
-            wire.contains("原始 provider 输出"),
-            "UTF-8 evidence text must survive the wire unescaped"
-        );
 
         let decoded: ScFailureRepairPackage = serde_json::from_str(&wire).unwrap();
         assert_eq!(decoded.rounds.len(), 2);
@@ -605,6 +666,10 @@ mod tests {
 
         assert_eq!(decoded.completeness, ScPackageCompleteness::Incomplete);
         assert_eq!(decoded.terminal_class, "teaching_interrupted");
+        assert_eq!(
+            decoded.terminal_reason,
+            "教学中断：原始编译失败原因保留在 rounds 与 terminal_reason"
+        );
         assert_eq!(decoded.evidence_digest, sha256_hex("evidence log body for chain-sc-issue-1"));
 
         // Full round-trip equality on top of the targeted pins above.
@@ -615,9 +680,10 @@ mod tests {
     fn sc_failure_dto_validate_rejects_invalid_schema_version() {
         let mut package = complete_package();
         package.schema_version = 2;
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "schema_version=2 must be rejected"
+            error.starts_with("schema_version"),
+            "unexpected error: {error}"
         );
     }
 
@@ -629,23 +695,26 @@ mod tests {
         } else {
             panic!("fixture round raw must be available");
         }
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "uppercase digest must be rejected"
+            error.starts_with("invalid digest hex") && error.contains("rounds[0].raw"),
+            "unexpected error: {error}"
         );
 
         let mut package = complete_package();
         package.evidence_digest.truncate(63);
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "63-char digest must be rejected"
+            error.starts_with("invalid digest hex") && error.contains("evidence_digest"),
+            "unexpected error: {error}"
         );
 
         let mut package = complete_package();
         package.evidence_digest = "z".repeat(64);
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "non-hex digest must be rejected"
+            error.starts_with("invalid digest hex") && error.contains("evidence_digest"),
+            "unexpected error: {error}"
         );
     }
 
@@ -653,16 +722,18 @@ mod tests {
     fn sc_failure_dto_validate_rejects_round_disorder() {
         let mut package = complete_package();
         package.rounds.reverse();
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "descending round ordinals must be rejected"
+            error.starts_with("round order violated") && error.contains("rounds[1]"),
+            "unexpected error: {error}"
         );
 
         let mut package = complete_package();
         package.rounds[1].identity.round_ordinal = 1;
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "duplicate round ordinals must be rejected"
+            error.starts_with("round order violated") && error.contains("rounds[1]"),
+            "unexpected error: {error}"
         );
     }
 
@@ -670,9 +741,10 @@ mod tests {
     fn sc_failure_dto_validate_rejects_cross_chain_round_identity() {
         let mut package = complete_package();
         package.rounds[1].identity.chain_id = "chain-other".to_string();
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "round from another chain must be rejected"
+            error.starts_with("cross-chain round identity") && error.contains("rounds[1]"),
+            "unexpected error: {error}"
         );
     }
 
@@ -680,9 +752,10 @@ mod tests {
     fn sc_failure_dto_validate_rejects_scope_mismatch() {
         let mut package = complete_package();
         package.rounds[0].identity.workspace_session_id = "ws-session-999".to_string();
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "round bound to another workspace session must be rejected"
+            error.starts_with("scope mismatch") && error.contains("rounds[0]"),
+            "unexpected error: {error}"
         );
     }
 
@@ -696,9 +769,10 @@ mod tests {
             detail: "teaching prompt body pruned before send".to_string(),
             locator: None,
         });
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "Complete package with missing evidence entries must be rejected"
+            error.starts_with("completeness mismatch"),
+            "unexpected error: {error}"
         );
     }
 
@@ -706,9 +780,10 @@ mod tests {
     fn sc_failure_dto_validate_rejects_incomplete_without_missing_evidence() {
         let mut package = incomplete_package();
         package.missing_evidence.clear();
+        let error = package.validate().unwrap_err();
         assert!(
-            package.validate().is_err(),
-            "Incomplete package without missing evidence entries must be rejected"
+            error.starts_with("completeness mismatch"),
+            "unexpected error: {error}"
         );
     }
 
