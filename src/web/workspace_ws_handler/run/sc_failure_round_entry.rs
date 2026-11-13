@@ -249,7 +249,15 @@ pub(in crate::web::workspace_ws_handler::run) async fn begin_sc_author_round_ent
     is_fresh_context: bool,
 ) -> Result<ScRoundEntry, SingleCandidateProviderRunError> {
     let outcome = if is_fresh_context {
-        match fresh_operation_sc_round_anchor(engine, lifecycle, scope, business_key, provider)? {
+        match fresh_operation_sc_round_anchor(engine, lifecycle, scope, business_key, provider)
+            .map_err(|failure| {
+                // 定点转换：保留 stable code/step 与原 detail（不加全局 From、不加 variant）。
+                SingleCandidateProviderRunError::Message(format!(
+                    "SC 轮入场锚不可用（code={} step={}）：{}",
+                    failure.code, failure.step, failure.detail
+                ))
+            })?
+        {
             FreshRoundAnchor::Bound(entry) => Ok(entry),
             FreshRoundAnchor::Fresh { original, ordinal } => {
                 let node_id = engine.begin_work_item_plan_author_run().await;
