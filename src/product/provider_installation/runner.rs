@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cross_cutting::bounded_command_runner::{
     BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
 };
+use crate::cross_cutting::path_overlay;
 use crate::cross_cutting::provider_health::ProviderHealthService;
 
 use super::InstallTarget;
@@ -262,6 +263,43 @@ pub fn npm_path_hint(command: &str, prefix: &Path, path_value: Option<&str>) -> 
     }
 }
 
+/// 安装产物的 bin 目录：npm 类 = `<prefix>/bin`；脚本类（Kimi）= **脚本实际
+/// 输出**的目录（登记条件以实际存在的文件为准，不依赖目录名假设）。
+fn install_bin_dir(
+    row: &InstallSourceRow,
+    prefix: &Path,
+    script_stdout: &str,
+) -> Option<PathBuf> {
+    if row.npm_package.is_some() {
+        return Some(prefix.join("bin"));
+    }
+    script_installed_bin_dir(script_stdout, row.command)
+}
+
+/// 从脚本输出里找安装产物路径（Kimi 官方脚本输出
+/// `Installed to /root/.kimi-code/bin/kimi`）⇒ 取其所在目录。
+fn script_installed_bin_dir(stdout: &str, command: &str) -> Option<PathBuf> {
+    stdout
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c: char| c == '\'' || c == '"' || c == ',' || c == ';'))
+        .filter(|token| token.starts_with('/'))
+        .map(PathBuf::from)
+        .find(|path| path.file_name().is_some_and(|name| name == command))
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+}
+
+/// 把「安装产物 bin 目录」登记进 PATH overlay（**仅当该目录确实含刚装好的
+/// 可执行文件**）⇒ 平台自身探测立即可见（决策 D1/D2）。
+fn register_install_bin_dir(dir: Option<&Path>, command: &str) {
+    let Some(dir) = dir else {
+        return;
+    };
+    if !dir.join(command).exists() {
+        return;
+    }
+    path_overlay::register(dir, path_overlay::OverlayPosition::Prepend);
+}
+
 /// 作业执行时钟 seam。
 pub trait InstallClock: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
@@ -408,9 +446,8 @@ impl InstallJobExecution {
             Some(probe) => probe.npm_global_prefix().await,
             None => None,
         };
-        let npm_global = npm_global.filter(|prefix| {
-            is_writable_dir(prefix) && prefix_bin_is_on_path(prefix, path_value)
-        });
+        let npm_global = npm_global
+            .filter(|prefix| is_writable_dir(prefix) && prefix_bin_is_on_path(prefix, path_value));
         // ① visible（真实可写）→ ② npm 全局前缀 → ③ 兜底。
         choose_effective_prefix(visible.as_deref(), npm_global.as_deref(), &self.npm_prefix)
     }
@@ -445,6 +482,11 @@ impl InstallJobExecution {
         };
         match self.runner.execute(&plan).await {
             Ok(result) if result.exit_code == Some(0) && !result.timed_out && !result.cancelled => {
+                // 装后登记 overlay（**仅当**目录里确实有刚装好的可执行文件）
+                // ⇒ 平台自身的命令可见 PATH 立刻包含新装的 CLI（D1/D2）。
+                let bin_dir = install_bin_dir(row, &prefix, &result.stdout);
+                register_install_bin_dir(bin_dir.as_deref(), row.command);
+                // overlay 登记**之后**再探测（平台自身探测立即可见）。
                 let detected = self
                     .prober
                     .refresh_after_install(target)
