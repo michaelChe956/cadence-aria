@@ -684,6 +684,60 @@ mod tests {
         }
     }
 
+    /// 大负载但**完整**（stdout 未被截断）时，files() 必须照常返回清单：
+    /// 现场证明 9k~20k 文件的清单载荷 1.3~3.9 MB，通用 1 MiB 上限会把 JSON
+    /// 尾部切掉。用例同时断言「下发的 stdout 上限能容纳整份载荷」——只有上限
+    /// 在挡路，解析本身不是问题。
+    #[test]
+    fn files_parses_large_complete_payload() {
+        let entry_count = 20_000usize;
+        let mut payload = String::from("[");
+        for index in 0..entry_count {
+            if index > 0 {
+                payload.push(',');
+            }
+            payload.push_str(&format!(
+                "{{\"path\":\"src/aggregate/module_{index:06}/nested/directory/structure/with/a/long/path/file_{index:06}.rs\"}}"
+            ));
+        }
+        payload.push(']');
+        assert!(
+            payload.len() > OUTPUT_LIMIT_BYTES,
+            "载荷必须大于通用上限，用例才有意义：{}",
+            payload.len()
+        );
+
+        let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
+            CommandCapture::success(&payload),
+        ]));
+        let cli = CodeGraphCli::new(runner.clone(), "codegraph".into());
+        let entries = cli.files(Path::new("/aggregate")).unwrap();
+        assert_eq!(entries.len(), entry_count);
+        assert_eq!(
+            entries[0],
+            PathBuf::from(format!(
+                "src/aggregate/module_{:06}/nested/directory/structure/with/a/long/path/file_{:06}.rs",
+                0, 0
+            ))
+        );
+        assert_eq!(
+            entries[entry_count - 1],
+            PathBuf::from(format!(
+                "src/aggregate/module_{:06}/nested/directory/structure/with/a/long/path/file_{:06}.rs",
+                entry_count - 1,
+                entry_count - 1
+            ))
+        );
+
+        let requests = runner.requests();
+        assert!(
+            requests[0].stdout_limit >= payload.len(),
+            "stdout 上限必须能容纳整份载荷：limit={} payload={}",
+            requests[0].stdout_limit,
+            payload.len()
+        );
+    }
+
     fn assert_clean_environment(request: &BoundedCommandRequest) {
         assert!(request.environment.keys().all(|key| key == "PATH"));
         if std::env::var_os("PATH").is_some() {
