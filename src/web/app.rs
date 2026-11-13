@@ -35,6 +35,10 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             "/api/providers/install/{job_id}",
             get(handlers::get_install_job),
         )
+        .route(
+            "/api/providers/{target}/expose",
+            post(handlers::post_provider_expose),
+        )
         .route("/api/runtime-info", get(handlers::runtime_info))
         .route(
             "/api/image-create/sessions",
