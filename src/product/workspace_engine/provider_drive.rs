@@ -1070,11 +1070,24 @@ impl WorkspaceEngine {
         } else {
             None
         };
-        self.update_artifact(ArtifactPayload::Markdown {
-            markdown: artifact_markdown.clone(),
-            diff: None,
-        })
-        .await;
+        // artifact 落盘失败必须显式暴露：Error 事件 + Failed 节点，并在 checkpoint /
+        // MessageComplete / AuthorConfirm 之前返回（不假装产物已耐久）。
+        if let Err(message) = self
+            .update_artifact(ArtifactPayload::Markdown {
+                markdown: artifact_markdown.clone(),
+                diff: None,
+            })
+            .await
+        {
+            let _ = self
+                .event_tx
+                .send(EngineEvent::Error {
+                    message: message.clone(),
+                })
+                .await;
+            self.finish_active_run_with_failed_node(message).await;
+            return;
+        }
 
         let message_index = self.session.messages.len() as u32;
         let artifact_snapshot = self.session.artifact.as_ref();
@@ -1222,10 +1235,9 @@ mod tests {
             WorkspaceEngine::new_persistent(checkpoint_store, lifecycle_store.clone(), tx, session);
 
         // 真实存储故障：artifact_versions.json 的 raw 不可解析。
-        let versions_path = ProductAppPaths::new(tmp.path().join(".aria"))
-            .issue_lifecycle_root("project_0001", "issue_0001")
-            .join("workspace-timelines")
-            .join(&session_id)
+        let versions_path = lifecycle_store
+            .workspace_timeline_root_for_session(&session_id)
+            .expect("workspace timeline root")
             .join("artifact_versions.json");
         std::fs::create_dir_all(versions_path.parent().unwrap()).unwrap();
         std::fs::write(&versions_path, b"{ this is not json").unwrap();

@@ -294,33 +294,85 @@ impl WorkspaceEngine {
         Ok(())
     }
 
-    pub async fn update_artifact(&mut self, payload: ArtifactPayload) -> ArtifactRef {
-        self.session.artifact = Some(payload.clone());
-        for version in &mut self.artifact_versions {
-            version.is_current = false;
-        }
-        let version = self.artifact_versions.len() as u32 + 1;
+    /// 普通工件版本写入（SC 失败包 A4 之外的普通路径）。
+    ///
+    /// 版本分配与落盘在 `LifecycleStore::with_artifact_versions_write` 的同锁 closure 内
+    /// 完成：锁内以磁盘真值分配 `max(raw.version)+1`、合并新版本、整表保存。锁、准入、
+    /// raw 读取、版本号溢出与保存任一失败，都在提交引擎内存、登记 ref、广播事件之前
+    /// 返回 `Err`（`artifact_versions_write_failed: ...`），调用方必须显式处理。
+    ///
+    /// 保存成功后以磁盘合并结果为权威提交 `session.artifact` / `artifact_versions`；
+    /// 其后的 ref 登记与事件广播保持既有 best-effort 语义（本次不顺带收紧全局）。
+    pub async fn update_artifact(&mut self, payload: ArtifactPayload) -> Result<ArtifactRef, String> {
+        let session_id = self.session.session_id.clone();
+        let generated_by = self.session.author_provider.clone();
         let source_node_id = self
             .active_node_id
             .clone()
             .unwrap_or_else(|| "timeline_node_unknown".to_string());
-        self.artifact_versions.push(ArtifactVersion {
-            version,
-            payload: payload.clone(),
-            generated_by: self.session.author_provider.clone(),
-            reviewed_by: None,
-            review_verdict: None,
-            confirmed_by: None,
-            is_current: true,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            source_node_id,
-        });
-        self.persist_artifact_versions();
-        let source_node_id = self
-            .artifact_versions
-            .last()
-            .map(|version| version.source_node_id.clone())
-            .unwrap_or_else(|| "timeline_node_unknown".to_string());
+        let created_at = chrono::Utc::now().to_rfc3339();
+
+        let (version, saved_versions) = match self.lifecycle_store.as_ref() {
+            Some(store) => {
+                let payload_for_write = payload.clone();
+                store
+                    .with_artifact_versions_write(&session_id, |ctx| {
+                        // 锁内分配：max(raw)+1，溢出由 next_version 返回类型化错误。
+                        let version = ctx.next_version()?;
+                        let mut proposed = ctx.raw().to_vec();
+                        for entry in &mut proposed {
+                            // 普通旧版本退出 current；A4 条目恒为 is_current=false，
+                            // 这里不会改动其 metadata。
+                            entry.is_current = false;
+                        }
+                        proposed.push(ArtifactVersion {
+                            version,
+                            payload: payload_for_write.clone(),
+                            generated_by: generated_by.clone(),
+                            reviewed_by: None,
+                            review_verdict: None,
+                            confirmed_by: None,
+                            is_current: true,
+                            created_at: created_at.clone(),
+                            source_node_id: source_node_id.clone(),
+                        });
+                        let saved = ctx.save(&proposed)?;
+                        Ok((version, saved))
+                    })
+                    .map_err(|error| format!("artifact_versions_write_failed: {error}"))?
+            }
+            None => {
+                // 无持久存储时只维护内存版本表：同样是 checked max+1，溢出直接报错，
+                // 不伪造持久化回退。
+                let version = match self.artifact_versions.iter().map(|entry| entry.version).max() {
+                    None => 1,
+                    Some(max) => max.checked_add(1).ok_or_else(|| {
+                        "artifact_versions_write_failed: artifact_versions version space exhausted"
+                            .to_string()
+                    })?,
+                };
+                let mut proposed = self.artifact_versions.clone();
+                for entry in &mut proposed {
+                    entry.is_current = false;
+                }
+                proposed.push(ArtifactVersion {
+                    version,
+                    payload: payload.clone(),
+                    generated_by: generated_by.clone(),
+                    reviewed_by: None,
+                    review_verdict: None,
+                    confirmed_by: None,
+                    is_current: true,
+                    created_at: created_at.clone(),
+                    source_node_id: source_node_id.clone(),
+                });
+                (version, proposed)
+            }
+        };
+
+        // 保存成功后才提交引擎内存（磁盘合并结果为权威）。
+        self.session.artifact = Some(payload.clone());
+        self.artifact_versions = saved_versions;
         let artifact_ref = ArtifactRef {
             artifact_id: format!("artifact_version_{version:03}"),
             version,
@@ -335,7 +387,7 @@ impl WorkspaceEngine {
                 payload: payload.clone(),
             })
             .await;
-        artifact_ref
+        Ok(artifact_ref)
     }
 }
 
@@ -383,12 +435,11 @@ mod update_artifact_tests {
         (tmp, lifecycle_store, engine, rx, session_id)
     }
 
-    /// `artifact_versions.json` 的真实落盘路径（与 store 的 `workspace-timelines` 布局一致）。
-    fn artifact_versions_path(tmp: &TempDir, session_id: &str) -> std::path::PathBuf {
-        ProductAppPaths::new(tmp.path().join(".aria"))
-            .issue_lifecycle_root("project_0001", "issue_0001")
-            .join("workspace-timelines")
-            .join(session_id)
+    /// `artifact_versions.json` 的真实落盘路径（由 store 自己解析，避免测试写死目录布局）。
+    fn artifact_versions_path(store: &LifecycleStore, session_id: &str) -> std::path::PathBuf {
+        store
+            .workspace_timeline_root_for_session(session_id)
+            .expect("workspace timeline root")
             .join("artifact_versions.json")
     }
 
@@ -425,8 +476,8 @@ mod update_artifact_tests {
 
     #[tokio::test]
     async fn update_artifact_surfaces_raw_read_failure_without_touching_memory() {
-        let (tmp, store, mut engine, mut rx, session_id) = persistent_engine();
-        let versions_path = artifact_versions_path(&tmp, &session_id);
+        let (_tmp, store, mut engine, mut rx, session_id) = persistent_engine();
+        let versions_path = artifact_versions_path(&store, &session_id);
         std::fs::create_dir_all(versions_path.parent().unwrap()).unwrap();
         let corrupt = b"{ this is not json";
         std::fs::write(&versions_path, corrupt).unwrap();
@@ -536,7 +587,7 @@ mod update_artifact_tests {
 
     #[tokio::test]
     async fn update_artifact_persists_version_then_commits_memory() {
-        let (tmp, store, mut engine, mut rx, session_id) = persistent_engine();
+        let (_tmp, store, mut engine, mut rx, session_id) = persistent_engine();
 
         let artifact_ref = engine
             .update_artifact(story_payload())
@@ -546,7 +597,10 @@ mod update_artifact_tests {
         assert_eq!(artifact_ref.version, 1);
         assert_eq!(artifact_ref.artifact_id, "artifact_version_001");
         assert!(
-            matches!(engine.session.artifact, Some(ArtifactPayload::Markdown { .. })),
+            matches!(
+                engine.session.artifact.as_ref(),
+                Some(ArtifactPayload::Markdown { .. })
+            ),
             "成功后才提交 session.artifact"
         );
         assert_eq!(engine.artifact_versions.len(), 1);
@@ -555,7 +609,7 @@ mod update_artifact_tests {
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0].version, 1);
         assert!(
-            artifact_versions_path(&tmp, &session_id).exists(),
+            artifact_versions_path(&store, &session_id).exists(),
             "成功路径必须真实落盘"
         );
         assert!(

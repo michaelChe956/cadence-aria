@@ -887,7 +887,7 @@ impl WorkspaceEngine {
             markdown: source,
             diff: None,
         })
-        .await;
+        .await?;
         let completion_message = if contract_autorepair_instructions.is_empty() {
             "SingleCandidate markdown source 已编译并持久化，等待 Evaluate".to_string()
         } else {
