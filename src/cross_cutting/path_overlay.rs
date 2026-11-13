@@ -34,16 +34,35 @@ fn registry() -> &'static Mutex<Vec<OverlayEntry>> {
     &REGISTRY
 }
 
+fn lock_registry() -> MutexGuard<'static, Vec<OverlayEntry>> {
+    registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 登记一个目录进 overlay。不存在的目录（含普通文件）被忽略；同一目录
 /// 重复登记只保留首次的位置（去重，只追加）。只动注册表：不改进程真实
 /// env、不写盘、不创建目录。
 pub fn register(dir: &Path, position: OverlayPosition) {
-    let _ = (dir, position);
+    if !dir.is_dir() {
+        return;
+    }
+    let mut entries = lock_registry();
+    if entries.iter().any(|entry| entry.dir == dir) {
+        return;
+    }
+    entries.push(OverlayEntry {
+        dir: dir.to_path_buf(),
+        position,
+    });
 }
 
 /// 当前 overlay 的目录快照（登记顺序）。
 pub fn snapshot() -> Vec<PathBuf> {
-    Vec::new()
+    lock_registry()
+        .iter()
+        .map(|entry| entry.dir.clone())
+        .collect()
 }
 
 /// 合并 overlay 与 base 成子进程 PATH：`Prepend` 目录置前（登记顺序），
@@ -51,18 +70,40 @@ pub fn snapshot() -> Vec<PathBuf> {
 /// 出现。`base` 缺省取进程 env PATH；overlay 为空时原样返回 base（零行为
 /// 变化，既有调用方语义不受影响）。
 pub fn effective_path(base: Option<&str>) -> String {
-    match base {
+    let base_value = match base {
         Some(value) => value.to_string(),
         None => std::env::var_os("PATH")
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned(),
+    };
+    let entries = lock_registry();
+    let mut merged: Vec<PathBuf> = Vec::with_capacity(entries.len());
+    for position in [OverlayPosition::Prepend, OverlayPosition::Append] {
+        for entry in entries.iter() {
+            if entry.position == position && !merged.contains(&entry.dir) {
+                merged.push(entry.dir.clone());
+            }
+        }
     }
+    if merged.is_empty() {
+        return base_value;
+    }
+    for dir in std::env::split_paths(&base_value) {
+        if !dir.as_os_str().is_empty() && !merged.contains(&dir) {
+            merged.push(dir);
+        }
+    }
+    std::env::join_paths(merged)
+        .map(|joined| joined.to_string_lossy().into_owned())
+        .unwrap_or(base_value)
 }
 
 /// 测试用：清空 overlay 注册表。
 #[cfg(test)]
-pub fn clear() {}
+pub fn clear() {
+    lock_registry().clear();
+}
 
 /// 进程级 overlay 测试锁：一切触碰注册表的用例（含其他文件里的合并点
 /// 断言）必须持本锁执行，避免并行用例互相污染（计划 §6.1）。
