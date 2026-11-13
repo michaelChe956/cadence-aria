@@ -214,7 +214,7 @@ async fn lc_bind_fresh_node_after_spawn(
             // 上浮且零写（不猜 ID、不改旧 operation）。
             let binding_conflict = || {
                 crate::product::json_store::ProductStoreError::Conflict {
-                    kind: "lc_fresh_operation_binding".to_string(),
+                    kind: "lc_fresh_operation_binding",
                     id: expected_operation_id.clone(),
                 }
             };

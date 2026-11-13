@@ -281,7 +281,7 @@ impl PlanSplitRunContext {
             {
                 let binding_conflict = || {
                     crate::product::json_store::ProductStoreError::Conflict {
-                        kind: "lc_fresh_operation_binding".to_string(),
+                        kind: "lc_fresh_operation_binding",
                         id: expected_operation_id.clone(),
                     }
                 };
