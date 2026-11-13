@@ -316,8 +316,7 @@ async fn sc_first_round_structure_carries_all_member_headers_within_budget() {
         &member0.0.to_string(),
         &member1.0.to_string(),
     );
-    let first_input =
-        sc_start_and_capture_first_input(&fixture, provider, &mut input_rx).await;
+    let first_input = sc_start_and_capture_first_input(&fixture, provider, &mut input_rx).await;
 
     let member_store =
         crate::product::logical_codebase::LogicalCodebaseStore::new(fixture.app_paths.clone());
@@ -395,8 +394,7 @@ async fn sc_structure_section_byte_identical_when_members_absent() {
             &fixture.member_checkout_root(),
             false,
         );
-    let first_input =
-        sc_start_and_capture_first_input(&fixture, provider, &mut input_rx).await;
+    let first_input = sc_start_and_capture_first_input(&fixture, provider, &mut input_rx).await;
     assert_eq!(
         sc_structure_section(&first_input.prompt),
         pre_change_summary,
@@ -489,7 +487,11 @@ async fn omitted_parse_diagnostics_fully_retrievable_from_durable_audit() {
     let (detail, audit) = reason
         .split_once("\n[sc_parse_fact_audit")
         .expect("audit partition must follow the unchanged detail");
-    let audit_entries: Vec<&str> = audit.lines().skip(1).filter(|line| !line.is_empty()).collect();
+    let audit_entries: Vec<&str> = audit
+        .lines()
+        .skip(1)
+        .filter(|line| !line.is_empty())
+        .collect();
     assert_eq!(
         audit_entries.len(),
         total,
