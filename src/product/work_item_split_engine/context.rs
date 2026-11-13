@@ -472,6 +472,53 @@ mod tests {
         assert_eq!(lines.last(), Some(&"file: f29.txt"));
     }
 
+    #[test]
+    fn logical_summary_keeps_late_member_repo_when_point_files_crowd_top_level() {
+        // REQ-WSC-06「成员仓身份头在预算内全部在场」红测（W1）：>12 个点文件
+        // 挤占 12 顶层项时，字典序靠后的成员仓被现有实现整个丢弃。
+        let dir = TempDir::new().expect("temp repo");
+        for index in 0..16 {
+            std::fs::write(dir.path().join(format!("a{index:02}.txt")), "x")
+                .expect("write point file");
+        }
+        std::fs::create_dir_all(dir.path().join("zzz-member").join("src"))
+            .expect("mkdir member");
+
+        let summary = summarize_repository_structure(dir.path(), true);
+
+        assert!(
+            summary.contains("zzz-member"),
+            "成员仓不得被点文件挤出摘要：\n{summary}"
+        );
+    }
+
+    #[test]
+    fn logical_summary_keeps_every_member_when_line_budget_exhausted() {
+        // REQ-WSC-06 红测（W1）：12 成员 × 6 子项超出 40 行上限时，现有实现
+        // 按序 truncate 把排名靠后的成员仓整个丢弃。
+        let dir = TempDir::new().expect("temp repo");
+        for member in 0..12 {
+            for child in 0..6 {
+                std::fs::create_dir_all(
+                    dir.path()
+                        .join(format!("m{member:02}"))
+                        .join(format!("c{child}")),
+                )
+                .expect("mkdir member child");
+            }
+        }
+
+        let summary = summarize_repository_structure(dir.path(), true);
+
+        for member in 0..12 {
+            let name = format!("m{member:02}");
+            assert!(
+                summary.contains(&name),
+                "成员仓 {name} 的身份头必须在场：\n{summary}"
+            );
+        }
+    }
+
     /// 主记录缺失语义回归（REQ-DRG-04）：请求一个已被删除的 story_spec 时，既有
     /// 错误码 `story_spec_not_found` 与既有文案 MUST 逐字不变——MUST NOT 被悬空引用
     /// 治理的容错降级为「跳过并告警」或静默返回空。
