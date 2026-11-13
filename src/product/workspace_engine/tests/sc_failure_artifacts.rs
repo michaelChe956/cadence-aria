@@ -11,7 +11,7 @@ use crate::product::lifecycle_store::sc_failure_evidence::{
     sc_failure_evidence_log_ref, ScFailureEvidenceEntry, ScFailureEvidenceEvent,
     ScFailureEvidenceRead,
 };
-use crate::product::lifecycle_store::sc_failure_publication::ScTerminalInput;
+use crate::product::lifecycle_store::sc_failure_publication::{ScLocalTerminal, ScTerminalInput};
 use crate::product::models::ProviderName;
 use crate::web::workspace_ws_types::{
     ScEvidenceRef, ScFailureChainIdentity, ScFailureClass, ScFailureScope, ScMissingEvidence,
@@ -307,4 +307,94 @@ fn bound_but_not_started_round_keeps_raw_missing_instead_of_not_delivered() {
     assert_eq!(package.missing_evidence, vec![gap]);
     assert_eq!(package.evidence_digest, sha_hex(&prefix));
     assert!(package.validate().is_ok(), "{:?}", package.validate());
+}
+
+// P19d 行为 RED（仅新增用例，不改实现）：Local 终局携带真实 source 读失败
+// （`kind == "source"`，round 已绑定）时，该轮 `source` 与 `last_failure_source`
+// 必须投影成显式 `Missing{code/detail/round_id}`，raw / 前缀字节 / digest /
+// through key / prompts 不动；同一轮互相矛盾的 source missing 事实必须拒绝。
+
+const LOCAL_REASON: &str = "证据日志尾部不可读：source 读取在真实已验证前缀之外失败";
+
+fn local_terminal(r: &ScRoundIdentity, observations: Vec<(String, ScRoundLaunchState)>, missing: Vec<ScMissingEvidence>) -> ScLocalTerminal {
+    ScLocalTerminal {
+        last_failure_round_id: r.round_id.clone(), last_physical_round_id: Some(r.round_id.clone()),
+        terminal_class: "log_corrupt".into(), terminal_reason: LOCAL_REASON.into(),
+        launch_observations: observations, completeness: ScPackageCompleteness::Incomplete,
+        missing_evidence: missing,
+    }
+}
+
+#[test]
+fn local_source_read_failure_projects_round_and_last_failure_source_to_missing() {
+    let chain = chain();
+    let r1 = round(1, "node-compile", 11);
+    let raw1 = available(&split_locator(11), RAW1);
+    let src1 = available(&split_locator(11), SOURCE1);
+    let prompt = sent_prompt(&r1, 2);
+    let source_gap = ScMissingEvidence {
+        round_id: r1.round_id.clone(),
+        kind: "source".into(),
+        code: "sc_failure_source_unreadable".into(),
+        detail: "source 读取失败：逻辑前缀之后的行真实不可读".into(),
+        locator: None,
+    };
+    let entries = vec![
+        bound(1, &chain, &r1),
+        failure(2, &chain, &r1, ScFailureClass::Compile, vec!["E0308:3: mismatched types".into()], vec!["fix the compile error".into()], raw1.clone(), src1.clone()),
+        entry(3, format!("prompt/{}/2/sent", r1.round_id), &chain, ScFailureEvidenceEvent::PromptPrepared { evidence: prompt.clone() }),
+        decision(4, &chain, &r1, ScTeachingDecision::Granted),
+    ];
+    let prefix = interrupted_prefix();
+    let local = local_terminal(&r1, vec![started(&r1)], vec![source_gap.clone()]);
+    let package = build_sc_failure_repair_package(
+        &chain,
+        &read(entries, prefix.clone()),
+        ScTerminalInput::Local(&local),
+    )
+    .expect("Local 终局必须把真实 source 读失败投影成显式 missing，而不是继续谎报 Available");
+
+    let projected = ScEvidenceRef::Missing {
+        code: source_gap.code.clone(),
+        detail: source_gap.detail.clone(),
+        round_id: r1.round_id.clone(),
+    };
+    assert_eq!(package.completeness, ScPackageCompleteness::Incomplete);
+    assert_eq!(package.missing_evidence, vec![source_gap.clone()]);
+    assert_eq!(package.rounds.len(), 1);
+    assert_eq!(package.rounds[0].source, projected, "Local source 读失败必须投影成该轮显式 missing");
+    assert_eq!(package.rounds[0].raw, raw1, "raw 不是 source，投影不得碰它");
+    assert_eq!(package.rounds[0].prompts, vec![prompt.clone()], "prompts 与 source 投影无关");
+    assert_eq!(package.last_failure_source.source_round_id, r1.round_id);
+    assert_eq!(package.last_failure_source.source, projected, "last_failure_source 必须取同一投影后的该轮 source");
+    assert_eq!(package.last_provider_output, raw1);
+    assert_eq!(package.teaching_prompts, vec![prompt]);
+    assert_eq!(package.evidence_digest, sha_hex(&prefix), "digest 只由真实前缀字节决定");
+    assert_eq!(package.evidence_through_entry_key, "terminal");
+    assert_eq!(package.terminal_reason, LOCAL_REASON);
+    assert!(package.validate().is_ok(), "{:?}", package.validate());
+}
+
+#[test]
+fn local_duplicate_source_missing_with_conflicting_detail_is_rejected() {
+    let chain = chain();
+    let r1 = round(1, "node-compile", 11);
+    let first = ScMissingEvidence {
+        round_id: r1.round_id.clone(),
+        kind: "source".into(),
+        code: "sc_failure_source_unreadable".into(),
+        detail: "source 读取失败：locator 不存在".into(),
+        locator: None,
+    };
+    let second = ScMissingEvidence { detail: "source 读取失败：权限拒绝".into(), ..first.clone() };
+    let entries = vec![
+        bound(1, &chain, &r1),
+        failure(2, &chain, &r1, ScFailureClass::Compile, vec!["E0308:3: mismatched types".into()], vec!["fix the compile error".into()], available(&split_locator(11), RAW1), available(&split_locator(11), SOURCE1)),
+        decision(3, &chain, &r1, ScTeachingDecision::Granted),
+    ];
+    let local = local_terminal(&r1, vec![started(&r1)], vec![first, second]);
+    let error = build_sc_failure_repair_package(&chain, &read(entries, interrupted_prefix()), ScTerminalInput::Local(&local))
+        .expect_err("同一轮出现两个互相矛盾的 source missing 事实时不得任选其一");
+    assert_eq!(error.code, "sc_failure_round_evidence_inconsistent");
+    assert_eq!(error.round_id.as_deref(), Some(r1.round_id.as_str()));
 }
