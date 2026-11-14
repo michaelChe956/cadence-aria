@@ -227,6 +227,18 @@ pub const WORK_ITEM_PLAN_COMPILER_VERSION: &str = "work_item_plan_compiler/v1";
 pub const KEY_VALUE_SEPARATOR: &str = ": ";
 /// 显式 ID 行的分隔符。
 pub const IDENTIFIED_LINE_SEPARATOR: &str = " | ";
+/// 某个结构化 section 允许的 key 列表（诊断/提示词渲染用）。
+///
+/// 数据源单一：直接取 [`SECTION_KEYS`]，不另立第二份 key 列表；section 缺席
+/// 或无结构化 key ⇒ 空列表（调用方据此决定是否给出「允许集」）。
+pub fn section_allowed_keys(section: &str) -> Vec<&'static str> {
+    SECTION_KEYS
+        .iter()
+        .find(|(name, _)| *name == section)
+        .map(|(_, keys)| keys.to_vec())
+        .unwrap_or_default()
+}
+
 /// 未知结构化 key 的处理策略元数据。
 pub const UNKNOWN_STRUCTURED_KEY_POLICY: &str = "fail_closed";
 /// 自由文本 section 的处理策略元数据。

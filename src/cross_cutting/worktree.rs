@@ -306,14 +306,29 @@ pub fn validate_write_path(
     }
 }
 
-pub fn scopes_may_overlap(a: &[String], b: &[String], case_sensitive: bool) -> bool {
+/// 实际重叠的 scope 对（诊断回显用）。
+///
+/// 与 [`scopes_may_overlap`] **同源**：是否重叠仍只由 `scope_pair_may_overlap`
+/// 决定，本函数只把命中的对取出来回显——判定单源，不得另写一套重叠规则。
+pub fn overlapping_scope_pairs(
+    a: &[String],
+    b: &[String],
+    case_sensitive: bool,
+) -> Vec<(String, String)> {
     if a.is_empty() || b.is_empty() {
-        return false;
+        return Vec::new();
     }
-    a.iter().any(|left| {
-        b.iter()
-            .any(|right| scope_pair_may_overlap(left, right, case_sensitive))
-    })
+    a.iter()
+        .flat_map(|left| {
+            b.iter()
+                .filter(|right| scope_pair_may_overlap(left, right.as_str(), case_sensitive))
+                .map(|right| (left.clone(), right.clone()))
+        })
+        .collect()
+}
+
+pub fn scopes_may_overlap(a: &[String], b: &[String], case_sensitive: bool) -> bool {
+    !overlapping_scope_pairs(a, b, case_sensitive).is_empty()
 }
 
 fn scope_pair_may_overlap(left: &str, right: &str, case_sensitive: bool) -> bool {

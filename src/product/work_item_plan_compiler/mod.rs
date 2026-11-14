@@ -36,6 +36,9 @@ pub use validate::{validate_plan_candidate_ir, validate_work_item_intent_contrac
 #[cfg(test)]
 mod equivalence_tests;
 #[cfg(test)]
+#[path = "first_round_diagnostics_tests.rs"]
+mod first_round_diagnostics_tests;
+#[cfg(test)]
 mod ir_fault_tests;
 #[cfg(test)]
 mod tests;

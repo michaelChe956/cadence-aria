@@ -231,7 +231,9 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
                         UNKNOWN_STRUCTURED_KEY_CODE,
                         line,
                         "structured_line",
-                        "结构化 section 中每行都必须是 key/value 形式。",
+                        &format!(
+                            "结构化 section 中每行都必须是 key/value 形式（实际行：{raw_line}）。",
+                        ),
                         grammar::STRUCTURED_LINE_PREFIX,
                     ));
                     continue;
@@ -239,11 +241,16 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
                 let key = key.trim();
                 let value = value.trim();
                 if !grammar::STRUCTURED_KEYS.contains(&key) {
+                    // 带上该 section 的合法 key 集——作者据此一处自纠，
+                    // 不必反查 schema（与 lower_vocab 的 enum 诊断同风格）。
+                    let allowed = grammar::section_allowed_keys(section).join("|");
                     diagnostics.push(diagnostic(
                         UNKNOWN_STRUCTURED_KEY_CODE,
                         line,
                         key,
-                        "未知结构化 key 必须拒绝。",
+                        &format!(
+                            "未知结构化 key 必须拒绝（实际 key：{key}；本 section 允许：{allowed}）。",
+                        ),
                         "- kind: backend",
                     ));
                     continue;
@@ -272,7 +279,10 @@ fn parse_source(source: &str) -> (WorkItemPlanAst, Vec<CompilerDiagnostic>) {
                 UNKNOWN_STRUCTURED_KEY_CODE,
                 line,
                 "document_content",
-                "非空内容必须位于合法 section 中。",
+                &format!(
+                    "非空内容必须位于合法 section 中（实际行：{raw_line}；合法 section：{}）。",
+                    grammar::STRUCTURED_SECTIONS.join("、"),
+                ),
                 grammar::DOCUMENT_HEADING,
             )),
         }

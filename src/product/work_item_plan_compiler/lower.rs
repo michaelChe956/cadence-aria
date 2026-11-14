@@ -260,7 +260,7 @@ fn lower_item(
                     .collect(),
                 handoff_contract: HandoffContract {
                     required_fields: split_values(values("Handoff Schema", "required_fields")),
-                    provided_contract_refs: split_values(values(
+                    provided_contract_refs: split_provided_contract_refs(values(
                         "Handoff Schema",
                         "provided_contract_refs",
                     )),
@@ -1092,6 +1092,32 @@ pub(crate) fn split_value(value: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty() && *value != "[]")
         .map(str::to_string)
+        .collect()
+}
+
+/// `provided_contract_refs` 的**方言归一**（不改语义，可审计）。
+///
+/// 模型常把二元组写成 `(provider_wi, contract_id)`；本字段只收 contract_id
+/// （provider 由所属 Work Item 隐含）。不归一时，按 `,` 切分会把
+/// `(WI-001` 与 `c-x)` 当成两个 ref——同一 WI 写两行即造出「`(WI-001` 重复」
+/// 的**假阳性**（现场：每个 WI 恰好 1 条 duplicate，与该方言完全吻合）。
+///
+/// 归一只剥二元组外壳（`(x, y)` → `y`），不改任何其它取值；未匹配该形态的
+/// 值按既有 `split_value` 处理。
+pub(super) fn split_provided_contract_refs(values: Vec<&str>) -> Vec<String> {
+    values
+        .into_iter()
+        .flat_map(|value| {
+            let trimmed = value.trim();
+            let normalized = match (trimmed.starts_with('('), trimmed.ends_with(')')) {
+                (true, true) => match trimmed.split_once(',') {
+                    Some((_, rest)) => rest.trim().trim_end_matches(')').trim(),
+                    None => trimmed,
+                },
+                _ => trimmed,
+            };
+            split_value(normalized)
+        })
         .collect()
 }
 

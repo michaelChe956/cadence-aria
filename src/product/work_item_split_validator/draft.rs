@@ -5,6 +5,7 @@ use crate::product::work_item_contract::{
 };
 
 use super::*;
+use crate::cross_cutting::worktree::overlapping_scope_pairs;
 
 pub(crate) fn validate_canonical_contract_candidate(
     current: &WorkItemDraftCandidate,
@@ -356,24 +357,40 @@ pub(crate) fn validate_draft_direct_dependency_scopes(
         if !direct_dependency_ids.contains(dependency.logical_work_item_id.as_str()) {
             continue;
         }
-        if scopes_may_overlap(
-            &current
-                .canonical_contract_candidate
-                .write_policy
-                .exclusive_scopes,
-            &dependency
-                .canonical_contract_candidate
-                .write_policy
-                .exclusive_scopes,
-            true,
-        ) {
+        let current_scopes = &current
+            .canonical_contract_candidate
+            .write_policy
+            .exclusive_scopes;
+        let dependency_scopes = &dependency
+            .canonical_contract_candidate
+            .write_policy
+            .exclusive_scopes;
+        // 实际重叠对（与 `scopes_may_overlap` 同源判定）——诊断必须回显
+        // **哪两个 scope 相撞**，否则作者无从收窄（现场：只给 WI 名，
+        // 模型只能整篇重写）。
+        let overlapping = overlapping_scope_pairs(current_scopes, dependency_scopes, true);
+        if !overlapping.is_empty() {
+            let shown = overlapping
+                .iter()
+                .take(3)
+                .map(|(left, right)| format!("{left} ↔ {right}"))
+                .collect::<Vec<_>>()
+                .join("；");
+            let more = overlapping.len().saturating_sub(3);
+            let suffix = if more > 0 {
+                format!("（另有 {more} 对）")
+            } else {
+                String::new()
+            };
             findings.push(error(
                 PlanningFailureKind::Unknown {
                     code: "direct_dependency_scope_conflict".to_string(),
                 },
                 "direct_dependency_scope_conflict",
                 format!(
-                    "draft {} overlaps exclusive write scopes with direct dependency {}",
+                    "draft {} 与直依赖 {} 的 exclusive write scope 重叠：{shown}{suffix}。\
+                     目录型 scope（以 / 或 /** 结尾）覆盖整个子树；请收窄到本 WI 真写的文件路径，\
+                     或把该子树整体让给唯一 WI（两两不得重叠，依赖序亦然）。",
                     current.outline_id, dependency.outline_id
                 ),
                 vec![current.outline_id.clone(), dependency.outline_id.clone()],
