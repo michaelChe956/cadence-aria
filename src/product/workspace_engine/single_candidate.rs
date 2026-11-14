@@ -598,6 +598,12 @@ impl WorkspaceEngine {
     /// （摘要携带失败原因）、广播 HumanGateOpened——会话回到可操作状态（人工可再
     /// 反馈修订或放弃），不再静默滞留 running。其余任何形态零副作用：非委托态的
     /// 迟到/无关失败不改写会话状态。
+    ///
+    /// C（陈旧人工门）：本路径开出的门是**暂态**门——接力可能随后真的跑起来
+    /// （现场：返修接力瞬时启动失败后真的跑成功，人工门却一直挂着，会话永远
+    /// 停在 waiting_for_human）。接力接管时由
+    /// `single_candidate_stale_gate::close_stale_delegated_rerun_gate` 收口本门
+    /// （不新造第二套门状态机：复用既有门节点与 `WaitingForHuman` 门开态证据）。
     pub(crate) async fn recover_delegated_author_rerun_failure(&mut self, message: &str) {
         // durable 状态必须仍在途族（Running）——已经回落到 WaitingForHuman 的会话
         // （例如本守卫运行期已收口）不再重复开门；phase 保持 Generate 不构成重入。
@@ -608,7 +614,10 @@ impl WorkspaceEngine {
         {
             return;
         }
-        let summary = format!("SC 返修接力启动失败，已回落人工门：{message}");
+        let summary = format!(
+            "{}：{message}",
+            WorkspaceEngine::DELEGATED_RERUN_GATE_SUMMARY
+        );
         let _ = self
             .event_tx
             .send(EngineEvent::Error {

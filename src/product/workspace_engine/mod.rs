@@ -121,6 +121,7 @@ mod sc_failure_artifacts;
 mod sc_teaching_source_block;
 mod session_state;
 mod single_candidate;
+mod single_candidate_stale_gate;
 pub(crate) mod single_candidate_structure_failure;
 mod types;
 
