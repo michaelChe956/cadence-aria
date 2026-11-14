@@ -177,6 +177,13 @@ jobs:
         with:
           name: ${{ github.ref_name }}
           generate_release_notes: true
+          # 带 -rc/-beta 等后缀的版本是**预发布**，必须标 prerelease：
+          # 否则 GitHub 会把它当正式版，占住 "Latest release" 徽章，
+          # 读者按「下载最新版本」会拿到候选版
+          # （2026-11-14 实测：v0.1.6-rc1 发布后 prerelease=false，
+          #   直到 v0.1.6 正式版发布才把徽章顶掉）。
+          # npm 侧对应面在上面的 dist-tag 解析步骤（预发布挂 `next`）。
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist-release/aria-linux-x64.tar.gz
             dist-release/aria-darwin-x64.tar.gz
