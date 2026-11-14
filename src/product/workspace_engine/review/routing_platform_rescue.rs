@@ -87,6 +87,25 @@ pub(super) fn merge_platform_compile_failure_origin(
 /// 内联判据同源：全部 actionable（分类后非 Advisory）finding 都带平台前缀
 /// [`PLATFORM_COMPILE_FAILURE_FINDING_PREFIX`]，且至少一条。混入任何模型
 /// finding（无前缀）⇒ 非平台轮（评审 finding 驱动，A 池口径不变）。
+/// 本轮是否含**平台编译失败来源**（判定单源：finding `message` 的平台前缀
+/// [`PLATFORM_COMPILE_FAILURE_FINDING_PREFIX`]，按 finding 逐条生效——与
+/// [`merge_platform_compile_failure_origin`] 的内联判据同源，不得改成按轮次
+/// 或按 severity 豁免）。
+///
+/// 用途：混合轮（平台 finding + 模型 finding）里平台那半已被上游改写链消费，
+/// 到闸门时 findings 只剩模型条目；唯有本判定能让闸门知道「本轮仍含平台来源」，
+/// 从而保持混合轮落人工门（既有红线 2）。
+pub(in crate::product::workspace_engine::review) fn has_platform_compile_failure_origin(
+    verdict: &ReviewVerdict,
+) -> bool {
+    verdict.findings.iter().any(|finding| {
+        finding.is_actionable()
+            && finding
+                .message
+                .starts_with(PLATFORM_COMPILE_FAILURE_FINDING_PREFIX)
+    })
+}
+
 pub(in crate::product::workspace_engine::review) fn is_platform_compile_failure_round(
     findings: &[ClassifiedFinding],
 ) -> bool {

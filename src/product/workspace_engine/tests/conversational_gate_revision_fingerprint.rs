@@ -33,6 +33,7 @@ fn conversational_gate_revision_repeated_fingerprint_returns_same_gate() {
     };
     assert!(route_repeated_human_gate_fingerprint(&snapshot, &fingerprint).is_ok());
     let context = GateSnapshotContext {
+        platform_origin_present: false,
         history: RunHistory {
             manual_repairs_used: 1,
             ..RunHistory::default()

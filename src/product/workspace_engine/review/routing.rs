@@ -15,9 +15,10 @@ use crate::product::work_item_plan_policy::{
 #[path = "routing_platform_rescue.rs"]
 pub(super) mod routing_platform_rescue;
 use routing_platform_rescue::{
-    classification_error_action, gate_snapshot_author_budget, is_platform_compile_failure_round,
-    legacy_work_item_plan_repair_finding, merge_platform_compile_failure_origin,
-    platform_gate_carried_budget, rescue_platform_compile_failure_repair,
+    classification_error_action, gate_snapshot_author_budget, has_platform_compile_failure_origin,
+    is_platform_compile_failure_round, legacy_work_item_plan_repair_finding,
+    merge_platform_compile_failure_origin, platform_gate_carried_budget,
+    rescue_platform_compile_failure_repair,
 };
 use routing_scope::single_candidate_review_cycle;
 impl WorkspaceEngine {
@@ -567,6 +568,9 @@ impl WorkspaceEngine {
         let gate_budget =
             gate_snapshot_author_budget(self.lifecycle_store.as_ref(), &self.session.session_id);
         let platform_round = is_platform_compile_failure_round(&findings);
+        // 本轮是否含平台编译失败来源：verdict 此刻仍完整（平台那半尚未被改写链
+        // 消费），是识别「混合轮」的唯一时机——到闸门时 findings 只剩模型条目。
+        let platform_origin_present = has_platform_compile_failure_origin(verdict);
         let mut history = self.session.run_history.clone();
         if let Err(error) = decision
             .history_delta
@@ -582,7 +586,7 @@ impl WorkspaceEngine {
                 &invocation,
                 &cycle_key,
                 findings,
-                Some(gate_budget),
+                (platform_origin_present, Some(gate_budget)),
             );
             return Some((invocation, action, history));
         }
@@ -593,7 +597,7 @@ impl WorkspaceEngine {
             &invocation,
             &cycle_key,
             findings,
-            Some(gate_budget),
+            (platform_origin_present, Some(gate_budget)),
         );
         // SG6b（Interfaces「同 grant route 先于旧 policy/repair
         // reservation」）：SC 会话存在结构授权窗口（durable

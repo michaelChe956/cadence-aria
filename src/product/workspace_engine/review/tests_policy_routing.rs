@@ -273,6 +273,7 @@ fn classified_finding(class: FindingClass, message: &str) -> ClassifiedFinding {
 
 fn gate_context(trigger: HumanReason) -> GateSnapshotContext {
     GateSnapshotContext {
+        platform_origin_present: false,
         history: RunHistory {
             repairs_used: 1,
             manual_repairs_used: 2,

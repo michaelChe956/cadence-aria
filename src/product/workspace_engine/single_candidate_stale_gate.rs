@@ -54,9 +54,11 @@ impl WorkspaceEngine {
         }
         // 接力是否真的接管接续路径：durable repair 预领已被消费（不再是 Reserved）。
         // 预领仍 Reserved ⇒ 接力尚未接管，人工出口必须保留（本方法零副作用）。
-        if !expected.repair_reservation.as_ref().is_some_and(|reservation| {
-            reservation.state != RepairReservationState::Reserved
-        }) {
+        if !expected
+            .repair_reservation
+            .as_ref()
+            .is_some_and(|reservation| reservation.state != RepairReservationState::Reserved)
+        {
             return Ok(false);
         }
         let Ok(nodes) = store.load_timeline_nodes(&self.session.session_id) else {
@@ -67,10 +69,9 @@ impl WorkspaceEngine {
             .find(|node| {
                 node.node_type == crate::web::workspace_ws_types::TimelineNodeType::HumanConfirm
                     && node.status == crate::web::workspace_ws_types::TimelineNodeStatus::Active
-                    && node
-                        .summary
-                        .as_deref()
-                        .is_some_and(|summary| summary.starts_with(Self::DELEGATED_RERUN_GATE_SUMMARY))
+                    && node.summary.as_deref().is_some_and(|summary| {
+                        summary.starts_with(Self::DELEGATED_RERUN_GATE_SUMMARY)
+                    })
             })
             .map(|node| node.node_id.clone())
         else {

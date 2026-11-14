@@ -42,7 +42,9 @@ impl LifecycleStore {
                 || !expected
                     .repair_reservation
                     .as_ref()
-                    .is_some_and(|reservation| reservation.state != RepairReservationState::Reserved)
+                    .is_some_and(|reservation| {
+                        reservation.state != RepairReservationState::Reserved
+                    })
             {
                 return Err(ProductStoreError::InvalidRecord {
                     kind: "delegated_rerun_gate_close",

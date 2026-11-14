@@ -335,13 +335,11 @@ pub(crate) async fn run_single_candidate_author(
     // C（陈旧人工门）：接力被放行（ordinary 或 fresh）＝接续路径已回到接力手上 ⇒
     // 收口由 `recover_delegated_author_rerun_failure` 回落开出的陈旧人工门（否则会话
     // 永远停在 waiting_for_human）。收口失败只发可见错误事件，不阻断已放行的接力。
-    if should_start {
-        if let Err(message) = engine.close_stale_delegated_rerun_gate().await {
-            tracing::error!(
-                %message,
-                "stale delegated rerun human gate was not closed after the relay took over"
-            );
-        }
+    if should_start && let Err(message) = engine.close_stale_delegated_rerun_gate().await {
+        tracing::error!(
+            %message,
+            "stale delegated rerun human gate was not closed after the relay took over"
+        );
     }
     let lifecycle = LifecycleStore::new(run_context.app_paths.clone());
     let request = build_work_item_plan_generate_request(engine, &lifecycle).map_err(|error| {

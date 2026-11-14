@@ -17,6 +17,10 @@ pub struct GateSnapshotContext {
     /// 本次评审工件的 review-cycle 身份（`RunHistory::review_cycles` 的键）。
     /// 内容级缺口的额外自动返修额度逐工件判定；缺席 ⇒ 不开放（保守交门）。
     pub cycle_key: Option<String>,
+    /// 本轮是否含**平台编译失败来源**（上游在 verdict 完整时按平台前缀逐条判定）。
+    /// 混合轮（平台 finding + 模型 finding）到闸门时平台那半已被改写链消费，
+    /// findings 只剩模型条目；本字段是闸门识别混合轮的唯一信号。
+    pub platform_origin_present: bool,
     /// Task 4（工作包 1.5）：统一权威余额（durable 读侧组装）。平台编译
     /// 失败轮 ⇒ 快照净余额 := 该值；其它轮保持「新 logical gate 初值」公式。
     pub author_budget_available: Option<u32>,
@@ -132,6 +136,13 @@ fn content_level_repair_available(context: &GateSnapshotContext, reason: HumanRe
     if !is_content_level_human_reason(reason) {
         return false;
     }
+    // 含**平台编译失败来源**的轮次不走内容级额外返修：平台轮有独立重写链，
+    // 且「按 finding 前缀豁免」不得升级为按轮次豁免——混合轮（平台 finding +
+    // 模型 finding）仍须落人工门（既有红线 2）。该事实由上游在 verdict 仍完整时
+    // 判定并沿链传入（平台那半到闸门时已被改写链消费，findings 里看不到）。
+    if context.platform_origin_present {
+        return false;
+    }
     if !context
         .findings
         .iter()
@@ -209,7 +220,8 @@ pub(super) fn route_outcome_from_decision(
     invocation: &ReviewInvocationScope,
     cycle_key: &str,
     findings: Vec<ClassifiedFinding>,
-    author_budget_available: Option<u32>,
+    // （本轮是否含平台编译失败来源，平台轮门快照余额）
+    platform_and_budget: (bool, Option<u32>),
 ) -> RoutingAction {
     let (outcome, outcome_findings, repeated_fingerprints, trigger) = match &decision.outcome {
         PlanOutcome::HumanRequired {
@@ -246,7 +258,8 @@ pub(super) fn route_outcome_from_decision(
             repeated_fingerprints,
             trigger,
             cycle_key: Some(cycle_key.to_owned()),
-            author_budget_available,
+            platform_origin_present: platform_and_budget.0,
+            author_budget_available: platform_and_budget.1,
         },
     )
 }

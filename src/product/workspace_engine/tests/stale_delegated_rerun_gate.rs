@@ -26,12 +26,8 @@ use crate::web::workspace_ws_types::{TimelineNodeStatus, TimelineNodeType};
 
 /// 铺出「委托返修接力孤儿」形态：SC 流、phase=Generate、status=Running、
 /// repair 预领 `Reserved`（接力 spawn 从未落地 ⇒ provider 可证明未启动）。
-fn stale_delegated_rerun_gate_fixture() -> (
-    tempfile::TempDir,
-    LifecycleStore,
-    String,
-    WorkspaceEngine,
-) {
+fn stale_delegated_rerun_gate_fixture()
+-> (tempfile::TempDir, LifecycleStore, String, WorkspaceEngine) {
     let (tmp, lifecycle, plan_id, mut engine) =
         make_work_item_plan_engine_with_accepted_contract_drafts();
     let mut record = lifecycle
@@ -175,7 +171,10 @@ async fn stale_delegated_rerun_gate_stays_open_when_the_relay_never_takes_over()
         .get_workspace_session(&engine.session().session_id)
         .expect("durable session after gate opened");
     assert_eq!(
-        durable.repair_reservation.as_ref().map(|reservation| reservation.state),
+        durable
+            .repair_reservation
+            .as_ref()
+            .map(|reservation| reservation.state),
         Some(RepairReservationState::Reserved),
         "未接管的接力预领必须保持 Reserved"
     );

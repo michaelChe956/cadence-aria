@@ -289,7 +289,7 @@ async fn compile_failure_after_passed_initial_review_delegates_author_rerun() {
 /// 红线 1：Verification 相位下，**模型产出**的新 actionable finding 仍必落
 /// 人工门——new-findings 守卫不因本修复整体放宽。
 #[tokio::test]
-async fn model_finding_in_verification_still_lands_human_gate() {
+async fn pure_content_model_finding_in_verification_gets_one_more_repair() {
     let (_tmp, lifecycle, mut engine, mut event_rx, _cycle_key) = compile_failure_fixture(0).await;
 
     let model_finding = ReviewFinding {
@@ -323,20 +323,23 @@ async fn model_finding_in_verification_still_lands_human_gate() {
     let persisted = lifecycle
         .get_workspace_session(&engine.session().session_id)
         .expect("load persisted session");
-    assert_ne!(
+    // 2026-11-15 用户裁决：**纯内容级**缺口应再自动返修一次（逐工件、有界；
+    // 平台 finding 混入的混合轮仍落人工门，见
+    // mixed_platform_and_model_findings_still_land_human_gate）。
+    assert_eq!(
         persisted.single_candidate_phase,
         Some(SingleCandidatePhase::Generate),
-        "模型产出的新 finding 不得触发自动重写委托"
+        "纯内容级模型 finding 在 Verification 相位应再触发一次自动重写委托"
     );
     assert!(
-        persisted.human_gate_snapshot.is_some(),
-        "模型产出的新 finding 在 Verification 相位必须落人工门（new-findings 守卫不放宽）"
+        persisted.human_gate_snapshot.is_none(),
+        "内容级缺口走自动返修时不得同时落人工门"
     );
     assert!(
-        !drain_engine_events(&mut event_rx)
+        drain_engine_events(&mut event_rx)
             .iter()
             .any(|event| matches!(event, EngineEvent::ProviderRunRequested { .. })),
-        "不得请求任何 provider run"
+        "内容级缺口必须真实请求一次 provider run（返修轮）"
     );
 }
 

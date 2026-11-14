@@ -54,7 +54,8 @@ fn human_required(context: &GateSnapshotContext, reason: HumanReason) -> PlanOut
 }
 
 #[test]
-fn content_level_human_required_triggers_the_extra_aggregate_repair_before_its_cycle_budget_is_used() {
+fn content_level_human_required_triggers_the_extra_aggregate_repair_before_its_cycle_budget_is_used()
+ {
     let max_repairs = RunBudgets::default().max_repairs;
     assert!(max_repairs > 0, "夹具前提：A 池默认额度非零");
     for reason in [
@@ -107,7 +108,11 @@ fn safety_human_reasons_never_open_the_extra_aggregate_repair() {
     ] {
         // 额度 fresh（repairs_used=0）：额度本身不是拦截原因，原因闸门才是。
         let context = cycle_context(reason, "sc:candidate:artifact_a", 0, true);
-        let action = route_outcome(human_required(&context, reason), RunPolicy::AutoIfValid, context);
+        let action = route_outcome(
+            human_required(&context, reason),
+            RunPolicy::AutoIfValid,
+            context,
+        );
         let RoutingAction::StopNeedsHuman { snapshot } = action else {
             panic!("{reason:?} 属安全类结论，不得额外返修，实际 {action:?}");
         };
@@ -125,10 +130,10 @@ fn extra_aggregate_repair_allowance_is_scoped_per_artifact_cycle() {
         RunBudgets::default().max_repairs,
         true,
     );
-    context.history.review_cycles.insert(
-        "draft:artifact_b".to_owned(),
-        ReviewCycleState::default(),
-    );
+    context
+        .history
+        .review_cycles
+        .insert("draft:artifact_b".to_owned(), ReviewCycleState::default());
 
     let mut exhausted = context.clone();
     exhausted.cycle_key = Some("draft:artifact_a".to_owned());
