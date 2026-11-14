@@ -274,7 +274,9 @@ fn render_teaching_reredrive_prompt(
          不要重新调研、不要读取其它文件），立即输出完整 work-item-plan markdown source；\
          第一行即文档标题 `# Work Item Plan`。\
          只改动失败事实指出的位置，其余内容逐字保留；不要回显、复述或重复上面围栏内的源码，\
-         也不要输出围栏或任何多余 heading（实测：回显源码会导致 heading/section 结构错误）。\n",
+         也不要输出围栏或任何多余 heading（实测：回显源码会导致 heading/section 结构错误）。\
+         结构化 section 中每行必须是 `- key: value`（半角冒号+空格）；\
+         provided_contract_refs 同一 WI 内唯一（重复即拒）。\n",
     );
     Ok(prompt)
 }
