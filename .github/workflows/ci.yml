@@ -1,7 +1,13 @@
 name: Rust CI
 
 on:
+  # 同一 commit 此前会在 push 与 pull_request 两个事件下各跑一遍**完全相同**的
+  # 作业：既成倍占用 runner 容量（长作业被 GitHub 回收的概率随之升高），
+  # 又让 PR 检查列表出现成对重复条目。分支检查交给 pull_request 事件即可，
+  # push 只保留 main（合并后主干校验）。
   push:
+    branches:
+      - main
   pull_request:
 
 env:
