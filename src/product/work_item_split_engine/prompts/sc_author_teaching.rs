@@ -77,7 +77,7 @@ pub(crate) fn work_item_plan_markdown_reference_discipline(
          require_all=全部覆盖（缺一项→required_capability_missing）；require_any=至少一项相交（交集空→required_capability_missing）。\n\
          Handoff Schema 显式输出 required_fields、provided_contract_refs、reviewer_check_refs 三字段且只允许这三个 key（其他 key 如 requested_fields → unknown_structured_key 拒绝）。\n\
          Outputs 与 Handoff Schema 相互独立：每个 Work Item 的 Outputs 至少声明一个契约（contract_id + capabilities），永不为空。\n\
-         provided_contract_refs 列出会被下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费的契约引用；无交接时写 []。\n\
+         provided_contract_refs 列出会被下游 Work Item 的 input_contracts 以 (provider_logical_work_item_id, contract_id) 逐字二元组消费的契约引用；同 WI 内唯一（重复即拒）；无交接时写 []。\n\
          每个被 tasks 的 requirement_refs 引用的 requirement_id，在本 item 的 Traceability section 有逐字相同的登记行；登记值只来自 [design_requirements] 清单。\n\n"
     )
 }
@@ -245,7 +245,20 @@ pub(crate) fn work_item_plan_confirmed_member_order_teaching(
 
 #[cfg(test)]
 mod section_keys_prompt_tests {
-    use super::{grammar, work_item_plan_markdown_grammar};
+    use super::{
+        grammar, work_item_plan_markdown_grammar, work_item_plan_markdown_reference_discipline,
+    };
+
+    /// 首轮 prompt 必须教 provided_contract_refs 在单 WI 内唯一——线上实测出现过
+    /// `duplicate_handoff_provided_contract_ref` 直接终态失败（无教学资格）。
+    #[test]
+    fn first_round_prompt_requires_unique_provided_contract_refs() {
+        let discipline = work_item_plan_markdown_reference_discipline(None);
+        assert!(
+            discipline.contains("同 WI 内唯一"),
+            "首轮引用纪律必须声明 provided_contract_refs 在单 WI 内唯一: {discipline}"
+        );
+    }
 
     /// 首轮 prompt 必须给出两个此前缺失的 enum 完整值域（值取自同一常量，不另写）。
     #[test]
