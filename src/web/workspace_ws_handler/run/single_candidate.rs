@@ -142,6 +142,8 @@ const PROVIDER_TRUST_MISSING_WAITING_REASON: &str = "provider_trust_missing";
 mod single_candidate_baseline_tree;
 pub(super) mod single_candidate_compile_preflight;
 mod single_candidate_delivery;
+#[path = "single_candidate_fresh_native.rs"]
+mod single_candidate_fresh_native;
 
 use single_candidate_compile_preflight::{
     compile_failure_surface, emit_contract_autorepair_instructions_event,
@@ -537,52 +539,48 @@ pub(crate) async fn run_single_candidate_author(
             })
     };
     let revision_verdict = engine.single_candidate_pending_revision_verdict();
+    // T6：SC 评审返修轮（pending verdict 已回灌 + durable 上一版 source 在场）改
+    // 入口 native fresh——评审裁决后原会话不可 resume（网关稳定拒绝、零 spawn），
+    // 故与显式 fresh 同形：新物理 native + 自足 prompt；首轮与判定不成立的轮次
+    // 保持原 resume 路径逐字节零变化。
+    let revision_fresh_source_ref = if is_fresh_context {
+        None
+    } else {
+        engine.single_candidate_revision_fresh_native_source_ref()
+    };
+    let uses_fresh_native = revision_fresh_source_ref.is_some();
     // B2c（Task 5.5，设计 §5.3 sc_author 行）：fresh 重入的返修轮 prompt
-    // 自足——全新 provider 会话（resume=None）无旧会话历史可依赖，按
-    // payload source ref 装载 durable 上一版 candidate source 全文，走
-    // fresh 返修 builder（[previous_source] 先于 [review_revision]）；正常
-    // resume 的修订 prompt 与首轮 prompt 逐字节零变化。
-    let previous_source_for_fresh_revision: Option<String> = if is_fresh_context
+    // 自足——全新 provider 会话（resume=None）无旧会话历史可依赖，按 source ref
+    // 装载 durable 上一版 candidate source 全文，走 fresh 返修 builder
+    // （[previous_source] 先于 [review_revision]）；正常 resume 的修订 prompt
+    // 与首轮 prompt 逐字节零变化。T6：评审返修轮同源自足（ref 来自 durable 会话）。
+    let previous_source_revision_ref: Option<String> = if is_fresh_context
         && revision_verdict.is_some()
     {
-        let source_ref = match &recovery_entry {
+        match &recovery_entry {
             SingleCandidateAuthorRecoveryEntry::LcFreshContext {
                 source_revision_ref: Some(source_ref),
-            } => source_ref.clone(),
+            } => Some(source_ref.clone()),
             _ => {
                 return Err(SingleCandidateProviderRunError::Message(
                     "sc_author fresh revision round requires the payload source revision ref to carry the previous candidate source"
                         .to_string(),
                 ));
             }
-        };
-        let (project_id, issue_id, plan_id) = {
-            let session = engine.session();
-            (
-                session.project_id.clone(),
-                session.issue_id.clone(),
-                session.entity_id.clone(),
-            )
-        };
-        let scope = crate::product::work_item_plan_source_store::SourceStoreScope {
-            project_id,
-            issue_id,
-            plan_id,
-        };
-        Some(
-            crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
-                lifecycle.app_paths(),
-            )
-            .get_source_revision(&scope, &source_ref)
-            .map_err(|error| {
-                SingleCandidateProviderRunError::Message(format!(
-                    "load previous source for sc fresh revision failed: {error:?}"
-                ))
-            })?
-            .source,
-        )
+        }
     } else {
-        None
+        revision_fresh_source_ref
+    };
+    let previous_source_for_fresh_revision: Option<String> = match previous_source_revision_ref {
+        Some(source_ref) => {
+            let source = single_candidate_fresh_native::load_previous_candidate_source(
+                engine,
+                &lifecycle,
+                &source_ref,
+            )?;
+            Some(source)
+        }
+        None => None,
     };
     // D5 事前：装载基线树注入 `baseline:` 段（装载面见 single_candidate_baseline_tree）。
     let baseline_tree_section = if cfg!(feature = "wig-d5-before") {
@@ -647,7 +645,7 @@ pub(crate) async fn run_single_candidate_author(
         &engine.session().session_id,
         "full_markdown_author",
     );
-    let prompt_event_detail = match (&revision_verdict, is_fresh_context) {
+    let prompt_event_detail = match (&revision_verdict, is_fresh_context || uses_fresh_native) {
         (Some(_), true) => {
             "发送给 SingleCandidate markdown author 的显式 fresh 返修提示词（全新会话自足：上一版 source 全文＋reviewer findings 回灌）"
         }
@@ -659,7 +657,7 @@ pub(crate) async fn run_single_candidate_author(
     // B2c（Task 5.5，设计 §5.3 sc_author 行）：fresh 重入走 fresh input
     // builder——resume_provider_session_id 结构性为 None（全新物理 native，
     // 不回捞旧会话）；正常 run 维持 resume 候选路径零变化。
-    let provider_input = if is_fresh_context {
+    let provider_input = if is_fresh_context || uses_fresh_native {
         engine.build_work_item_plan_streaming_input_fresh(
             crate::product::work_item_split_engine::types::provider_name_to_type(&author_provider),
             full_prompt.clone(),

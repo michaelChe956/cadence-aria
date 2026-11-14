@@ -549,6 +549,33 @@ impl WorkspaceEngine {
         })
     }
 
+    /// T6（SC 评审返修轮入口 native fresh）：评审裁决后的 author 返修轮是否必须以
+    /// **全新物理 native** 启动（fresh input builder，`resume_provider_session_id`
+    /// 结构性为 None）。
+    ///
+    /// 成立时返回 durable 会话登记的上一版 candidate source revision ref——调用方
+    /// 用它装载 source 全文注入返修 prompt（全新 native 无旧会话历史可依赖，prompt
+    /// 必须自足）。条件全部成立才成立：SC 流程（`flow_kind`，由
+    /// `single_candidate_pending_revision_verdict` 同源判定）、`phase=Generate`
+    /// （评审已把 author 重跑委托给接力）、pending revision verdict（返修轮而非首轮）、
+    /// durable `work_item_plan_source_revision_ref` 在场。任一不成立 ⇒ `None`：调用方
+    /// 保留原 resume 路径（fail-closed，不强行 fresh、不改网关 resume 语义）。
+    pub(crate) fn single_candidate_revision_fresh_native_source_ref(&self) -> Option<String> {
+        if self.single_candidate_pending_revision_verdict().is_none()
+            || self.session.single_candidate_phase
+                != Some(crate::product::models::SingleCandidatePhase::Generate)
+        {
+            return None;
+        }
+        let source_ref = self.session.work_item_plan_source_revision_ref.clone();
+        if source_ref.is_none() {
+            tracing::warn!(
+                "SC 评审返修轮缺少 durable 上一版 source 引用（work_item_plan_source_revision_ref 为空），保留原 resume 路径（不强行 fresh）"
+            );
+        }
+        source_ref
+    }
+
     /// SC 修订接力顶杀在途 run 根修（oracle 候选6）：`CrossReview` 阶段对
     /// SingleCandidate 流是二义的——`phase=Evaluate` 表示候选已生成、待驱评审
     /// （在途 run 的 followups 自续 reviewer）；`phase=Generate` 表示评审已裁决
