@@ -57,6 +57,178 @@ const STRUCTURE_BUILDER_ID: &str = "author_structure_repair_prompt";
 /// 教学 prompt 超预算的稳定码（真实未请求消费窗口，不是假 Denied）。
 const SC_TEACHING_PROMPT_BUDGET_EXCEEDED: &str = "sc_teaching_prompt_budget_exceeded";
 
+/// 教学轮入口准入闸原因码（B1：上一轮未严格 completed）。
+pub(super) const SC_TEACHING_PREVIOUS_ROUND_NOT_COMPLETED: &str =
+    "sc_teaching_previous_round_not_completed";
+/// 教学轮入口准入闸原因码（B1/B2/B3：上一轮 durable 事实不可严格读取）。
+pub(super) const SC_TEACHING_PREVIOUS_ROUND_UNAVAILABLE: &str =
+    "sc_teaching_previous_round_unavailable";
+/// 教学轮入口准入闸原因码（B2/B3：上一轮 raw 读回与引用不同代/不一致）。
+pub(super) const SC_TEACHING_PREVIOUS_ROUND_DRIFTED: &str = "sc_teaching_previous_round_drifted";
+/// 教学轮入口准入闸原因码（B4：教学 claim 不是未启动的唯一在途 claim）。
+pub(super) const SC_TEACHING_CLAIM_NOT_ADMITTED: &str = "sc_teaching_claim_not_admitted";
+
+/// 教学轮入口准入闸（B1–B4；B5 由 transport 的 `classify_sc_round_launch`
+/// 在 `Ready` 分支保证：新轮 run `running` 且同 `role_run_seq` 审计分区严格为空）。
+///
+/// 只有**全部可证明**时才返回 `None`（允许启动）；任一不可证明 ⇒
+/// `Some((reason_code, detail))`，调用方把 `Ready` 降级为 `Waiting`（真实
+/// 等待，不启动、不落 Failed、不新造终态，留可读原因）。
+///
+/// 读的 durable 字段：
+/// - B1 上一轮 completed：`read_work_item_split_provider_run_status` 的 `status`
+///   必须为 `completed`，且 `provider_run_ref` 与 `run_ref` 逐字相等；
+///   `ActualStarted`/`LaunchUnknown`/`Failed`/不可读 一律拒绝。
+/// - B2 上一轮 raw 严格读回：`read_sc_split_output` 正文的 sha256 与字节数必须
+///   与上一轮 `ScEvidenceRef::Available` 逐字一致。
+/// - B3 同代：引用 `locator` 必须等于本轮的 canonical split locator（不同代拒绝）。
+/// - B4 教学 claim：会话 `sc_generation_teaching_windows.last()` 必须非 Closed、
+///   末 attempt `lifecycle == Claimed` 且其 `launch_ledger_key` 占位条目
+///   `started == false`（真实启动/启动未知/终态/已关窗 一律拒绝）。
+///
+/// `previous` 为 `None`/`Missing` 是分类层的合成态（该轮没有可核验的已交付
+/// raw；真实教学臂恒带 `Available`）：无 B1–B3 可闸事实，只做 B4。
+/// **不依赖 `provider_start_ledger` 的长度**：B1 读 split run 记录、B4 只按
+/// `launch_ledger_key` 精确取占位条目的 `started` 布尔。
+pub(super) fn sc_teaching_admission_failure(
+    lifecycle: &LifecycleStore,
+    scope: &crate::web::workspace_ws_types::ScFailureScope,
+    previous: Option<&(ScEvidenceRef, ScRoundIdentity)>,
+) -> Option<(&'static str, String)> {
+    if let Some((
+        ScEvidenceRef::Available {
+            locator,
+            sha256,
+            bytes,
+        },
+        round,
+    )) = previous
+    {
+        let handle =
+            crate::product::work_item_split_engine::parse::WorkItemSplitProviderRunHandle {
+                run_ref: round.run_ref.clone(),
+                workspace_session_id: round.workspace_session_id.clone(),
+                role_run_seq: round.role_run_seq,
+            };
+        match lifecycle.read_work_item_split_provider_run_status(&handle) {
+            Ok(snapshot) if snapshot.provider_run_ref == round.run_ref => {
+                if snapshot.status != "completed" {
+                    return Some((
+                        SC_TEACHING_PREVIOUS_ROUND_NOT_COMPLETED,
+                        format!(
+                            "上一轮未严格 completed（status={}，轮 {}）",
+                            snapshot.status, round.round_id
+                        ),
+                    ));
+                }
+            }
+            Ok(_) => {
+                return Some((
+                    SC_TEACHING_PREVIOUS_ROUND_NOT_COMPLETED,
+                    format!(
+                        "上一轮 run 记录的 provider_run_id 与 run_ref 不一致（轮 {}）",
+                        round.round_id
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Some((
+                    SC_TEACHING_PREVIOUS_ROUND_UNAVAILABLE,
+                    format!("上一轮 run 记录不可读（轮 {}）：{error}", round.round_id),
+                ));
+            }
+        }
+        let expected_locator =
+            crate::product::lifecycle_store::sc_failure_evidence::sc_failure_split_locator(
+                &round.workspace_session_id,
+                round.role_run_seq,
+            );
+        if !locator.is_empty() && *locator != expected_locator {
+            return Some((
+                SC_TEACHING_PREVIOUS_ROUND_DRIFTED,
+                format!(
+                    "上一轮 raw 引用 locator 与本轮物理 run 不同代（轮 {}）",
+                    round.round_id
+                ),
+            ));
+        }
+        let raw = match lifecycle.read_sc_split_output(scope, round) {
+            Ok(raw) => raw,
+            Err(error) => {
+                return Some((
+                    SC_TEACHING_PREVIOUS_ROUND_UNAVAILABLE,
+                    format!("上一轮 raw 不可严格读回（轮 {}）：{error}", round.round_id),
+                ));
+            }
+        };
+        if sc_sha256(&raw) != *sha256 || raw.len() as u64 != *bytes {
+            return Some((
+                SC_TEACHING_PREVIOUS_ROUND_DRIFTED,
+                format!(
+                    "上一轮 raw 读回与引用摘要/字节不一致（轮 {}）",
+                    round.round_id
+                ),
+            ));
+        }
+    }
+    let record = match lifecycle.get_workspace_session(&scope.session_id) {
+        Ok(record) => record,
+        Err(error) => {
+            return Some((
+                SC_TEACHING_CLAIM_NOT_ADMITTED,
+                format!("会话不可读，无法核验教学 claim：{error}"),
+            ));
+        }
+    };
+    let Some(window) = record.sc_generation_teaching_windows.last() else {
+        // 无教学窗口 = 本路径无 durable claim 事实（分类层合成态），不闸。
+        return None;
+    };
+    if matches!(
+        window.status,
+        crate::product::work_item_plan_policy::ScTeachingWindowStatus::Closed { .. }
+    ) {
+        return Some((
+            SC_TEACHING_CLAIM_NOT_ADMITTED,
+            "教学窗口已关闭，重放不得二次启动".to_string(),
+        ));
+    }
+    let attempt = window.attempts.last()?;
+    match attempt.lifecycle {
+        crate::product::work_item_plan_policy::ScTeachingAttemptLifecycle::Claimed => {}
+        crate::product::work_item_plan_policy::ScTeachingAttemptLifecycle::ActualStarted => {
+            return Some((
+                SC_TEACHING_CLAIM_NOT_ADMITTED,
+                "该教学 claim 已真实启动（ActualStarted），重放不得二次启动".to_string(),
+            ));
+        }
+        crate::product::work_item_plan_policy::ScTeachingAttemptLifecycle::LaunchUnknown => {
+            return Some((
+                SC_TEACHING_CLAIM_NOT_ADMITTED,
+                "该教学 claim 启动未知（LaunchUnknown），不二次启动".to_string(),
+            ));
+        }
+        crate::product::work_item_plan_policy::ScTeachingAttemptLifecycle::Terminal { .. } => {
+            return Some((
+                SC_TEACHING_CLAIM_NOT_ADMITTED,
+                "该教学 claim 已终态/失败，不启动".to_string(),
+            ));
+        }
+    }
+    if let Some(key) = attempt.launch_ledger_key.as_deref()
+        && record
+            .provider_start_ledger
+            .iter()
+            .any(|entry| entry.provider_start_idempotency_key == key && entry.started)
+    {
+        return Some((
+            SC_TEACHING_CLAIM_NOT_ADMITTED,
+            "该教学 claim 的启动占位已 started=true，重放不得二次启动".to_string(),
+        ));
+    }
+    None
+}
+
 /// compile 失败面：逐条 `code:line:message`（复用既有单源形态；顺序即
 /// diagnostics 顺序，不去重、不排序）后**全量**追加修复指令行——不设呈现
 /// 上限、不折叠计数，第 N 条指令逐字在场（呈现截断仍由

@@ -496,7 +496,7 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_teaching_round(
             false,
         )
     })?;
-    begin_sc_failure_round(
+    let entry = begin_sc_failure_round(
         lifecycle,
         &original.chain.scope,
         &original.chain.business_key,
@@ -504,7 +504,27 @@ pub(in crate::web::workspace_ws_handler::run) fn begin_sc_teaching_round(
         node_id,
         provider,
         ordinal,
-    )
+    )?;
+    // 入口准入闸（B1–B4）：只有分类为 `Ready`（= B5：新轮 run `running` 且同
+    // `role_run_seq` 审计分区严格为空——下一次 `provider_start` 追加会被准入
+    // 接受）且五项全部可证明时才允许真实启动。任一不满足 ⇒ 降级为 `Waiting`
+    // （真实等待：不启动、不落 Failed、不新造终态，留可读原因）。
+    let bound = match entry {
+        ScRoundEntry::Ready(bound) => bound,
+        other => return Ok(other),
+    };
+    if let Some((reason_code, detail)) = super::sc_failure_evidence::sc_teaching_admission_failure(
+        lifecycle,
+        &original.chain.scope,
+        previous,
+    ) {
+        return Ok(ScRoundEntry::Waiting {
+            round: bound.round.clone(),
+            reason_code,
+            detail,
+        });
+    }
+    Ok(ScRoundEntry::Ready(bound))
 }
 
 /// 收口一轮：complete → 严格读回真实 raw → 逐字比较 → finalize launch 纪元。
@@ -568,6 +588,34 @@ pub(in crate::web::workspace_ws_handler::run) fn close_sc_split_round(
     })
 }
 
+/// 教学重驱的 provider 输入构造（入口决策，唯一实现）：**全新 native 会话**，
+/// 不携带 `resume_provider_session_id`。
+///
+/// 教学 prompt 自 A3 起自含上一轮完整 source（≤262,144 B）+ typed 诊断，新
+/// native 不依赖会话记忆；以 `--resume` 复用旧 Author 会话会触发网关
+/// `provider_gateway_resume_not_supported`（教学轮 granted 后 1–5 秒即失败）。
+/// 禁止捕获该错误后重发——只在入口决策转换一次。
+#[allow(clippy::result_large_err)] // 与同文件既有 typed 出口同型：错误体必要且不装箱。
+fn sc_reredrive_streaming_input(
+    engine: &WorkspaceEngine,
+    author_provider: &ProviderName,
+    reredrive_prompt: &str,
+    repository_path: &std::path::Path,
+) -> Result<
+    crate::cross_cutting::streaming_provider::StreamingProviderInput,
+    SingleCandidateProviderRunError,
+> {
+    engine
+        .build_work_item_plan_streaming_input_fresh(
+            crate::product::work_item_split_engine::types::provider_name_to_type(author_provider),
+            reredrive_prompt.to_string(),
+            repository_path.to_string_lossy().to_string(),
+            author_provider.clone(),
+            PlanAuthorOutputContract::Structured,
+        )
+        .map_err(SingleCandidateProviderRunError::Message)
+}
+
 /// F2-B/3.6：教学重驱共用驱动——同 node 再驱一次 provider，返回归一化后的
 /// markdown source。驱动中断/收口失败一律先落真实终局（Durable/Prefix），
 /// `Started` 未交付计入缺项；启动观察不可确认（Unknown）时不落 Failed，
@@ -594,15 +642,8 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_single_candidate_re
     // 原轮/非教学调用传 `None`。
     sent_boundary: Option<ScTeachingSentBoundary<'_>>,
 ) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
-    let reredrive_input = engine
-        .build_work_item_plan_streaming_input(
-            crate::product::work_item_split_engine::types::provider_name_to_type(author_provider),
-            reredrive_prompt.to_string(),
-            repository_path.to_string_lossy().to_string(),
-            author_provider.clone(),
-            PlanAuthorOutputContract::Structured,
-        )
-        .map_err(SingleCandidateProviderRunError::Message)?;
+    let reredrive_input =
+        sc_reredrive_streaming_input(engine, author_provider, reredrive_prompt, repository_path)?;
     let reredrive_input = engine.attach_tool_policy_audit(reredrive_input);
     // T6 fix-loop r2：trust 分类已下沉 start_work_item_plan_author 的
     // Logical 分支共享口（教学重驱同臂）。
@@ -1091,3 +1132,8 @@ mod replay_completed_tests;
 #[cfg(test)]
 #[path = "sc_failure_replay_launch_tests.rs"]
 mod replay_launch_tests;
+
+/// P08 教学重驱入口红测：A（native fresh）+ B（准入闸 + CAS 单物理轮）。
+#[cfg(test)]
+#[path = "sc_failure_teaching_admission_tests.rs"]
+mod teaching_admission_tests;
