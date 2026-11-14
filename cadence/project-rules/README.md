@@ -142,6 +142,13 @@
 - **main 分支保护规则**
   - main 分支禁止直接 commit（受 shared `pre-commit` hook 与本规则双约束）；实施/交付一律在功能 worktree 分支进行，主仓 main 仅作合并目标；误在 main 产生的 commit 按「备份 tag → 复位 `origin/main` → cherry-pick 回功能分支」处置。完整规则详见 `cadence/project-rules/branch-protection.md`。
 
+- **版本发布策略规则（强制）**
+  - 🔴 **默认不发 rc / 预发布版本**；除非 owner 明确指示，禁止创建带 `-rc`/`-beta`/`-alpha` 后缀的版本号或 tag。
+  - 🔴 **必须先合并再发版**：发版前提是该版本改动已在 `origin/main`；禁止从未合并的功能分支发布任何版本（正式版必须可从 main 复现）。固定顺序：PR 合并进 main → 在合并提交上打版本 tag → 推 tag 触发流水线。
+  - **发版后必须核对发布态**（不核对 = 发版未完成）：`npm view @cadence-aria/cli dist-tags`（`latest` 必须指向本次正式版）、`gh release view <tag> --json isPrerelease`（正式版必须 false）、产物内嵌版本/commit 对得上；并同步订正面向用户的文档里的版本口径。
+  - 确需预发布时（仅 owner 明确指示）：必须带预发布后缀、发布走 `next` 标签、GitHub Release 标 `prerelease=true`，并按上述核对发布态、确认 `latest` 未被占用。
+  - 完整规则详见 `cadence/project-rules/release-policy.md`。
+
 - **交付完整性规则（用户可操作能力 ≠ 后端接口）（强制）**
   - owner 需求措辞含「按钮 / 页面 / 界面 / 入口 / 能看到 / 能点 / 交互」时，交付物是**用户在界面上能完成这件事**，接口只是手段；只交付端点视为**未完成**。
   - `tasks.md` 必须同时列出前端实现任务 + **UI 验收用例**（含每个状态下显示哪个按钮的状态矩阵）；禁止把「提供 X 能力」等价为「新增 X 接口」。
