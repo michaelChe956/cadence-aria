@@ -56,6 +56,9 @@ export type InstallTargetView = {
   latest_checked_at: string | null;
   install_source: string;
   action: InstallTargetStatus;
+  /** 已安装但所在目录不在登录 shell PATH 上（REQ-PCI-08，仅提示；行动走
+   *  既有「暴露到终端 PATH」入口，未安装恒 false）。 */
+  off_path: boolean;
 };
 
 export type InstallTargetsResponse = { targets: InstallTargetView[] };
@@ -95,3 +98,12 @@ export type InstallJob = {
 };
 
 export type StartInstallResponse = { job_id: string };
+
+/** POST /api/providers/{target}/expose 的响应（§五 2.11）：软链已落在
+ *  登录 shell PATH 上的可写目录 `dir`，新终端可直接运行 `command`。 */
+export type ExposeTerminalPathResult = {
+  exposed: boolean;
+  command: string;
+  dir: string;
+  target: string;
+};

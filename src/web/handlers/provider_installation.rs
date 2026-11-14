@@ -6,10 +6,14 @@
 //!   作业，不阻塞请求）；Kimi 缺 `acknowledge_remote_script=true` → 400
 //!   （REQ-PCI-01：远程脚本必须先告知来源，防绕过）。
 //! - `GET  /api/providers/install/{job_id}`：轮询作业状态与结果。
+//! - `POST /api/providers/{target}/expose`：把已安装的 CLI 软链到登录
+//!   shell PATH 上的可写目录（§五 2.11；用户明确点击才动作，不写 shell
+//!   profile、不改 PATH 环境变量；安装与更新共用，任意已装版本可点）。
 //!
 //! 不实现 version-cache 查询端点：24h 缓存是 `registry_version` 的内部
 //! 实现细节（tasks.md 82 条契约不含该端点）。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,10 +26,13 @@ use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::bounded_command_runner::{BoundedCommandError, BoundedCommandRequest};
+use crate::cross_cutting::path_overlay;
 use crate::cross_cutting::provider_health::ProviderHealthReasonCode;
 use crate::cross_cutting::semver::compare_semver;
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::provider_installation::InstallTarget;
+use crate::product::provider_installation::effective_prefix::same_dir;
+use crate::product::provider_installation::expose::expose_to_terminal_path;
 use crate::product::provider_installation::job_store::InstallJobStore;
 use crate::product::provider_installation::registry_version::{
     RegistryVersionService, ReqwestRegistrySource,
@@ -52,6 +59,9 @@ pub struct InstallTargetStatusDto {
     pub install_source: String,
     /// install / update / none / verify（REQ-PCI-02 按钮规则）。
     pub action: &'static str,
+    /// 已安装但所在目录不在登录 shell PATH 上（REQ-PCI-08；仅提示，指向
+    /// 既有「暴露到终端 PATH」入口，未安装恒 false）。
+    pub off_path: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +92,49 @@ fn install_job_store(state: &WebAppState) -> InstallJobStore {
     )
 }
 
+/// 装配安装作业执行器。
+///
+/// 生产：宿主环境解析（PATH / HOME / npm 全局前缀）——`InstallJobExecution::production`。
+/// 测试：可注入**隔离执行器**（临时 npm 前缀 + 空 PATH + 临时 HOME）——
+/// 否则宿主真装了 codex 时，安装会落到**宿主**前缀、装后版本直接读宿主真实
+/// 包的 `package.json`，用例断言随开发机状态漂移（见 tests 模块的
+/// `IsolatedInstallEnv`）。
+fn install_job_execution(store: InstallJobStore, state: &WebAppState) -> InstallJobExecution {
+    #[cfg(test)]
+    {
+        if let Some(builder) = test_install_execution_builder(state) {
+            return builder(store, state);
+        }
+    }
+    InstallJobExecution::production(
+        store,
+        state.command_runner.clone(),
+        state.workspace_root.clone(),
+        state.provider_health.clone(),
+    )
+}
+
+/// 测试用执行器装配器（按 workspace_root 命中 ⇒ 并行用例互不干扰）。
+#[cfg(test)]
+type TestInstallExecutionBuilder =
+    Arc<dyn Fn(InstallJobStore, &WebAppState) -> InstallJobExecution + Send + Sync>;
+
+/// 测试登记的隔离执行器（workspace_root → 装配器）。
+#[cfg(test)]
+static TEST_INSTALL_EXECUTIONS: std::sync::Mutex<
+    Vec<(std::path::PathBuf, TestInstallExecutionBuilder)>,
+> = std::sync::Mutex::new(Vec::new());
+
+/// 取该 state 登记的隔离执行器装配器（未登记 ⇒ `None` = 走生产装配）。
+#[cfg(test)]
+fn test_install_execution_builder(state: &WebAppState) -> Option<TestInstallExecutionBuilder> {
+    let registry = TEST_INSTALL_EXECUTIONS.lock().ok()?;
+    registry
+        .iter()
+        .find(|(root, _)| *root == state.workspace_root)
+        .map(|(_, builder)| builder.clone())
+}
+
 fn error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (status, Json(ApiError::validation(code, message))).into_response()
 }
@@ -107,6 +160,100 @@ fn resolve_install_action(
         return "update";
     }
     "none"
+}
+
+/// off_path 判定查询（REQ-PCI-08；测试 seam：搜索目录与登录 PATH 注入）。
+#[derive(Debug, Clone)]
+struct OffPathQuery {
+    /// 已安装二进制的搜索目录（与 expose 生产查询同口径：overlay 登记目录
+    /// → 登录 shell PATH → 已知落点）。
+    install_search_dirs: Vec<PathBuf>,
+    /// 登录 shell PATH 的目录列表（PATH 顺序）；空 = 探测不可用。
+    login_path_dirs: Vec<PathBuf>,
+}
+
+/// 生产查询构建：**服务进程 PATH**（`effective_path` 合并后的真实生效序）
+/// → 登录 shell PATH 快照 → `~/.npm-global/bin` → `/usr/local/bin`（与
+/// `expose` 的生产查询同口径；本面**只读**——不建链、不做可写探测）。
+fn off_path_query() -> OffPathQuery {
+    let service_path = path_overlay::effective_path(None);
+    let login_path = path_overlay::login_shell_path();
+    let home = std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    off_path_query_with(&service_path, login_path.as_deref(), home.as_deref())
+}
+
+/// [`off_path_query`] 的 seam（服务进程 PATH / 登录 shell PATH / HOME 注入）。
+fn off_path_query_with(
+    service_path: &str,
+    login_path: Option<&str>,
+    home: Option<&std::path::Path>,
+) -> OffPathQuery {
+    let login_path_dirs: Vec<PathBuf> = login_path.map(split_login_path_dirs).unwrap_or_default();
+    // 平台「能找到」的口径 = 服务进程 PATH（overlay 合并后的真实生效序）
+    // ∪ 登录 shell PATH ∪ 常见落点；缺了服务进程 PATH 就会把「服务自己能
+    // 跑、但用户终端 PATH 没有」的 CLI 误判成「未安装 ⇒ off_path=false」。
+    let mut install_search_dirs = split_login_path_dirs(service_path);
+    extend_unique_dirs(&mut install_search_dirs, login_path_dirs.iter().cloned());
+    if let Some(home) = home {
+        extend_unique_dirs(
+            &mut install_search_dirs,
+            std::iter::once(home.join(".npm-global/bin")),
+        );
+    }
+    extend_unique_dirs(
+        &mut install_search_dirs,
+        std::iter::once(PathBuf::from("/usr/local/bin")),
+    );
+    OffPathQuery {
+        install_search_dirs,
+        login_path_dirs,
+    }
+}
+
+/// 登录 shell PATH 原始串 → 目录列表（保序、去空段；与 `expose` 侧私有
+/// `split_path_dirs` 同口径的对齐实现）。
+fn split_login_path_dirs(value: &str) -> Vec<PathBuf> {
+    std::env::split_paths(value)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect()
+}
+
+/// 去重追加（首现优先；与 `expose` 侧私有 `extend_unique` 同口径）。
+fn extend_unique_dirs(target: &mut Vec<PathBuf>, items: impl IntoIterator<Item = PathBuf>) {
+    for item in items {
+        if !target.contains(&item) {
+            target.push(item);
+        }
+    }
+}
+
+/// 判定 off_path（REQ-PCI-08）：已安装（搜索目录里找得到二进制）但其所在
+/// 目录**不在登录 shell PATH** 上 ⇒ 用户在自己终端里可能敲不出来。
+///
+/// 只做提示，不改变安装/更新动作语义；未安装或登录 shell PATH 快照不可用
+/// （服务启动 ≤2s / 探测失败）⇒ `false`（宁缺毋滥，不给误导性徽标）。
+fn resolve_off_path(command: &str, query: &OffPathQuery) -> bool {
+    // 未安装（搜索目录里找不到二进制）⇒ 无从谈 PATH（断链不算已安装，
+    // 与 expose::find_installed 同口径）。
+    let Some(installed) = query
+        .install_search_dirs
+        .iter()
+        .map(|dir| dir.join(command))
+        .find(|path| path.exists())
+    else {
+        return false;
+    };
+    if query.login_path_dirs.is_empty() {
+        return false;
+    }
+    let installed_dir = installed.parent().unwrap_or(installed.as_path());
+    // 目录成员语义（规范化比较）：登录 shell PATH 任一目录命中即「在 PATH 上」。
+    !query
+        .login_path_dirs
+        .iter()
+        .any(|login_dir| same_dir(login_dir, installed_dir))
 }
 
 /// codegraph 不在 provider health 矩阵内：本地状态用 `codegraph --version`
@@ -176,6 +323,9 @@ pub async fn get_install_targets(State(state): State<WebAppState>) -> Json<Insta
     );
     let now = Utc::now();
     let codegraph = probe_codegraph(&state).await;
+    // off_path 判定（REQ-PCI-08）：登录 shell PATH 快照 + overlay 登记目录
+    // 一次构建，五类对象共用（只读，不建链）。
+    let off_path_probe = off_path_query();
 
     let mut targets = Vec::with_capacity(INSTALL_SOURCE_TABLE.len());
     for row in INSTALL_SOURCE_TABLE.iter() {
@@ -233,6 +383,7 @@ pub async fn get_install_targets(State(state): State<WebAppState>) -> Json<Insta
             latest_checked_at,
             install_source: install_source_label(row),
             action,
+            off_path: cli_available && resolve_off_path(row.command, &off_path_probe),
         });
     }
     Json(InstallTargetsResponse { targets })
@@ -280,12 +431,7 @@ pub async fn post_provider_install(
             );
         }
     };
-    let execution = InstallJobExecution::production(
-        store,
-        state.command_runner.clone(),
-        state.workspace_root.clone(),
-        state.provider_health.clone(),
-    );
+    let execution = install_job_execution(store, &state);
     let job_id = job.job_id.clone();
     tokio::spawn(async move {
         execution.run(&job_id, target).await;
@@ -319,646 +465,46 @@ pub async fn get_install_job(
     }
 }
 
+#[derive(Debug, Serialize)]
+pub struct ExposeResponse {
+    pub exposed: bool,
+    /// 可直接运行的命令名（如 `claude`）。
+    pub command: String,
+    /// 软链所在目录（登录 shell PATH 上、真实可写）。
+    pub dir: String,
+    /// 软链指向的已安装二进制路径。
+    pub target: String,
+}
+
+/// 把已安装的 CLI 暴露到用户终端 PATH（§五 2.11）：只在登录 shell PATH
+/// 上真实可写的目录建**单个软链**；失败如实返回可行动原因（候选目录与
+/// 各自不合格原因），不静默、不降级。
+pub async fn post_provider_expose(Path(target_wire): Path<String>) -> Response {
+    // 未知对象（含 fake）→ 400（与 install 端点同口径）。
+    if InstallTarget::parse_wire(&target_wire).is_none() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "install_target_unknown",
+            format!("未知安装对象：{target_wire}"),
+        );
+    }
+    match expose_to_terminal_path(&target_wire) {
+        Ok(outcome) => (
+            StatusCode::OK,
+            Json(ExposeResponse {
+                exposed: true,
+                command: outcome.command,
+                dir: outcome.dir.display().to_string(),
+                target: outcome.target.display().to_string(),
+            }),
+        )
+            .into_response(),
+        Err(error) => error_response(StatusCode::BAD_REQUEST, error.code, error.message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
-    use axum::Json;
-    use axum::extract::State;
-    use axum::http::StatusCode;
-    use axum::response::{IntoResponse, Response};
-    use chrono::{TimeDelta, Utc};
-    use serde_json::{Value, json};
-    use tempfile::tempdir;
-
-    use super::{
-        get_install_job, get_install_targets, post_provider_install, resolve_install_action,
-    };
-    use crate::cross_cutting::aria_state_paths::AriaStatePaths;
-    use crate::cross_cutting::bounded_command_runner::{
-        BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
-    };
-    use crate::cross_cutting::provider_availability_gate::ProviderAvailabilityGate;
-    use crate::cross_cutting::provider_health::{ProviderHealthService, SystemProviderHealthClock};
-    use crate::web::runtime::WebRuntime;
-    use crate::web::state::WebAppState;
-
-    // ---- 测试基建（与 providers.rs 测试同款脚本 runner） ----
-
-    struct ScriptedRunner {
-        results: Mutex<VecDeque<Result<BoundedCommandResult, BoundedCommandError>>>,
-        /// 脚本原件：脚本用尽时**回放一轮**（见 `run` 的说明）。
-        script: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
-        delay: Duration,
-    }
-
-    impl ScriptedRunner {
-        fn new(
-            results: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
-            delay: Duration,
-        ) -> Arc<Self> {
-            Arc::new(Self {
-                results: Mutex::new(VecDeque::from(results.clone())),
-                script: results,
-                delay,
-            })
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl BoundedCommandRunner for ScriptedRunner {
-        async fn run(
-            &self,
-            _request: BoundedCommandRequest,
-        ) -> Result<BoundedCommandResult, BoundedCommandError> {
-            if !self.delay.is_zero() {
-                tokio::time::sleep(self.delay).await;
-            }
-            let mut results = self.results.lock().expect("scripted results");
-            if results.is_empty() {
-                // 脚本用尽 = 发生了**额外一轮**探测（CI 慢机上更常见：一次刷新
-                // 赶在快照过期后）。回放脚本原件（探测顺序与结果不变）而不是
-                // panic ——「不该发生的额外调用」由用例自身的断言把关，不该由
-                // 夹具的 panic 表达（那会把慢机误报成功能缺陷）。
-                results.extend(self.script.iter().cloned());
-            }
-            results.pop_front().expect("scripted result")
-        }
-    }
-
-    fn success(version: &str) -> Result<BoundedCommandResult, BoundedCommandError> {
-        Ok(BoundedCommandResult {
-            exit_code: Some(0),
-            stdout: format!("cli {version}"),
-            stderr: String::new(),
-            timed_out: false,
-            cancelled: false,
-            stdout_truncated: false,
-            stderr_truncated: false,
-            duration_ms: 1,
-        })
-    }
-
-    fn missing(program: &str) -> Result<BoundedCommandResult, BoundedCommandError> {
-        Err(BoundedCommandError::CommandMissing {
-            executable: program.to_string(),
-            details: "not found".to_string(),
-        })
-    }
-
-    fn install_success() -> Result<BoundedCommandResult, BoundedCommandError> {
-        Ok(BoundedCommandResult {
-            exit_code: Some(0),
-            stdout: "added 1 package in 3s".to_string(),
-            stderr: String::new(),
-            timed_out: false,
-            cancelled: false,
-            stdout_truncated: false,
-            stderr_truncated: false,
-            duration_ms: 1,
-        })
-    }
-
-    /// 4 个版本探测结果 → 一个 health 服务（claude/codex/pi/kimi 顺序）。
-    fn health_service(
-        root: &Path,
-        results: Vec<Result<BoundedCommandResult, BoundedCommandError>>,
-    ) -> Arc<ProviderHealthService> {
-        Arc::new(ProviderHealthService::with_dependencies(
-            AriaStatePaths::from_workspace_root(root),
-            ScriptedRunner::new(results, Duration::ZERO),
-            Arc::new(SystemProviderHealthClock),
-            Duration::from_secs(1),
-            4096,
-        ))
-    }
-
-    fn state(
-        root: &Path,
-        health: Arc<ProviderHealthService>,
-        install_runner: Arc<dyn BoundedCommandRunner>,
-    ) -> WebAppState {
-        let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
-        let mut state =
-            WebAppState::new(root.to_path_buf(), WebRuntime::new_fake(root.to_path_buf()))
-                .with_provider_health(health, gate, install_runner);
-        state.test_provider_enabled = false;
-        state
-    }
-
-    /// 预置 24h durable 版本缓存，避免 handler 测试触网。
-    fn seed_version_cache(root: &Path, entries: Value) {
-        let cache_path = root.join(".aria/state/provider-installation/version-cache.json");
-        std::fs::create_dir_all(cache_path.parent().expect("parent")).expect("create cache dir");
-        std::fs::write(
-            &cache_path,
-            serde_json::to_vec(&json!({ "entries": entries })).unwrap(),
-        )
-        .expect("seed cache");
-    }
-
-    async fn response_json(response: Response) -> Value {
-        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("body bytes");
-        serde_json::from_slice(&body).expect("json body")
-    }
-
-    async fn poll_job_terminal(state: &WebAppState, job_id: &str) -> Value {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        loop {
-            let response = get_install_job(
-                State(state.clone()),
-                axum::extract::Path(job_id.to_string()),
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::OK);
-            let job = response_json(response).await;
-            if job["status"] != json!("running") {
-                return job;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "install job did not reach terminal state in time"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }
-
-    // ---- resolve_install_action 规则 ----
-
-    #[test]
-    fn install_target_action_rules_follow_spec() {
-        // 未安装 → install
-        assert_eq!(
-            resolve_install_action(false, false, None, Some("2.0.0")),
-            "install"
-        );
-        // 已安装但探针失败 → verify（不显示安装）
-        assert_eq!(
-            resolve_install_action(true, false, Some("1.0.0"), Some("2.0.0")),
-            "verify"
-        );
-        // 版本落后 → update
-        assert_eq!(
-            resolve_install_action(true, true, Some("1.0.0"), Some("2.0.0")),
-            "update"
-        );
-        // 预发布本地 < 正式最新 → update
-        assert_eq!(
-            resolve_install_action(true, true, Some("1.5.0-rc.1"), Some("1.5.0")),
-            "update"
-        );
-        // 版本最新 → none
-        assert_eq!(
-            resolve_install_action(true, true, Some("2.0.0"), Some("2.0.0")),
-            "none"
-        );
-        // registry 不可知（离线 / 查询失败）→ none（已装且探过）
-        assert_eq!(
-            resolve_install_action(true, true, Some("2.0.0"), None),
-            "none"
-        );
-    }
-
-    // ---- GET install-targets ----
-
-    #[tokio::test]
-    async fn install_targets_endpoint_lists_five_targets_with_actions() {
-        let root = tempdir().expect("root");
-        // health：claude ok、codex 缺失、pi ok（落后）、kimi ok。
-        let health = health_service(
-            root.path(),
-            vec![
-                success("1.0.0"),
-                missing("codex"),
-                success("0.85.0"),
-                success("0.34.0"),
-            ],
-        );
-
-        // handler 读取 latest_diagnostic——先刷新一次填入脚本化探测结果。
-        health
-            .refresh(tokio_util::sync::CancellationToken::new())
-            .await
-            .expect("refresh health");
-        // codegraph 探测：命令缺失。
-        let state = state(
-            root.path(),
-            health,
-            ScriptedRunner::new(vec![missing("codegraph")], Duration::ZERO),
-        );
-        // 预置缓存：claude=1.0.0（最新）、codex=2.0.0（无关，缺装）、
-        // pi=1.5.0（落后）、codegraph=1.6.2（无关，缺装）。
-        // pi 的「落后」必须是**精确 semver 下真落后**（REQ-PCI-07）：
-        // 本地 0.85.0（devbox pin）vs latest 1.5.0（块2 技术方案
-        // §3.6.9 未验证项 1 实测的 registry latest）⇒ 0.85.0 < 1.5.0。
-        // （旧的 0.9.0 在 semver 下**新于** 0.85.0 —— minor 9 < 85。）
-        let checked_at = (Utc::now() - TimeDelta::hours(1)).to_rfc3339();
-        seed_version_cache(
-            root.path(),
-            json!({
-                "@anthropic-ai/claude-code": {
-                    "package": "@anthropic-ai/claude-code",
-                    "latest_version": "1.0.0",
-                    "checked_at": checked_at
-                },
-                "@openai/codex": {
-                    "package": "@openai/codex",
-                    "latest_version": "2.0.0",
-                    "checked_at": checked_at
-                },
-                "@earendil-works/pi-coding-agent": {
-                    "package": "@earendil-works/pi-coding-agent",
-                    "latest_version": "1.5.0",
-                    "checked_at": checked_at
-                },
-                "@colbymchenry/codegraph": {
-                    "package": "@colbymchenry/codegraph",
-                    "latest_version": "1.6.2",
-                    "checked_at": checked_at
-                },
-                "@moonshot-ai/kimi-code": {
-                    "package": "@moonshot-ai/kimi-code",
-                    "latest_version": "2.5.2",
-                    "checked_at": checked_at
-                }
-            }),
-        );
-
-        let response = get_install_targets(State(state)).await;
-        let payload = response_json(response.into_response()).await;
-
-        let targets = payload["targets"].as_array().expect("targets array");
-        assert_eq!(targets.len(), 5, "五类对象一次返回: {payload}");
-
-        let by_target = |wire: &str| {
-            targets
-                .iter()
-                .find(|dto| dto["target"] == json!(wire))
-                .unwrap_or_else(|| panic!("missing {wire}: {payload}"))
-                .clone()
-        };
-
-        let claude = by_target("claude_code");
-        assert_eq!(claude["cli_available"], json!(true));
-        assert_eq!(claude["local_version"], json!("1.0.0"));
-        assert_eq!(claude["latest_version"], json!("1.0.0"));
-        assert_eq!(claude["action"], json!("none"));
-        assert_eq!(
-            claude["install_source"],
-            json!("npm @anthropic-ai/claude-code")
-        );
-        assert!(claude["latest_checked_at"].is_string());
-
-        let codex = by_target("codex");
-        assert_eq!(codex["cli_available"], json!(false));
-        assert_eq!(codex["action"], json!("install"));
-
-        let pi = by_target("pi");
-        assert_eq!(pi["cli_available"], json!(true));
-        assert_eq!(pi["local_version"], json!("0.85.0"));
-        assert_eq!(pi["latest_version"], json!("1.5.0"));
-        assert_eq!(pi["action"], json!("update"));
-
-        // Kimi：版本来源 = npm 包 `@moonshot-ai/kimi-code`（REQ-PCI-07）⇒
-        // 参与「有新版」判定；本地 0.34.0 < latest 2.5.2 ⇒ update。
-        // **安装源仍是官方脚本**（REQ-PCI-01 不变）。
-        let kimi = by_target("kimi_code");
-        assert_eq!(kimi["cli_available"], json!(true));
-        assert_eq!(kimi["local_version"], json!("0.34.0"));
-        assert_eq!(kimi["latest_version"], json!("2.5.2"));
-        assert!(kimi["latest_checked_at"].is_string());
-        assert_eq!(kimi["action"], json!("update"));
-        assert_eq!(
-            kimi["install_source"],
-            json!("official script https://code.kimi.com/kimi-code/install.sh")
-        );
-
-        let codegraph = by_target("codegraph");
-        assert_eq!(codegraph["cli_available"], json!(false));
-        assert_eq!(codegraph["action"], json!("install"));
-        assert_eq!(
-            codegraph["install_source"],
-            json!("npm @colbymchenry/codegraph")
-        );
-    }
-
-    /// Kimi **未安装** → 【安装】而不是【更新】：版本判定与安装判定相互独立
-    /// —— 命令缺失时永远是 install（REQ-PCI-02 / REQ-PCI-07）。
-    #[tokio::test]
-    async fn install_targets_reports_install_for_missing_kimi() {
-        let root = tempdir().expect("root");
-        // health：claude ok、codex ok、pi ok、**kimi 缺失**。
-        let health = health_service(
-            root.path(),
-            vec![
-                success("1.0.0"),
-                success("0.166.0"),
-                success("1.3.0"),
-                missing("kimi"),
-            ],
-        );
-        health
-            .refresh(tokio_util::sync::CancellationToken::new())
-            .await
-            .expect("refresh health");
-        let state = state(
-            root.path(),
-            health,
-            ScriptedRunner::new(vec![missing("codegraph")], Duration::ZERO),
-        );
-        // Kimi 的版本来源缓存（latest 2.5.2）——版本判定仍生效。
-        let checked_at = (Utc::now() - TimeDelta::hours(1)).to_rfc3339();
-        seed_version_cache(
-            root.path(),
-            json!({
-                "@moonshot-ai/kimi-code": {
-                    "package": "@moonshot-ai/kimi-code",
-                    "latest_version": "2.5.2",
-                    "checked_at": checked_at
-                }
-            }),
-        );
-
-        let response = get_install_targets(State(state)).await;
-        let payload = response_json(response.into_response()).await;
-        let targets = payload["targets"].as_array().expect("targets array");
-        let kimi = targets
-            .iter()
-            .find(|dto| dto["target"] == json!("kimi_code"))
-            .expect("kimi target");
-
-        assert_eq!(kimi["cli_available"], json!(false));
-        assert_eq!(kimi["local_version"], Value::Null);
-        assert_eq!(kimi["latest_version"], json!("2.5.2"));
-        assert_eq!(
-            kimi["action"],
-            json!("install"),
-            "命令缺失时必须给【安装】，不能给【更新】"
-        );
-    }
-
-    // ---- POST /install + GET /install/{job_id} ----
-
-    /// 测试点 #8：POST 立即返回 {job_id}（不等待）；GET 轮询得终态。
-    #[tokio::test]
-    async fn install_target_post_returns_immediately_and_polls_to_completed() {
-        let root = tempdir().expect("root");
-        let health = health_service(
-            root.path(),
-            vec![
-                success("1.0.0"),
-                success("2.1.7"),
-                success("0.85.0"),
-                success("0.34.0"),
-            ],
-        );
-        // 安装命令延迟 300ms，保证 POST 返回时作业仍是 running。
-        let state = state(
-            root.path(),
-            health.clone(),
-            ScriptedRunner::new(vec![install_success()], Duration::from_millis(300)),
-        );
-
-        let response = post_provider_install(
-            State(state.clone()),
-            axum::extract::Path("codex".to_string()),
-            None,
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let started = response_json(response).await;
-        let job_id = started["job_id"].as_str().expect("job_id").to_string();
-        assert!(!job_id.is_empty());
-
-        // 立即查询：仍是 running（安装尚未完成）。
-        let running = response_json(
-            get_install_job(State(state.clone()), axum::extract::Path(job_id.clone())).await,
-        )
-        .await;
-        assert_eq!(running["status"], json!("running"));
-        assert_eq!(running["target"], json!("codex"));
-
-        // 轮询到终态：completed + 装完重探得到的版本。
-        let done = poll_job_terminal(&state, &job_id).await;
-        assert_eq!(done["status"], json!("completed"), "{done}");
-        assert_eq!(done["outcome"]["installed_version"], json!("2.1.7"));
-        // 重探确实发生（REQ-PCI-05 装完重新探测）。
-        assert!(state.provider_health.latest_diagnostic().generation >= 1);
-    }
-
-    /// 测试点 #8：Kimi 缺 acknowledge_remote_script → 400（防绕过告知）。
-    #[tokio::test]
-    async fn install_target_post_rejects_kimi_without_acknowledgement() {
-        let root = tempdir().expect("root");
-        let health = health_service(
-            root.path(),
-            vec![
-                success("1.0.0"),
-                success("2.0.0"),
-                success("0.85.0"),
-                success("0.34.0"),
-            ],
-        );
-        let state = state(
-            root.path(),
-            health,
-            ScriptedRunner::new(vec![install_success()], Duration::ZERO),
-        );
-
-        for body in [None, Some(json!(false)), Some(json!(null))] {
-            let request_body = body.as_ref().map(|ack| {
-                Json(super::InstallRequestBody {
-                    acknowledge_remote_script: ack.as_bool(),
-                })
-            });
-            let response = post_provider_install(
-                State(state.clone()),
-                axum::extract::Path("kimi_code".to_string()),
-                request_body,
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body:?}");
-            let payload = response_json(response).await;
-            assert_eq!(payload["code"], json!("install_acknowledgement_required"));
-            assert!(
-                payload["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("code.kimi.com")),
-                "必须告知脚本来源: {payload}"
-            );
-        }
-
-        // 未确认时不留任何作业痕迹。
-        let jobs_dir = root.path().join(".aria/state/provider-installation/jobs");
-        assert!(
-            !jobs_dir.exists() || std::fs::read_dir(&jobs_dir).expect("jobs dir").count() == 0,
-            "拒绝请求不得创建作业"
-        );
-
-        // 确认后放行。
-        let response = post_provider_install(
-            State(state.clone()),
-            axum::extract::Path("kimi_code".to_string()),
-            Some(Json(super::InstallRequestBody {
-                acknowledge_remote_script: Some(true),
-            })),
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let started = response_json(response).await;
-        let job_id = started["job_id"].as_str().expect("job_id").to_string();
-        let done = poll_job_terminal(&state, &job_id).await;
-        assert_eq!(done["status"], json!("completed"), "{done}");
-    }
-
-    #[tokio::test]
-    async fn install_target_post_unknown_target_is_rejected() {
-        let root = tempdir().expect("root");
-        let health = health_service(
-            root.path(),
-            vec![
-                success("1.0.0"),
-                success("2.0.0"),
-                success("0.85.0"),
-                success("0.34.0"),
-            ],
-        );
-        let state = state(
-            root.path(),
-            health,
-            ScriptedRunner::new(vec![], Duration::ZERO),
-        );
-        let response =
-            post_provider_install(State(state), axum::extract::Path("fake".to_string()), None)
-                .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let payload = response_json(response).await;
-        assert_eq!(payload["code"], json!("install_target_unknown"));
-    }
-
-    #[tokio::test]
-    async fn install_job_unknown_id_is_not_found() {
-        let root = tempdir().expect("root");
-        let health = health_service(
-            root.path(),
-            vec![
-                success("1.0.0"),
-                success("2.0.0"),
-                success("0.85.0"),
-                success("0.34.0"),
-            ],
-        );
-        let state = state(
-            root.path(),
-            health,
-            ScriptedRunner::new(vec![], Duration::ZERO),
-        );
-        let response =
-            get_install_job(State(state), axum::extract::Path("no-such-job".to_string())).await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let payload = response_json(response).await;
-        assert_eq!(payload["code"], json!("install_job_not_found"));
-    }
-
-    /// 测试点 #9：安装成功 → Completed，未写任何 capability 记录、
-    /// 未触发核验探针（spy 计数 0）；重探走 provider health。
-    #[tokio::test]
-    async fn install_success_does_not_write_capability_or_trigger_probes() {
-        use crate::cross_cutting::provider_boundary::ProviderBoundaryError;
-        use crate::product::logical_codebase::provider_capability_revalidate::{
-            ProbeInvocation, ProbeRunner, ProviderCapabilityRevalidateService, VersionSource,
-        };
-
-        let root = tempdir().expect("root");
-        let health = health_service(
-            root.path(),
-            vec![
-                success("1.0.0"),
-                success("2.1.7"),
-                success("0.85.0"),
-                success("0.34.0"),
-            ],
-        );
-        let probe_calls = Arc::new(AtomicUsize::new(0));
-        let calls_for_probe = probe_calls.clone();
-        let probe_runner: ProbeRunner = Arc::new(move |_invocation: ProbeInvocation| {
-            let calls = calls_for_probe.clone();
-            Box::pin(async move {
-                calls.fetch_add(1, Ordering::SeqCst);
-                Err(ProviderBoundaryError::ProbeFailed(
-                    "capability probe must not run during install".to_string(),
-                ))
-            })
-        });
-        let version_source: VersionSource = Arc::new(|_program: &str| Ok("1.0.0".to_string()));
-        let capability_service = Arc::new(
-            ProviderCapabilityRevalidateService::new(
-                crate::product::app_paths::ProductAppPaths::new(root.path().join(".aria")),
-            )
-            .with_version_source(version_source)
-            .with_probe_runner(probe_runner),
-        );
-
-        let gate = Arc::new(ProviderAvailabilityGate::new(health.clone()));
-        let state = WebAppState::new(
-            root.path().to_path_buf(),
-            WebRuntime::new_fake(root.path().to_path_buf()),
-        )
-        .with_provider_health(
-            health.clone(),
-            gate,
-            ScriptedRunner::new(vec![install_success()], Duration::ZERO),
-        )
-        .with_capability_revalidate_service(capability_service);
-
-        let response = post_provider_install(
-            State(state.clone()),
-            axum::extract::Path("codex".to_string()),
-            None,
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let started = response_json(response).await;
-        let job_id = started["job_id"].as_str().expect("job_id").to_string();
-
-        let done = poll_job_terminal(&state, &job_id).await;
-        assert_eq!(done["status"], json!("completed"), "{done}");
-
-        // 未触发任何能力核验探针（安装 ≠ 核验，REQ-PCI-05）。
-        assert_eq!(
-            probe_calls.load(Ordering::SeqCst),
-            0,
-            "安装成功不得自动触发核验探针"
-        );
-
-        // 未写任何 capability 记录（durable 工件扫描）。
-        fn assert_no_capability_artifacts(directory: &Path) {
-            let entries = std::fs::read_dir(directory).expect("read dir");
-            for entry in entries {
-                let entry = entry.expect("dir entry");
-                let name = entry.file_name().to_string_lossy().into_owned();
-                assert!(
-                    !name.to_lowercase().contains("capability"),
-                    "安装流程不得写 capability 记录: {}",
-                    entry.path().display()
-                );
-                if entry.path().is_dir() {
-                    assert_no_capability_artifacts(&entry.path());
-                }
-            }
-        }
-        let aria_root = root.path().join(".aria");
-        if aria_root.exists() {
-            assert_no_capability_artifacts(&aria_root);
-        }
-
-        // 装完确实重探了（provider health generation 前进）。
-        assert!(state.provider_health.latest_diagnostic().generation >= 1);
-    }
+    // 测试体拆分片段（large_file_guard 1200 行红线，纯移动；夹具与断言逐字保留）。
+    include!("provider_installation_tests.inc.rs");
 }

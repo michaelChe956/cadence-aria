@@ -309,7 +309,6 @@ const GRANDFATHERED: &[(&str, usize)] = &[
         "web/src/components/chat-workspace/cockpit/CockpitInbox.test.tsx",
         1410,
     ),
-    ("web/src/hooks/useWorkspaceSessionObservers.test.tsx", 1245),
     ("web/src/pages/ChatCockpitPage.tsx", 1471),
     ("web/src/pages/CodingWorkspacePage.test.tsx", 1560),
     ("web/src/pages/CodingWorkspacePage.tsx", 1541),

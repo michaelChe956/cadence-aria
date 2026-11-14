@@ -452,14 +452,10 @@ fn is_linked_worktree(path: &Path) -> Result<bool, AggregateRootPreflightError> 
                 ),
             )
         })?;
-    if canonical_gitdir
+    Ok(canonical_gitdir
         .parent()
         .and_then(Path::file_name)
-        .is_some_and(|name| name == "worktrees")
-    {
-        return Ok(true);
-    }
-    Ok(false)
+        .is_some_and(|name| name == "worktrees"))
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {

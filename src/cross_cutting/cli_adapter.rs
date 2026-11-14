@@ -243,6 +243,21 @@ fn run_command_capture_with_stream(
     if let Some(env) = environment {
         command.envs(env);
     }
+    // 计划 2026-11-13 包 2.4:PATH overlay 合并点——`environment=None`
+    // (继承宿主 env)分支同样必须显式写合并后的 PATH,不能只在
+    // `Some(env)` 分支合并;overlay 为空时 effective_path 原样返回 base。
+    let base_path = environment
+        .and_then(|env| env.get("PATH"))
+        .map(String::as_str);
+    command.env(
+        "PATH",
+        crate::cross_cutting::path_overlay::effective_path(base_path),
+    );
+    // 计划 2026-11-13 §五 2.12:补入登录 shell 探测回的 agent 专属环境
+    // 变量(缺失才补;进程 env/覆盖层已有的值优先),None 分支同样补。
+    for (name, value) in crate::cross_cutting::path_overlay::shell_env_overrides(environment) {
+        command.env(name, value);
+    }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     if stdin_text.is_some() {
         command.stdin(Stdio::piped());
@@ -683,6 +698,10 @@ mod host_inheritance_tests {
     /// 宿主 PATH/HOME——子进程拿到的是宿主值,不是输入 map 快照。
     #[test]
     fn sync_capture_inherits_host_environment_without_explicit_map() {
+        // overlay 是进程级共享状态:并行用例登记目录会让「子进程 PATH ==
+        // 宿主 PATH」逐字断言失真 ⇒ 持锁清空后断言(计划 §6.1)。
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
+
         let host_home = std::env::var("HOME").expect("host HOME");
         let host_path = std::env::var("PATH").expect("host PATH");
 
@@ -722,6 +741,95 @@ mod host_inheritance_tests {
 
         assert_eq!(output.exit_code, Some(0), "stderr: {}", output.stderr);
         assert_eq!(output.stdout, format!("override-ok|{host_home}"));
+    }
+
+    /// 计划 2026-11-13 包 2.4:同步捕获通道的 overlay 合并——
+    /// `environment=None`(继承宿主 env)分支也必须显式下发合并后的
+    /// PATH,不能只在 `Some(env)` 分支合并(首目录=overlay 目录)。
+    #[test]
+    fn sync_capture_merges_path_overlay_without_explicit_map() {
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
+
+        let dir = tempfile::tempdir().expect("overlay dir");
+        let bin_dir = dir.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("create overlay bin dir");
+        crate::cross_cutting::path_overlay::register(
+            &bin_dir,
+            crate::cross_cutting::path_overlay::OverlayPosition::Prepend,
+        );
+
+        let output = run_command_capture_with_stream(
+            &sh_spec("printf '%s' \"$PATH\""),
+            None,
+            None,
+            None,
+            None,
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("sync capture with overlay");
+
+        assert_eq!(output.exit_code, Some(0), "stderr: {}", output.stderr);
+        assert_eq!(
+            std::env::split_paths(&output.stdout).next(),
+            Some(bin_dir),
+            "environment=None 分支的子进程 PATH 首目录必须是 overlay 目录: {}",
+            output.stdout
+        );
+    }
+
+    /// 计划 2026-11-13 §五 2.12：同步捕获通道补入登录 shell 探测回的
+    /// agent 专属环境变量——`environment=None` 分支同样补；覆盖层已有值优先。
+    #[test]
+    fn sync_capture_injects_shell_probe_agent_env_without_explicit_map() {
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
+
+        let Some(free_var) = ["PI_CODING_AGENT_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]
+            .into_iter()
+            .find(|name| std::env::var_os(name).is_none())
+        else {
+            panic!("宿主 env 已含全部 agent 变量,无法验证补入分支(环境不满足)");
+        };
+        crate::cross_cutting::path_overlay::set_shell_probe_for_test(
+            None,
+            vec![(free_var.to_string(), "/probe/agent-dir".to_string())],
+        );
+        let script = format!("printf '%s' \"${free_var}\"");
+
+        // 补入分支:environment=None、宿主缺该变量 ⇒ 子进程读到探测值。
+        let output = run_command_capture_with_stream(
+            &sh_spec(&script),
+            None,
+            None,
+            None,
+            None,
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("sync capture with shell probe env");
+        assert_eq!(output.exit_code, Some(0), "stderr: {}", output.stderr);
+        assert_eq!(
+            output.stdout, "/probe/agent-dir",
+            "environment=None 分支也必须补入缺失的 agent 变量"
+        );
+
+        // 平台优先分支:显式覆盖层已有该变量 ⇒ 保留显式值。
+        let environment =
+            BTreeMap::from([(free_var.to_string(), "/explicit/agent-dir".to_string())]);
+        let output = run_command_capture_with_stream(
+            &sh_spec(&script),
+            None,
+            None,
+            Some(&environment),
+            None,
+            Some(Duration::from_secs(30)),
+            None,
+        )
+        .expect("sync capture keeps explicit env");
+        assert_eq!(
+            output.stdout, "/explicit/agent-dir",
+            "覆盖层已有值不得被探测值覆盖"
+        );
     }
 }
 

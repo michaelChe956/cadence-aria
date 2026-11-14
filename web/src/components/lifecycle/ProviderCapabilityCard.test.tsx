@@ -22,6 +22,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { InstallTargetView, InstallTargetWire } from "../../api/types";
 import { ProviderCapabilityCard } from "./ProviderCapabilityCard";
 import { ProviderManagementDrawer } from "./ProviderManagementDrawer";
 import { ProviderManagementPanel } from "./ProviderManagementPanel";
@@ -39,6 +40,53 @@ import {
   runningBatchJob,
   unknownProjection,
 } from "./ProviderCapabilityCard.test-utils";
+
+/** F3：安装目标面夹具——只写用例关心的字段，其余给合理默认。 */
+function installTargetFixture(
+  overrides: Partial<InstallTargetView> & { target: InstallTargetWire },
+): InstallTargetView {
+  return {
+    display_name: overrides.target,
+    cli_available: true,
+    local_version: "1.0.0",
+    latest_version: "1.0.0",
+    latest_checked_at: "2026-11-13T00:00:00Z",
+    install_source: "npm",
+    action: "none",
+    off_path: false,
+    ...overrides,
+  };
+}
+
+/** F3：本地 fetch 桩——能力投影（未核验基线）+ 安装目标面 + expose 端点。 */
+function stubCatalogFetch(targets: InstallTargetView[]): void {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const method = (init?.method ?? "GET").toUpperCase();
+      captured.push({ url, method, body: null });
+      if (method === "GET" && url === CAPABILITIES_URL) {
+        return jsonResponse(unknownProjection());
+      }
+      if (method === "GET" && url === "/api/providers/install-targets") {
+        return jsonResponse({ targets });
+      }
+      if (method === "POST" && url.endsWith("/expose")) {
+        return jsonResponse({
+          exposed: true,
+          command: "codex",
+          dir: "/home/demo/.local/bin",
+          target: "codex",
+        });
+      }
+      return jsonResponse(
+        { code: "not_found", message: `no route for ${method} ${url}` },
+        404,
+      );
+    }),
+  );
+}
 
 describe("ProviderCapabilityCard revalidate surface", () => {
   beforeEach(() => {
@@ -346,6 +394,55 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     expect(
       within(providerRow).getByTestId("provider-install-versions-codex"),
     ).toHaveTextContent("当前 0.44.0 → 最新 1.0.1");
+  });
+
+  it("shows the off-path badge for an installed CLI missing from the login shell PATH (REQ-PCI-08)", async () => {
+    installFetchRouter(() => confirmedCodexProjection(), undefined, {
+      targets: [
+        {
+          target: "claude_code",
+          display_name: "Claude Code",
+          cli_available: true,
+          local_version: "1.0.0",
+          latest_version: "1.0.0",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @anthropic-ai/claude-code",
+          action: "none",
+          off_path: false,
+        },
+        {
+          target: "codex",
+          display_name: "Codex",
+          cli_available: true,
+          local_version: "1.0.0",
+          latest_version: "1.0.0",
+          latest_checked_at: "2026-11-03T00:00:00Z",
+          install_source: "npm @openai/codex",
+          action: "none",
+          off_path: true,
+        },
+      ],
+    });
+
+    renderProviderManagement();
+
+    // 已安装但不在登录 shell PATH ⇒ 行内提示徽标（行动入口走既有
+    // 「暴露到终端 PATH」按钮，不重复实现）。
+    const codexRow = await screen.findByTestId(
+      "provider-capability-provider-codex",
+    );
+    expect(
+      within(codexRow).getByTestId("provider-capability-off-path-codex"),
+    ).toHaveTextContent("已安装，但不在你的终端 PATH 上");
+    // 在登录 shell PATH 上（off_path=false）⇒ 无徽标。
+    const claudeRow = screen.getByTestId(
+      "provider-capability-provider-claude_code",
+    );
+    expect(
+      within(claudeRow).queryByTestId(
+        "provider-capability-off-path-claude_code",
+      ),
+    ).toBeNull();
   });
 
   it("folds the batch job item state into the same row list", async () => {
@@ -988,5 +1085,111 @@ describe("ProviderCapabilityCard revalidate surface", () => {
     expect(screen.getByTestId("capability-batch-scope")).toHaveTextContent(
       "消耗 provider 额度",
     );
+  });
+
+  // F3（终审 2026-11-13）：已安装但**未核验**的行，既有父级 gate
+  // （`!cli_available || confirmed`）不渲染安装块 ⇒「暴露到终端 PATH」入口
+  // 不可达：用户刚装完（已安装、尚未做能力核验）时看不到暴露入口，功能不可用。
+  it("keeps the expose-to-terminal-PATH entry reachable for an installed but unverified provider", async () => {
+    stubCatalogFetch([
+      installTargetFixture({
+        target: "codex",
+        install_source: "npm @openai/codex",
+        off_path: true,
+      }),
+    ]);
+
+    render(<ProviderCapabilityCard />);
+
+    const codexRow = await screen.findByTestId(
+      "provider-capability-provider-codex",
+    );
+    // 未核验（unknown 投影）⇒ 既有 gate 不渲染安装块，但暴露入口必须可达。
+    const exposeButton = within(codexRow).getByTestId(
+      "provider-capability-expose-codex",
+    );
+    expect(exposeButton).toBeEnabled();
+
+    await userEvent.click(exposeButton);
+
+    await waitFor(() => {
+      expect(
+        captured.find(
+          (request) =>
+            request.method === "POST" &&
+            request.url === "/api/providers/codex/expose",
+        ),
+      ).toBeTruthy();
+    });
+    expect(
+      within(codexRow).getByTestId("provider-capability-expose-result-codex"),
+    ).toHaveTextContent("已暴露到 /home/demo/.local/bin");
+  });
+
+  // F3 配套：暴露入口只对「已安装且不在终端 PATH 上」的行出现 —— 已在 PATH 上
+  // （off_path=false，用户终端本来就能跑）或压根没安装时都不出现（不加噪音）。
+  it("offers the expose entry only for an installed CLI that is missing from the terminal PATH", async () => {
+    stubCatalogFetch([
+      installTargetFixture({
+        target: "claude_code",
+        install_source: "npm @anthropic-ai/claude-code",
+      }),
+      installTargetFixture({
+        target: "pi",
+        cli_available: false,
+        local_version: null,
+        latest_version: "1.2.3",
+        action: "install",
+      }),
+    ]);
+
+    render(<ProviderCapabilityCard />);
+
+    // 已在终端 PATH 上（off_path=false）⇒ 本行**没有任何**暴露入口（卡片级
+    // 入口不出现，共享安装块里那个也不出现——口径统一由卡片按 off_path 决定）。
+    const claudeRow = await screen.findByTestId(
+      "provider-capability-provider-claude_code",
+    );
+    expect(
+      within(claudeRow).queryByTestId("provider-capability-expose-claude_code"),
+    ).toBeNull();
+    expect(
+      within(claudeRow).queryByTestId("provider-install-expose-claude_code"),
+    ).toBeNull();
+    // 未安装 ⇒ 无暴露入口（只给【安装】+ 手动命令）。
+    const piRow = await screen.findByTestId("provider-capability-provider-pi");
+    expect(
+      within(piRow).queryByTestId("provider-capability-expose-pi"),
+    ).toBeNull();
+    expect(within(piRow).queryByTestId("provider-install-expose-pi")).toBeNull();
+  });
+
+  // F3 收口（终审授权后）：能力卡里的暴露入口**只有卡片自己渲染的那一个**，
+  // 口径统一为「已安装 + off_path=true」（无论是否已核验）——共享安装块
+  // （`ProviderInstallActionButton`）不再重复渲染第二个同义 expose 按钮。
+  it("renders exactly one expose entry for a verified provider whose CLI is missing from the terminal PATH", async () => {
+    installFetchRouter(() => confirmedCodexProjection(), undefined, {
+      targets: [
+        installTargetFixture({
+          target: "codex",
+          install_source: "npm @openai/codex",
+          off_path: true,
+        }),
+      ],
+    });
+
+    render(<ProviderCapabilityCard />);
+
+    const codexRow = await screen.findByTestId(
+      "provider-capability-provider-codex",
+    );
+    // 已核验 + 已安装 + off_path=true ⇒ 卡片行内入口出现。
+    expect(
+      within(codexRow).getByTestId("provider-capability-expose-codex"),
+    ).toBeInTheDocument();
+    // 共享安装块不再渲染第二个同义按钮（同一动作只留一个入口）。
+    expect(
+      within(codexRow).queryByTestId("provider-install-expose-codex"),
+    ).toBeNull();
   });
 });

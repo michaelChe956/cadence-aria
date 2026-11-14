@@ -30,7 +30,7 @@ describe("CHANGELOG", () => {
     const entries = recentEntries(CURRENT_VERSION);
 
     expect(entries).toHaveLength(4);
-    expect(entries.map((entry) => entry.version)).toEqual(["0.1.5", "0.1.4", "0.1.3", "0.1.2"]);
+    expect(entries.map((entry) => entry.version)).toEqual(["0.1.6", "0.1.5", "0.1.4", "0.1.3"]);
     expect(entries.some((entry) => entry.version === "0.1.1")).toBe(false);
   });
 

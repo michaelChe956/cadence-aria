@@ -255,6 +255,48 @@ describe("workspace observer store", () => {
     controller.dispose();
   });
 
+  // P1（无限轮询修复）：真实 socket 帧路径与既有注释对齐——pong 等
+  // 未带来状态变化的帧（reducer 原样返回同一引用）不得触发
+  // onSnapshot / onSnapshotHint；实质变化帧（stage_change）照常唤醒。
+  it("does not wake snapshot listeners for changeless frames such as pong on the real socket path", async () => {
+    ObserverMockWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", ObserverMockWebSocket);
+    const onRecordsChange = vi.fn();
+    const onSnapshotHint = vi.fn();
+    const controller = createObserverController(undefined, onRecordsChange, {
+      refreshIntervalMs: 0,
+      reconnectDelayMs: 1_000,
+      schedule: vi.fn(() => 0 as never),
+      cancel: vi.fn(),
+      onSnapshotHint,
+    });
+
+    try {
+      await controller.replaceWatchedSessionIds(["s1"]);
+      const socket = ObserverMockWebSocket.instances[0];
+      if (!socket) throw new Error("observer socket was not created");
+      socket.open();
+
+      // 基线 session_state：建立观察态并唤醒一次。
+      socket.receive(sessionStateFrame("s1", 7));
+      const baselineNotifies = onRecordsChange.mock.calls.length;
+      expect(onSnapshotHint).toHaveBeenCalledTimes(1);
+
+      // pong 帧（无 event_seq、走 reducer default 分支）：不产生新快照、不唤醒。
+      socket.receive({ type: "pong" });
+      expect(onRecordsChange).toHaveBeenCalledTimes(baselineNotifies);
+      expect(onSnapshotHint).toHaveBeenCalledTimes(1);
+
+      // 实质变化帧照常上抛并唤醒。
+      socket.receive({ type: "stage_change", stage: "human_confirm", event_seq: 8 });
+      expect(onSnapshotHint).toHaveBeenCalledTimes(2);
+      expect(controller.records()[0]?.state.stage).toBe("human_confirm");
+    } finally {
+      controller.dispose();
+      vi.unstubAllGlobals();
+    }
+  });
+
 
   it("keeps healthy observer sockets long-lived across periodic ticks (F-06: no rebuild, no full-frame refresh)", async () => {
     type SocketCallbacks = {

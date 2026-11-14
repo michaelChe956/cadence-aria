@@ -1,4 +1,5 @@
 pub mod codegraph_cli;
+pub mod codegraph_coverage;
 pub mod exclude;
 pub mod freshness;
 pub mod operation;
@@ -10,6 +11,7 @@ pub use codegraph_cli::{
     AggregateIndexError, CODEGRAPH_MAX_VERSION_EXCLUSIVE, CODEGRAPH_MIN_VERSION, CodeGraphCli,
     CodeGraphCommandResult, CodeGraphStatus, codegraph_library_dir, codegraph_library_present,
 };
+pub use codegraph_coverage::{AggregateCoverageProbe, CodeGraphCoverage, CoverageOutcome};
 pub use exclude::{CodeGraphConfig, CodeGraphExcludeGenerator};
 pub use freshness::{
     ACTIVE_WRITE_DEBOUNCE as AGGREGATE_INDEX_ACTIVE_WRITE_DEBOUNCE, AggregateIndexFreshness,

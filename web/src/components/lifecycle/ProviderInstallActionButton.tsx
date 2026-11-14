@@ -5,6 +5,9 @@
 //   已安装但未核验（探针未通过）→ 【核验】（不显示安装；已核验才会显示更新）
 //   已安装已核验但版本落后      → 【更新】+ 当前版本 vs 最新版本
 //   已安装且已是最新            → 不渲染任何按钮（返回 null）
+// 已安装（任意版本，安装 / 更新后皆可）还能点【暴露到终端 PATH】（§五
+// 2.11）：把 CLI 软链到登录 shell PATH 上的可写目录，用户终端里敲命令才
+// 真的有反应；只在用户明确点击时调用，后端不写 shell profile、不改 PATH。
 // Kimi Code 走远程安装脚本：点击安装前必须告知「将执行来自 code.kimi.com 的
 // 安装脚本」，确认后才发 POST（acknowledge_remote_script=true）；且 Kimi 的
 // 版本来源是 npm 包 `@moonshot-ai/kimi-code` ⇒ 同样显示「更新」（REQ-PCI-01 / REQ-PCI-07）。
@@ -14,11 +17,13 @@ import { useEffect, useRef, useState } from "react";
 import { ApiRequestError } from "../../api/client";
 import {
   compareVersions,
+  exposeToTerminalPath,
   getInstallJob,
   manualInstallCommand,
   startInstall,
 } from "../../api/provider-install";
 import type {
+  ExposeTerminalPathResult,
   InstallFailureKind,
   InstallJob,
   InstallTargetWire,
@@ -39,6 +44,10 @@ export interface ProviderInstallActionButtonProps {
   localVersion?: string | null;
   latestVersion?: string | null; // Kimi 恒 null → 永不显示「更新」
   capabilityConfirmed: boolean;
+  /** 是否渲染「暴露到终端 PATH」按钮（默认 true ⇒ 既有宿主行为不变）。
+   *  false ⇒ 本组件**不**渲染该按钮（暴露入口由父级自己按需渲染，避免同一
+   *  动作出现两个同义入口）。 */
+  exposeEnabled?: boolean;
   /** 作业进入终态（completed/failed）后回调：父级据此重读 health 投影。 */
   onSettled?: () => void;
   /** 可选扩展：父级把既有「核验」通道（POST capability-revalidate）接进来。
@@ -52,6 +61,7 @@ export function ProviderInstallActionButton({
   localVersion,
   latestVersion,
   capabilityConfirmed,
+  exposeEnabled = true,
   onSettled,
   onVerify,
 }: ProviderInstallActionButtonProps): React.ReactElement | null {
@@ -60,6 +70,11 @@ export function ProviderInstallActionButton({
   const [submitting, setSubmitting] = useState(false);
   const [scriptNoticeVisible, setScriptNoticeVisible] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // §五 2.11：暴露到终端 PATH 的进行中 / 结果 / 失败文案。
+  const [exposing, setExposing] = useState(false);
+  const [exposeResult, setExposeResult] =
+    useState<ExposeTerminalPathResult | null>(null);
+  const [exposeError, setExposeError] = useState<string | null>(null);
 
   // 回调放进 ref：父级每次 render 换新的函数体不应重启轮询。
   const onSettledRef = useRef(onSettled);
@@ -155,6 +170,28 @@ export function ProviderInstallActionButton({
     void beginInstall(false);
   }
 
+  // §五 2.11：用户明确点击才把已装 CLI 软链到登录 shell PATH 上的可写
+  // 目录；成功 ⇒ 刷新提示（隐藏「请把 … 加入 PATH」旧句），失败 ⇒ 如实
+  // 展示后端给出的可行动原因（候选目录与各自不合格原因）。
+  async function handleExpose(): Promise<void> {
+    setExposeError(null);
+    setExposing(true);
+    try {
+      setExposeResult(await exposeToTerminalPath(target));
+    } catch (exposeFailure) {
+      setExposeResult(null);
+      setExposeError(
+        exposeFailure instanceof ApiRequestError
+          ? `暴露失败 ${exposeFailure.code}：${exposeFailure.message}`
+          : exposeFailure instanceof Error
+            ? `暴露失败：${exposeFailure.message}`
+            : "暴露失败",
+      );
+    } finally {
+      setExposing(false);
+    }
+  }
+
   const versionGap =
     localVersion != null && latestVersion != null
       ? compareVersions(localVersion, latestVersion)
@@ -167,7 +204,7 @@ export function ProviderInstallActionButton({
   const showInstall = !cliAvailable;
   const showVerify = cliAvailable && !capabilityConfirmed;
 
-  if (!showInstall && !showVerify && !showUpdate) {
+  if (!showInstall && !showVerify && !showUpdate && !cliAvailable) {
     return null;
   }
 
@@ -225,6 +262,17 @@ export function ProviderInstallActionButton({
           >
             当前 {localVersion} → 最新 {latestVersion}
           </span>
+        ) : null}
+        {cliAvailable && exposeEnabled ? (
+          <button
+            type="button"
+            data-testid={`provider-install-expose-${target}`}
+            disabled={exposing}
+            onClick={() => void handleExpose()}
+            className={`${buttonClass} border-[var(--aria-line)] bg-white text-[var(--aria-ink)] hover:bg-[var(--aria-panel-muted)]`}
+          >
+            暴露到终端 PATH
+          </button>
         ) : null}
       </div>
 
@@ -287,9 +335,34 @@ export function ProviderInstallActionButton({
           {job.outcome?.installed_version
             ? `：${job.outcome.installed_version}`
             : ""}
-          {job.outcome?.path_hint
-            ? `；若命令不在 PATH，可把 ${job.outcome.path_hint} 加入 PATH`
-            : ""}
+          {job.outcome?.path_hint && !exposeResult ? (
+            // 后端 path_hint 本身是完整句子（2026-11-13 契约）：原样渲染，
+            // 前端不再二次包裹（否则用户看到破碎双句，误判「安装没效果」）。
+            <span
+              data-testid={`provider-install-path-hint-${target}`}
+              className="mt-1 block break-words"
+            >
+              {job.outcome.path_hint}
+            </span>
+          ) : null}
+        </p>
+      ) : null}
+
+      {exposeResult ? (
+        <p
+          data-testid={`provider-install-expose-result-${target}`}
+          className="break-words text-xs text-[var(--aria-ink-muted)]"
+        >
+          已暴露到 {exposeResult.dir}，新终端可直接运行 {exposeResult.command}
+        </p>
+      ) : null}
+
+      {exposeError ? (
+        <p
+          data-testid={`provider-install-expose-error-${target}`}
+          className="break-words text-xs text-[var(--aria-danger)]"
+        >
+          {exposeError}
         </p>
       ) : null}
 

@@ -16,6 +16,7 @@ mod tests {
     };
 
     use super::*;
+    include!("operation_sdk_coverage_tests.inc.rs");
 
     #[test]
     fn build_persists_building_before_cli_and_marks_first_build_drift_failed() {

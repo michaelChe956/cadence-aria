@@ -1,0 +1,43 @@
+schema: spec-driven
+created: 2026-11-13
+goal: 让「本机没装 provider CLI / codegraph」的用户在页面点【安装】后真的装上并立刻可用；并让聚合索引在大型聚合根上不再因 codegraph 输出被抓取上限截断而误报 codegraph_files_invalid_json（成员覆盖验收改走 codegraph 库 API，不再拉全量文件清单）
+x-tracker-status: implemented
+x-owner-decisions:
+  - id: provider-install-platform-visible-path
+    decided: 2026-11-13
+    decision: D1/D2 —— 装完 CLI 仍不在宿主 PATH 上 ⇒ 判成功，并把安装目录纳入「平台自身命令可见 PATH」
+    implementation: 实现口径 = 共享 PATH overlay（进程级注册表 + 两个命令汇聚点合并）；不改进程真实 env
+    reason: 仓库 edition 2024 下 std::env::set_var 是 unsafe fn，且多线程改全局 env 有竞态；overlay 与「改 env」语义等价（平台自身发起的命令立即可见新装的 CLI），但无 unsafe、无全局 env 竞态
+  - id: codegraph-files-fetch-quota
+    decided: 2026-11-13
+    decision: D3 —— codegraph files --json 使用 64 MiB 专用抓取上限；文件清单调用只下发 `files --json`，不附加任何额外旗标（owner 2026-11-13 裁决去掉原定的额外旗标）
+    reason: 容器实测该额外旗标在 --json 模式下载荷逐字节不变（零收益）；64 MiB 专用上限才是唯一有效防线
+    risk: 若保留该额外旗标，未来 CLI 移除它 ⇒ files 全线失败（未知选项）；裁决去掉后该风险消失，且不做版本特判、不做运行时去旗标降级
+  - id: provider-update-semantics
+    decided: 2026-11-13
+    decision: 更新语义纳入本轮范围 —— 更新 SHALL 装到被更新对象当前所在的前缀（已安装但不在 PATH 上时从二进制真实路径反推 npm 前缀，MUST NOT 改装到别的前缀）；更新后版本未变 SHALL 明确报告「命令仍是旧版」，MUST NOT 静默成功；Kimi 更新沿用官方脚本原地替换并经装后验证
+    reason: 更新装到别的前缀就是「更新装到 A、用户跑的仍是 B」（前缀解析注释里记过 2026-09-09 同型老 bug）；版本未变被静默吞掉，用户会回到「点了没效果」的老症状
+  - id: provider-install-path-hint-rendering
+    decided: 2026-11-13
+    decision: D4 —— 前端 path_hint 原样渲染，不二次包裹
+    reason: 后端 path_hint 本身已是完整句子（已安装到 …；若命令不在 PATH 上，请把 … 加入 PATH 后重试），前端再包一层让用户看到破碎双句，更像「没效果」
+  - id: magpie-install-flow-not-adopted
+    decided: 2026-11-13
+    decision: magpie「不代跑安装、只展示 vendor 安装命令让用户复制到终端」的做法不作为参照；目标不变 —— 产品内一键安装必须真的装上并能用
+    reason: 我们是服务端 + 界面安装，「让用户自己复制命令到终端」不构成产品内闭环；仅采纳其前提检查与提示形态（Node/npm 缺失、不可写前缀 ⇒ 给迁移提示，绝不 sudo）
+  - id: aggregate-index-coverage-via-sdk
+    decided: 2026-11-13
+    decision: 聚合索引成员覆盖验收改走 codegraph 库 API（SDK）—— 逐成员目录级查询（CodeGraph.open + hasFilesUnder），MUST NOT 以全量文件清单（codegraph files --json）为常规验收路径；库 API 不可用（未安装 / 版本不兼容）时 MAY 回退既有 CLI 清单路径并留可审计痕迹，但 MUST NOT 把回退当常规路径；索引健康只告警不阻断激活；排除性查询保持既有 CLI 机制不变
+    reason: 成员覆盖验收的载荷与仓库规模线性相关（codegraph.db 与清单 JSON 的体积比 ≈ 13 比 1），用户现场 3.1 GB 索引 ⇒ 清单约 230 MB，1 MiB / 64 MiB 抓取上限都装不下 ⇒ 验收必失败；索引本身是好的，只是平台读不出来、因此不承认它
+    implementation: Node helper + codegraph 自带 Node（PATH node 需 ≥ 22.5 才回退采用）；SDK 缺失 / 不兼容 ⇒ 回退 CLI 清单路径并留审计 warning；健康闸（stale / pending / state / fileCount）只记 warning
+  - id: expose-cli-to-terminal-path
+    decided: 2026-11-13
+    decision: 新增「暴露到终端 PATH」动作 —— 仅在用户显式触发时执行；MUST NOT 修改用户的 shell 配置文件；只在「已存在 + 真实可写 + 确实在终端 PATH 上」的目录里创建单个软链；失败如实报告
+    reason: overlay 只让平台自己看见新装的 CLI，用户终端仍可能 command not found ⇒ 用户仍觉「装了没用」；自动改 shell profile 属越界副作用，故采用「显式触发 + 严格准入 + 事后重验」
+    implementation: src/product/provider_installation/expose.rs + POST /api/providers/{target}/expose + 前端按钮（已实施）
+  - id: agent-env-injection
+    decided: 2026-11-13
+    decision: 登录 shell 探测到的 agent 专属环境变量（PI_CODING_AGENT_DIR / CODEX_HOME / CLAUDE_CONFIG_DIR）SHALL 补进平台发起的子进程 env —— 本轮做（方案 §五 2.12），撤回原「另立议题」的非目标
+    reason: 平台进程不是登录 shell ⇒ 用户 shell 配置里的配置目录变量对平台不可见 ⇒ 拉起的 pi/codex/claude 去读默认配置位置，表现为「模型配了却不生效 / 找不到配置」；只补缺失值既透传用户意图，又不夺走调用方与平台更权威的取值
+    implementation: src/cross_cutting/path_overlay.rs（SHELL_PROBE_VARS 变量清单 + probe_login_shell_env 交互式 login 探测 + 2s 硬上限 + shell_env_overrides 合并优先级）+ 两个命令汇聚点 src/cross_cutting/process_manager.rs 与 src/cross_cutting/cli_adapter.rs（已实施）；契约见 REQ-PCI-12
+    boundary: 探测失败 / 超时 / 不可用 MUST 不阻塞任何流程；平台已有值优先、调用方显式覆盖优先；注入 MUST NOT 改变终端 PATH 可见性语义（与 REQ-PCI-08 / REQ-PCI-11 独立）

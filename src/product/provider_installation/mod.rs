@@ -10,6 +10,7 @@
 //! capability 记录、不触发核验探针。
 
 pub mod effective_prefix;
+pub mod expose;
 pub mod failure_classify;
 pub mod job_store;
 pub mod registry_version;

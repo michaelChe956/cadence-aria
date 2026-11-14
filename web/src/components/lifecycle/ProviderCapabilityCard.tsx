@@ -19,13 +19,17 @@
 // 接口调用、参数、状态语义与回显文案均未改动。
 import { useCallback, useEffect, useState } from "react";
 import { ApiRequestError } from "../../api/client";
-import { getInstallTargets } from "../../api/provider-install";
+import {
+  exposeToTerminalPath,
+  getInstallTargets,
+} from "../../api/provider-install";
 import {
   getProviderCapabilities,
   postProviderCapabilityRevalidate,
 } from "../../api/provider-capability";
 import type {
   InstallTargetView,
+  InstallTargetWire,
   ProviderCapabilityProviderSnapshotDto,
   ProviderCapabilitiesResponse,
 } from "../../api/types";
@@ -148,6 +152,13 @@ type RevalidateFeedback =
   | { state: "revalidated"; version: string; importedActions: string[] }
   | { state: "failed"; code: string; message: string; detail: string | null };
 
+/** 「暴露到终端 PATH」的瞬态回显（§五 2.11）：进行中 / 成功（软链落在哪个
+ *  目录、新终端可运行哪个命令）/ 失败（如实给出后端原因，不谎报成功）。 */
+type ExposeFeedback =
+  | { state: "busy" }
+  | { state: "done"; dir: string; command: string }
+  | { state: "failed"; message: string };
+
 export function ProviderCapabilityCard() {
   const [projection, setProjection] = useState<ProviderCapabilitiesResponse | null>(
     null,
@@ -162,6 +173,10 @@ export function ProviderCapabilityCard() {
   const [busyProvider, setBusyProvider] = useState<string | null>(null);
   const [feedbackByProvider, setFeedbackByProvider] = useState<
     Record<string, RevalidateFeedback>
+  >({});
+  // 「暴露到终端 PATH」的逐行回显（暴露不是安装动作 ⇒ 行内独立入口）。
+  const [exposeFeedbackByProvider, setExposeFeedbackByProvider] = useState<
+    Record<string, ExposeFeedback>
   >({});
   // 「一键核验全部」的作业状态（REQ-PCR-06：按钮由能力卡提供 ⇒ 状态挂在卡上）。
   const batch = useProviderCapabilityBatch();
@@ -206,6 +221,7 @@ export function ProviderCapabilityCard() {
     setProjection(null);
     setInstallTargets({});
     setFeedbackByProvider({});
+    setExposeFeedbackByProvider({});
     void reload();
     void reloadInstallTargets();
   }, [reload, reloadInstallTargets]);
@@ -263,6 +279,44 @@ export function ProviderCapabilityCard() {
     }
   }
 
+  /** §五 2.11：用户明确点击才把已装 CLI 软链到登录 shell PATH 上的可写目录
+   *  （不改 shell profile、不改 PATH 环境变量）；成功后重读安装目标面 ⇒
+   *  off_path 翻转时徽标与入口随之消失。失败如实回显后端原因。 */
+  async function handleExpose(
+    providerType: string,
+    target: InstallTargetWire,
+  ): Promise<void> {
+    setExposeFeedbackByProvider((current) => ({
+      ...current,
+      [providerType]: { state: "busy" },
+    }));
+    try {
+      const result = await exposeToTerminalPath(target);
+      setExposeFeedbackByProvider((current) => ({
+        ...current,
+        [providerType]: {
+          state: "done",
+          dir: result.dir,
+          command: result.command,
+        },
+      }));
+      await reloadInstallTargets();
+    } catch (error) {
+      setExposeFeedbackByProvider((current) => ({
+        ...current,
+        [providerType]: {
+          state: "failed",
+          message:
+            error instanceof ApiRequestError
+              ? `暴露失败 ${error.code}：${error.message}`
+              : error instanceof Error
+                ? `暴露失败：${error.message}`
+                : "暴露失败",
+        },
+      }));
+    }
+  }
+
   return (
     <div
       data-testid="provider-capability-card"
@@ -313,6 +367,7 @@ export function ProviderCapabilityCard() {
             const providerType = provider.provider_type;
             const label = PROVIDER_LABELS[providerType] ?? providerType;
             const feedback = feedbackByProvider[providerType] ?? null;
+            const exposeFeedback = exposeFeedbackByProvider[providerType] ?? null;
             const installView = installTargets[providerType] ?? null;
             // 批量作业的逐项结果（作业未发起时为 null）：并入本行展示。
             const batchItem =
@@ -398,6 +453,16 @@ export function ProviderCapabilityCard() {
                       版本落后{latestVersion === null ? "" : ` → ${latestVersion}`}
                     </span>
                   ) : null}
+                  {/* 已安装但不在登录 shell PATH（REQ-PCI-08）：仅提示徽标，
+                      行动入口是既有「暴露到终端 PATH」按钮（不重复实现）。 */}
+                  {installView?.off_path ? (
+                    <span
+                      data-testid={`provider-capability-off-path-${providerType}`}
+                      className={`${CHIP_CLASS} border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] text-[var(--aria-warning)]`}
+                    >
+                      已安装，但不在你的终端 PATH 上
+                    </span>
+                  ) : null}
                 </div>
                 {/* 行3：左 = 三个能力维度胶囊；右 = 操作按钮（右对齐）。
                     空间不够时操作区整体换行（flex-wrap + gap），维度胶囊仍保持
@@ -457,12 +522,36 @@ export function ProviderCapabilityCard() {
                           }
                           latestVersion={installView.latest_version}
                           capabilityConfirmed={confirmed}
+                          exposeEnabled={false}
                           onSettled={() => {
                             void reload();
                             void reloadInstallTargets();
                           }}
                         />
                       </div>
+                    ) : null}
+                    {/* 「暴露到终端 PATH」不是安装动作（是「让用户终端能直接跑
+                        CLI」的动作）⇒ 不挂在安装块里（已安装但**未核验**的行走
+                        不到安装块，入口随之不可达）。这里按行独立渲染入口，
+                        口径统一为「已安装 + 不在终端 PATH 上」（off_path=true，
+                        无论是否已核验）；已在 PATH 上（off_path=false）时用户
+                        终端本来就能跑，不加噪音；未安装没有可暴露的东西。
+                        安装块内的同义按钮已由 exposeEnabled={false} 关掉，
+                        同一动作只留一个入口。 */}
+                    {installView &&
+                    installView.cli_available &&
+                    installView.off_path ? (
+                      <button
+                        type="button"
+                        data-testid={`provider-capability-expose-${providerType}`}
+                        disabled={exposeFeedback?.state === "busy"}
+                        onClick={() =>
+                          void handleExpose(providerType, installView.target)
+                        }
+                        className={SECONDARY_BUTTON_CLASS}
+                      >
+                        暴露到终端 PATH
+                      </button>
                     ) : null}
                     {/* 批量作业里的失败项：单项重试走单 provider 端点（不重跑整批）。 */}
                     {batchItem !== null && batchItem.status === "failed" ? (
@@ -501,6 +590,30 @@ export function ProviderCapabilityCard() {
                         : feedback.state === "revalidated"
                           ? `revalidated（已导入 ${feedback.importedActions.join("、")}，版本 ${feedback.version}）`
                           : `失败 ${feedback.code}：${feedback.message}${feedback.detail ? `；详情 ${feedback.detail}` : ""}`}
+                  </p>
+                ) : null}
+                {/* 暴露回显（瞬态行：暴露中 / 成功（落在哪个目录、新终端可运行
+                    哪个命令）/ 失败原因，如实呈现，不谎报已暴露）。 */}
+                {exposeFeedback ? (
+                  <p
+                    data-testid={
+                      exposeFeedback.state === "busy"
+                        ? `provider-capability-expose-status-${providerType}`
+                        : exposeFeedback.state === "done"
+                          ? `provider-capability-expose-result-${providerType}`
+                          : `provider-capability-expose-error-${providerType}`
+                    }
+                    className={
+                      exposeFeedback.state === "failed"
+                        ? "text-xs text-[var(--aria-danger)]"
+                        : "text-xs text-[var(--aria-ink-muted)]"
+                    }
+                  >
+                    {exposeFeedback.state === "busy"
+                      ? "暴露中：正在把 CLI 软链到终端 PATH 上的可写目录…"
+                      : exposeFeedback.state === "done"
+                        ? `已暴露到 ${exposeFeedback.dir}，新终端可直接运行 ${exposeFeedback.command}`
+                        : exposeFeedback.message}
                   </p>
                 ) : null}
               </li>

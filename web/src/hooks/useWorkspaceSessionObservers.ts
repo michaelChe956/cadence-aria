@@ -23,6 +23,7 @@ import {
   logicalCodebaseBootstrapItem,
 } from "../state/workspace-cockpit-projection";
 import {
+  WATCHED_SESSION_STATUSES,
   createObserverController,
   selectObservedInbox,
   selectWatchedSessionIds,
@@ -55,6 +56,13 @@ export type CatalogRefreshTimer = number;
 const CATALOG_REFRESH_DEBOUNCE_MS = 250;
 /** P3（REQ-WIGA-07）：观察者请求的服务端近期目录上界（1..=32）。 */
 const RECENT_COMPLETION_REQUEST_LIMIT = 32;
+/** P2（无限轮询修复）：dirty 快路径补跑的最小间隔（ms）。取 1s：远小于
+ * 最小轮询档 5s（真实失效唤醒不被吞），又大于 WS 高频帧的典型突发节奏，
+ * 足以打断「轮 → dirty → 轮」的零间隔连续档。 */
+const DIRTY_RERUN_MIN_DELAY_MS = 1_000;
+/** P3（无限轮询修复）：空闲退避档——无进行中会话/待处理事实时，周期轮询
+ * 退到的最大档（与设置面板 60s 同档；按退避间隔处理，不改用户设置值）。 */
+const IDLE_BACKOFF_INTERVAL_MS = 60_000;
 
 const scheduleCatalogRefresh = (callback: () => void, delayMs: number): CatalogRefreshTimer =>
   window.setTimeout(callback, delayMs);
@@ -195,6 +203,10 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   const hydrationClosedRef = useRef(false);
   // C5 Task 6：上一轮 project 等待项 durable 快照（GET 失败时保留）。
   const projectC1ItemsRef = useRef<readonly CockpitInboxItem[]>([]);
+  // P3（无限轮询修复）：最近一轮目录是否存在进行中事实（活跃会话/等待项/
+  // LC 通知/待处理事项）——决定下一轮周期用用户档还是空闲退避档；初始
+  // true（未见事实前保守维持用户节奏），失败轮保留上一已知值。
+  const hasActiveFactsRef = useRef(true);
   const snapshotHintRef = useRef<() => void>(() => undefined);
   const controllerRef = useRef<WorkspaceObserverController | null>(null);
 
@@ -314,6 +326,10 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
   useEffect(() => {
     let alive = true;
     let debounceTimer: CatalogRefreshTimer | null = null;
+    // P2/F9（无限轮询修复）：dirty 补跑的**独立槽位**——此前它与普通 250ms
+    // 防抖共用一个槽位，补跑等待期内的任何唤醒都会把它取消并改排 250ms ⇒
+    // 「补跑至少间隔 1s」被完全绕过（连续档回归）。两者必须分开。
+    let dirtyTimer: CatalogRefreshTimer | null = null;
     let periodicTimer: CatalogRefreshTimer | null = null;
     let inFlight = false;
     let dirty = false;
@@ -372,7 +388,58 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
       setCodingAttentionItems(items);
     };
 
+    const clearPeriodicTimer = () => {
+      if (periodicTimer !== null) {
+        cancelRefresh(periodicTimer);
+        periodicTimer = null;
+      }
+    };
+    const clearDebounceTimer = () => {
+      if (debounceTimer !== null) {
+        cancelRefresh(debounceTimer);
+        debounceTimer = null;
+      }
+    };
+    const clearDirtyTimer = () => {
+      if (dirtyTimer !== null) {
+        cancelRefresh(dirtyTimer);
+        dirtyTimer = null;
+      }
+    };
+
+    // P3（无限轮询修复）：下一轮周期排程——空闲（无进行中事实）退避到
+    // 60s 档；document.hidden 时暂停（不排下一轮），恢复可见时补跑。
+    const scheduleNextPeriodicRefresh = () => {
+      clearPeriodicTimer();
+      if (refreshIntervalMs <= 0 || document.hidden) {
+        return;
+      }
+      const intervalMs = hasActiveFactsRef.current
+        ? refreshIntervalMs
+        : Math.max(refreshIntervalMs, IDLE_BACKOFF_INTERVAL_MS);
+      periodicTimer = scheduleRefresh(runCatalogRefresh, intervalMs);
+    };
+
+    // P2/F9（无限轮询修复）：dirty 补跑在**独立槽位**上至少间隔
+    // DIRTY_RERUN_MIN_DELAY_MS 再启动；等待期内的新唤醒合并为同一次补跑，
+    // 不叠加、也不得把它提前（此前共用防抖槽时会被 250ms 档顶掉）。
+    const scheduleDirtyRerun = () => {
+      clearDirtyTimer();
+      // 普通 250ms 防抖若已排程，会早于补跑的最小间隔执行 ⇒ 撤销（补跑是
+      // 全量 GET，会带上这段等待期内的任何新事实）。
+      clearDebounceTimer();
+      dirtyTimer = scheduleRefresh(() => {
+        dirtyTimer = null;
+        runCatalogRefresh();
+      }, DIRTY_RERUN_MIN_DELAY_MS);
+    };
+
     const runCatalogRefresh = () => {
+      // P3（无限轮询修复）：页面不可见 ⇒ 暂停——丢弃唤醒、不发起请求；
+      // 恢复可见时 visibilitychange 立刻补一轮，事实不丢。
+      if (document.hidden) {
+        return;
+      }
       if (inFlight) {
         dirty = true;
         return;
@@ -459,6 +526,12 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
                   return;
                 }
                 for (const codebase of codebases) {
+                  // P4（无限轮询修复）：bootstrap 是 LC 级端点——仅
+                  // kind === "logical" 的条目请求；普通单仓用仓库 id 打
+                  // LC 端点必然 404 且被静默吞掉，纯浪费。
+                  if (codebase.kind !== "logical") {
+                    continue;
+                  }
                   const lcId = codebase.logical_codebase_id ?? codebase.id;
                   try {
                     const projection = await getBootstrap(project.project_id, lcId);
@@ -523,6 +596,19 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
                 }
               }
             }
+            // P3（无限轮询修复）：本轮「进行中事实」判定（活跃会话 / issue
+            // 与 project 等待项 / LC 冷启动通知 / 待处理事项）——全部复用
+            // 本轮目录数据，不新增接口；失败轮保留上一已知值。
+            hasActiveFactsRef.current =
+              lifecycles.some((lifecycle) =>
+                lifecycle.workspace_sessions.some((session) =>
+                  WATCHED_SESSION_STATUSES.has(session.status),
+                ),
+              ) ||
+              nextC1Items.length > 0 ||
+              nextProjectItems.length > 0 ||
+              nextBootstrapItems.length > 0 ||
+              attentionByIdentity.size > 0;
             applyAttentionCatalog(
               Array.from(attentionByIdentity.values()),
               Array.from(attentionByIdentity.keys()),
@@ -539,15 +625,18 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
           inFlight = false;
           if (alive) {
             if (dirty) {
-              // 本轮在途期间又收到唤醒：结束后立即补跑一次，以新一轮 GET
+              // 本轮在途期间又收到唤醒：结束后补跑一次，以新一轮 GET
               // 校正被唤醒期间的事实（旧 HTTP 结果不覆盖新事实）。
               dirty = false;
-              runCatalogRefresh();
+              // P2（无限轮询修复）：补跑不再零延迟——经 scheduleDirtyRerun
+              // 至少间隔 DIRTY_RERUN_MIN_DELAY_MS，打断连续档。
+              scheduleDirtyRerun();
+              // P2（无限轮询修复）：dirty 分支同样排下一轮周期定时器，
+              // 周期节奏不被快路径旁路。
+              scheduleNextPeriodicRefresh();
             } else {
               hydrationClosedRef.current = true;
-              if (refreshIntervalMs > 0) {
-                periodicTimer = scheduleRefresh(runCatalogRefresh, refreshIntervalMs);
-              }
+              scheduleNextPeriodicRefresh();
             }
           }
         }
@@ -564,6 +653,12 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
         dirty = true;
         return;
       }
+      // P2/F9：dirty 补跑等待期内的新唤醒**并入**已排的补跑（补跑是全量
+      // GET，会带上这期间的新事实）——既不取消它，也不另排 250ms 档（那会把
+      // 补跑提前到最小间隔之前 ⇒ 「补跑至少间隔 1s」被绕过、连续档回归）。
+      if (dirtyTimer !== null) {
+        return;
+      }
       if (debounceTimer !== null) {
         cancelRefresh(debounceTimer);
       }
@@ -577,12 +672,34 @@ export function useWorkspaceSessionObservers(options: WorkspaceSessionObserverOp
     runCatalogRefresh();
     const unsubscribeInvalidation = subscribeToLifecycleInvalidation(queueCatalogRefresh);
 
+    // P3（无限轮询修复）：页面可见性——隐藏即暂停（撤销已排定时器，在途
+    // 请求自然收敛），回到可见立刻补一轮并恢复周期。
+    const handleVisibilityChange = () => {
+      if (!alive) {
+        return;
+      }
+      if (document.hidden) {
+        clearPeriodicTimer();
+        clearDebounceTimer();
+        // P2/F9：隐藏即暂停——已排的 dirty 补跑同样撤销（回到可见时立刻
+        // 补一轮，事实不丢）。
+        clearDirtyTimer();
+        return;
+      }
+      runCatalogRefresh();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     return () => {
       alive = false;
       snapshotHintRef.current = () => undefined;
       unsubscribeInvalidation();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (debounceTimer !== null) {
         cancelRefresh(debounceTimer);
+      }
+      if (dirtyTimer !== null) {
+        cancelRefresh(dirtyTimer);
       }
       if (periodicTimer !== null) {
         cancelRefresh(periodicTimer);

@@ -48,6 +48,10 @@ tokio-util = "0.7"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
+# 生产 tracing subscriber（`aria web` 日志落盘：stderr + `<状态根>/logs/aria.log`）。
+# owner 2026-11-13 裁决：从 [dev-dependencies] 移到运行时依赖（「客户机可诊断性」
+# 所需的有意变更）；版本与 features 不变 ⇒ Cargo.lock 零变化。
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.23.1", features = ["v4", "v5", "serde"] }
 unicode-normalization = "0.1.25"
 
@@ -56,7 +60,6 @@ mockito = "1"
 parking_lot = "0.12"
 tempfile = "3.27.0"
 tokio-tungstenite = "0.29"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # 开发/测试构建：用更轻的调试信息以控制 target 体积
 [profile.dev]

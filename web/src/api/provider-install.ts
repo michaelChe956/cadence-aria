@@ -3,9 +3,11 @@
 //   GET  /api/providers/install-targets      → 五类对象的本地/最新版本与动作
 //   POST /api/providers/{target}/install     → 立即返回 { job_id }（异步作业）
 //   GET  /api/providers/install/{job_id}     → 作业状态（running/completed/failed）
+//   POST /api/providers/{target}/expose      → 把已装 CLI 软链到终端 PATH（§五 2.11）
 // 刻意不写进 client.ts：保持既有 client 只做通用请求。
 import { ApiRequestError, normalizeApiError } from "./client";
 import type {
+  ExposeTerminalPathResult,
   InstallJob,
   InstallTargetView,
   InstallTargetWire,
@@ -152,5 +154,17 @@ export async function startInstall(
 export async function getInstallJob(jobId: string): Promise<InstallJob> {
   return requestJson<InstallJob>(
     `/api/providers/install/${encodeURIComponent(jobId)}`,
+  );
+}
+
+/** 把已安装的 CLI 暴露到用户终端 PATH（§五 2.11）：后端只在登录 shell
+ *  PATH 上真实可写的目录建**单个软链**；不写 shell profile、不改 PATH
+ *  环境变量。用户明确点击才调用（安装 / 更新后任意版本可用）。 */
+export async function exposeToTerminalPath(
+  target: InstallTargetWire,
+): Promise<ExposeTerminalPathResult> {
+  return requestJson<ExposeTerminalPathResult>(
+    `/api/providers/${encodeURIComponent(target)}/expose`,
+    { method: "POST" },
   );
 }

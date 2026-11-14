@@ -88,12 +88,44 @@ function runningJob(jobId: string, target: InstallTargetWire): InstallJob {
   };
 }
 
+// 后端 npm_path_hint() 返回的是**完整句子**（2026-11-13 确认）：
+// 「已安装到 <prefix>；若 `<cmd>` 不在 PATH 上，请把 <prefix>/bin 加入 PATH 后重试」。
+const PATH_HINT_SENTENCE =
+  "已安装到 /opt/node；若 `codegraph` 不在 PATH 上，请把 /opt/node/bin 加入 PATH 后重试";
+
 function completedJob(jobId: string, target: InstallTargetWire): InstallJob {
   return {
     ...runningJob(jobId, target),
     status: "completed",
-    outcome: { installed_version: "1.0.34", path_hint: "~/.npm-global/bin" },
+    outcome: { installed_version: "1.0.34", path_hint: PATH_HINT_SENTENCE },
   };
+}
+
+function completedJobWithOutcome(
+  jobId: string,
+  target: InstallTargetWire,
+  outcome: InstallJob["outcome"],
+): InstallJob {
+  return {
+    ...runningJob(jobId, target),
+    status: "completed",
+    outcome,
+    failure: null,
+  };
+}
+
+/** 点安装 → 轮询到终态（两轮轮询：running → completed）。 */
+async function driveToCompleted(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "安装" }));
+    await Promise.resolve();
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_000);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(2_000);
+  });
 }
 
 function failedJob(jobId: string, target: InstallTargetWire): InstallJob {
@@ -173,35 +205,50 @@ describe("ProviderInstallActionButton 显示规则（REQ-PCI-02）", () => {
     ).toHaveTextContent("1.5.0");
   });
 
-  it("本地版本等于最新版本时不渲染任何按钮", () => {
+  // §五 2.11 起：已安装（任意版本）始终渲染【暴露到终端 PATH】，不再
+  // 整体返回 null；「安装 / 更新」按钮仍按 REQ-PCI-02 规则不渲染。
+  it("本地版本等于最新版本时不渲染「安装/更新」，仅保留「暴露到终端 PATH」", () => {
     installFetchRouter({ target: "codex" });
-    const { container } = renderButton({
+    renderButton({
       cliAvailable: true,
       capabilityConfirmed: true,
       localVersion: "1.5.0",
       latestVersion: "1.5.0",
     });
 
-    expect(container).toBeEmptyDOMElement();
+    expect(
+      screen.queryByRole("button", { name: "安装" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "更新" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("provider-install-expose-codex"),
+    ).toBeInTheDocument();
   });
 
   it("本地版本高于最新版本时不提供「更新」（不因字符串不等就误报）", () => {
     installFetchRouter({ target: "codex" });
-    const { container } = renderButton({
+    renderButton({
       cliAvailable: true,
       capabilityConfirmed: true,
       localVersion: "1.10.0",
       latestVersion: "1.9.0",
     });
 
-    expect(container).toBeEmptyDOMElement();
+    expect(
+      screen.queryByRole("button", { name: "更新" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("provider-install-expose-codex"),
+    ).toBeInTheDocument();
   });
 });
 
 describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-07）", () => {
   it("latestVersion 为 null 时不出现「更新」", () => {
     installFetchRouter({ target: "kimi_code" });
-    const { container } = renderButton({
+    renderButton({
       target: "kimi_code",
       cliAvailable: true,
       capabilityConfirmed: true,
@@ -209,7 +256,10 @@ describe("Kimi Code：安装来源告知与版本判定（REQ-PCI-01 / REQ-PCI-0
       latestVersion: null,
     });
 
-    expect(container).toBeEmptyDOMElement();
+    // §五 2.11：已安装 ⇒ 「暴露到终端 PATH」仍在；「更新」不出现。
+    expect(
+      screen.getByTestId("provider-install-expose-kimi_code"),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "更新" }),
     ).not.toBeInTheDocument();
@@ -428,5 +478,262 @@ describe("异步安装作业（REQ-PCI-05 / REQ-PCI-06）", () => {
     expect(status).toHaveTextContent(NPM_MANUAL("@openai/codex"));
     expect(status).not.toHaveTextContent("已安装");
     expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+});
+
+// 2026-11-13 bug 修复（契约变更）：后端 path_hint 本身是完整句子，前端
+// 曾再包一层「若命令不在 PATH，可把 X 加入 PATH」⇒ 用户看到破碎双句，
+// 误以为「点了安装没效果」。新契约：path_hint **原样渲染**，不二次包裹、
+// 不截断；没有 path_hint 就不渲染该提示节点。
+describe("安装完成后的 path_hint 呈现（原样渲染后端整句）", () => {
+  it("path_hint 是完整句子时逐字渲染，且不再出现二次包裹痕迹", async () => {
+    vi.useFakeTimers();
+    installFetchRouter({
+      target: "codex",
+      jobIds: ["job_hint"],
+      jobs: [
+        () => runningJob("job_hint", "codex"),
+        () =>
+          completedJobWithOutcome("job_hint", "codex", {
+            installed_version: "1.0.34",
+            path_hint: PATH_HINT_SENTENCE,
+          }),
+      ],
+    });
+    renderButton({ cliAvailable: false });
+
+    await driveToCompleted();
+
+    // 逐字等于后端返回的整句（不截断、不加前后缀）。
+    const hint = screen.getByTestId("provider-install-path-hint-codex");
+    expect(hint.textContent?.trim()).toBe(PATH_HINT_SENTENCE);
+
+    const status = screen.getByTestId("provider-install-status-codex");
+    expect(status.textContent).toContain(PATH_HINT_SENTENCE);
+    // 旧的二次包裹形态（「可把 … 加入 PATH」）彻底消失。
+    expect(status.textContent).not.toContain("可把");
+    expect(status.textContent).not.toContain(
+      `可把 ${PATH_HINT_SENTENCE} 加入 PATH`,
+    );
+    // 版本提示不受影响。
+    expect(status).toHaveTextContent("已安装：1.0.34");
+  });
+
+  it("path_hint 缺失时不渲染提示节点", async () => {
+    vi.useFakeTimers();
+    installFetchRouter({
+      target: "codex",
+      jobIds: ["job_nohint"],
+      jobs: [
+        () => runningJob("job_nohint", "codex"),
+        () =>
+          completedJobWithOutcome("job_nohint", "codex", {
+            installed_version: "1.0.34",
+            path_hint: null,
+          }),
+      ],
+    });
+    renderButton({ cliAvailable: false });
+
+    await driveToCompleted();
+
+    expect(
+      screen.queryByTestId("provider-install-path-hint-codex"),
+    ).toBeNull();
+    const status = screen.getByTestId("provider-install-status-codex");
+    expect(status).toHaveTextContent("已安装：1.0.34");
+  });
+});
+
+/** §五 2.11：install / 作业轮询 / expose 三路由发送器（expose 应答可注入）。 */
+function exposeFetchRouter(options: {
+  target: InstallTargetWire;
+  jobIds?: string[];
+  jobs?: JobResponder[];
+  expose?: () => Response;
+}): { requests: CapturedRequest[] } {
+  const requests: CapturedRequest[] = [];
+  const jobIds = [...(options.jobIds ?? ["job_0001"])];
+  const jobs = [...(options.jobs ?? [])];
+  const router = async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    const url = typeof input === "string" ? input : input.toString();
+    const method = (init?.method ?? "GET").toUpperCase();
+    const rawBody = typeof init?.body === "string" ? init.body : null;
+    requests.push({
+      url,
+      method,
+      body: rawBody === null ? null : JSON.parse(rawBody),
+    });
+    if (
+      method === "POST" &&
+      url === `/api/providers/${options.target}/expose`
+    ) {
+      return (
+        options.expose?.() ??
+        jsonResponse({
+          exposed: true,
+          command: "claude",
+          dir: "/home/u/.local/bin",
+          target: "/opt/node/bin/claude",
+        })
+      );
+    }
+    if (
+      method === "POST" &&
+      url === `/api/providers/${options.target}/install`
+    ) {
+      return jsonResponse({ job_id: jobIds.shift() ?? "job_0001" });
+    }
+    const jobMatch = /^\/api\/providers\/install\/(.+)$/.exec(url);
+    if (method === "GET" && jobMatch) {
+      const responder = jobs.length > 1 ? jobs.shift()! : jobs[0];
+      const job = responder
+        ? responder()
+        : runningJob(jobMatch[1], options.target);
+      return jsonResponse(job);
+    }
+    return jsonResponse(
+      { code: "not_found", message: `no route for ${method} ${url}` },
+      404,
+    );
+  };
+  vi.stubGlobal("fetch", vi.fn(router));
+  return { requests };
+}
+
+// §五 2.11「把 CLI 暴露到终端 PATH」（用户明确点击才动作）：按钮仅在
+// 目标已安装时出现；成功后把「若不在 PATH 上请加入 PATH」的提示**刷新**
+// 为「已暴露到 <dir>，新终端可直接运行 <command>」；失败如实展示后端
+// 返回的可行动原因（候选目录与各自不合格原因）。
+describe("暴露到终端 PATH（§五 2.11）", () => {
+  it("按钮仅在已安装时渲染（未安装不显示）", () => {
+    exposeFetchRouter({ target: "claude_code" });
+    const view = renderButton({
+      target: "claude_code",
+      cliAvailable: true,
+      capabilityConfirmed: true,
+    });
+    expect(
+      screen.getByTestId("provider-install-expose-claude_code").textContent,
+    ).toBe("暴露到终端 PATH");
+
+    view.rerender(
+      <ProviderInstallActionButton
+        target="claude_code"
+        cliAvailable={false}
+        capabilityConfirmed={true}
+      />,
+    );
+    expect(
+      screen.queryByTestId("provider-install-expose-claude_code"),
+    ).toBeNull();
+  });
+
+  it("点击后 POST expose 端点；成功展示结果并刷新安装提示", async () => {
+    vi.useFakeTimers();
+    exposeFetchRouter({
+      target: "claude_code",
+      jobIds: ["job_expose"],
+      jobs: [
+        () => runningJob("job_expose", "claude_code"),
+        () => completedJob("job_expose", "claude_code"),
+      ],
+    });
+    const view = renderButton({ target: "claude_code", cliAvailable: false });
+    await driveToCompleted();
+    // 父级在 onSettled 后重读 health ⇒ 组件以「已安装」重渲。
+    view.rerender(
+      <ProviderInstallActionButton
+        target="claude_code"
+        cliAvailable={true}
+        capabilityConfirmed={true}
+      />,
+    );
+    expect(
+      screen.getByTestId("provider-install-path-hint-claude_code"),
+    ).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(
+        screen.getByTestId("provider-install-expose-claude_code"),
+      );
+      await Promise.resolve();
+    });
+
+    const result = screen.getByTestId(
+      "provider-install-expose-result-claude_code",
+    );
+    expect(result.textContent).toContain("已暴露到 /home/u/.local/bin");
+    expect(result.textContent).toContain("新终端可直接运行 claude");
+    // 成功后旧的「请把 … 加入 PATH」提示被刷新掉，不再误导。
+    expect(
+      screen.queryByTestId("provider-install-path-hint-claude_code"),
+    ).toBeNull();
+  });
+
+  it("失败时展示后端返回的可行动原因", async () => {
+    exposeFetchRouter({
+      target: "claude_code",
+      expose: () =>
+        jsonResponse(
+          {
+            code: "expose_no_candidate_dir",
+            message:
+              "没有可用的暴露目录（已安装于 /opt/node/bin/claude）：/home/u/.local/bin 真实不可写",
+          },
+          400,
+        ),
+    });
+    renderButton({
+      target: "claude_code",
+      cliAvailable: true,
+      capabilityConfirmed: true,
+    });
+    await act(async () => {
+      fireEvent.click(
+        screen.getByTestId("provider-install-expose-claude_code"),
+      );
+      await Promise.resolve();
+    });
+    const error = screen.getByTestId(
+      "provider-install-expose-error-claude_code",
+    );
+    expect(error.textContent).toContain("expose_no_candidate_dir");
+    expect(error.textContent).toContain("没有可用的暴露目录");
+    expect(
+      screen.queryByTestId("provider-install-expose-result-claude_code"),
+    ).toBeNull();
+  });
+
+  // F3 收口（终审授权）：`exposeEnabled=false` ⇒ 本组件**不**渲染暴露按钮
+  // （暴露入口改由能力卡按 off_path 口径自己渲染，避免同一动作两个同义
+  // 入口）；默认（不传该 prop）⇒ 仍渲染，其它宿主（codegraph 安装入口 /
+  // 注册向导）行为完全不变。
+  it("exposeEnabled=false 时不渲染暴露按钮；默认仍渲染（向后兼容）", () => {
+    exposeFetchRouter({ target: "claude_code" });
+    const view = renderButton({
+      target: "claude_code",
+      cliAvailable: true,
+      capabilityConfirmed: true,
+      exposeEnabled: false,
+    });
+    expect(
+      screen.queryByTestId("provider-install-expose-claude_code"),
+    ).toBeNull();
+
+    // 不传该 prop ⇒ 仍渲染暴露按钮（既有宿主行为不变）。
+    view.rerender(
+      <ProviderInstallActionButton
+        target="claude_code"
+        cliAvailable={true}
+        capabilityConfirmed={true}
+      />,
+    );
+    expect(
+      screen.getByTestId("provider-install-expose-claude_code"),
+    ).toBeTruthy();
   });
 });

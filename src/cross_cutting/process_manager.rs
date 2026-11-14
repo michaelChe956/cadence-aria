@@ -438,6 +438,18 @@ impl ProcessManager {
             .args(args)
             .current_dir(working_dir)
             .envs(env_vars);
+        // 计划 2026-11-13 包 2.4:子进程 PATH 显式下发 overlay 合并值——
+        // env_vars 含 PATH 时覆盖为合并值,不含时也显式写,使 overlay 目录
+        // 到达子进程;overlay 为空时与宿主 PATH 等值,继承语义不变。
+        if let Some(merged_path) = path_env(env_vars) {
+            command_builder.env("PATH", merged_path);
+        }
+        // 计划 2026-11-13 §五 2.12:补入登录 shell 探测回的 agent 专属
+        // 环境变量(缺失才补;进程 env/覆盖层已有的值优先)。
+        for (name, value) in crate::cross_cutting::path_overlay::shell_env_overrides(Some(env_vars))
+        {
+            command_builder.env(name, value);
+        }
         spawn_prepared(command, command_builder).await
     }
 
@@ -523,10 +535,15 @@ fn command_is_resolvable(
 fn path_env(env_vars: &BTreeMap<String, String>) -> Option<OsString> {
     // A1-a(Bug45 批2 环境回退底座):env_vars 无 PATH 时回退宿主 PATH
     // (std::env)——裸名 CLI 解析不断链;显式 PATH 仍优先(覆盖层)。
-    env_vars
-        .get("PATH")
-        .map(OsString::from)
-        .or_else(|| std::env::var_os("PATH"))
+    // 计划 2026-11-13 包 2.4:可执行性判定与下发的 PATH 都改为 overlay
+    // 合并后的值(effective_path 在 overlay 为空时原样返回 base,零行为变化)。
+    let base = env_vars.get("PATH").map(String::as_str);
+    if base.is_none() && std::env::var_os("PATH").is_none() {
+        return None;
+    }
+    Some(OsString::from(
+        crate::cross_cutting::path_overlay::effective_path(base),
+    ))
 }
 
 fn command_missing(command: &str) -> ProviderAdapterError {
@@ -633,6 +650,9 @@ mod tests {
     #[tokio::test]
     async fn spawn_inherits_host_environment_when_env_map_is_empty() {
         use tokio::io::AsyncReadExt;
+        // overlay 是进程级共享状态：并行用例登记目录会让「子进程 PATH ==
+        // 宿主 PATH」的逐字断言失真 ⇒ 持锁清空后断言（计划 §6.1）。
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
 
         let host_home = std::env::var("HOME").expect("host HOME");
         let host_path = std::env::var("PATH").expect("host PATH");
@@ -741,6 +761,110 @@ mod tests {
 
         process.child.terminate().await;
         assert_eq!(process_start_time_ticks(pid), None);
+    }
+
+    /// 计划 2026-11-13 包 2.4：PATH overlay 合并点——spawn 的可执行性判定
+    /// 与子进程 env 的 PATH 都必须用合并后的 PATH：overlay 内的裸名命令可
+    /// 解析，且子进程 PATH 首目录即 overlay 目录（Prepend 语义）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_merges_path_overlay_into_resolvability_and_child_env() {
+        use tokio::io::AsyncReadExt;
+
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
+
+        let dir = tempfile::tempdir().expect("overlay dir");
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).expect("create overlay bin dir");
+        let probe = bin_dir.join("aria-overlay-probe");
+        fs::write(&probe, "#!/bin/sh\nprintf '%s' \"$PATH\"\n").expect("write probe fixture");
+        fs::set_permissions(&probe, fs::Permissions::from_mode(0o755))
+            .expect("chmod probe fixture");
+        crate::cross_cutting::path_overlay::register(
+            &bin_dir,
+            crate::cross_cutting::path_overlay::OverlayPosition::Prepend,
+        );
+
+        let mut process = ProcessManager::spawn(
+            "aria-overlay-probe",
+            &[],
+            dir.path(),
+            &BTreeMap::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("overlay 内的裸名命令必须经合并后的 PATH 解析成功");
+
+        let mut stdout = String::new();
+        let mut reader = std::pin::pin!(process.stdout);
+        reader.read_to_string(&mut stdout).await.expect("read PATH");
+        let _ = process.child.wait().await.expect("wait probe fixture");
+        assert_eq!(
+            std::env::split_paths(&stdout).next(),
+            Some(bin_dir),
+            "子进程 PATH 首目录必须是 overlay 目录(Prepend): {stdout}"
+        );
+    }
+
+    /// 计划 2026-11-13 §五 2.12：spawn 构造子进程 env 时补入登录 shell 探测
+    /// 回的 agent 专属环境变量——缺失才补（进程 env / 显式覆盖层已有的值
+    /// 优先，不被探测值覆盖）。
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_injects_shell_probe_agent_env_when_platform_lacks_it() {
+        use tokio::io::AsyncReadExt;
+
+        let _overlay_state = crate::cross_cutting::path_overlay::OverlayStateGuard::acquire();
+
+        let Some(free_var) = ["PI_CODING_AGENT_DIR", "CODEX_HOME", "CLAUDE_CONFIG_DIR"]
+            .into_iter()
+            .find(|name| std::env::var_os(name).is_none())
+        else {
+            panic!("宿主 env 已含全部 agent 变量,无法验证补入分支(环境不满足)");
+        };
+        crate::cross_cutting::path_overlay::set_shell_probe_for_test(
+            None,
+            vec![(free_var.to_string(), "/probe/agent-dir".to_string())],
+        );
+
+        // 补入分支:env_vars 为空、宿主缺该变量 ⇒ 子进程读到探测值。
+        let script = format!("printf '%s' \"${free_var}\"");
+        let mut process = ProcessManager::spawn(
+            "/bin/sh",
+            &["-c", &script],
+            &std::env::current_dir().expect("cwd"),
+            &BTreeMap::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn env printer");
+        let mut stdout = String::new();
+        let mut reader = std::pin::pin!(process.stdout);
+        reader.read_to_string(&mut stdout).await.expect("read env");
+        let _ = process.child.wait().await;
+        assert_eq!(
+            stdout, "/probe/agent-dir",
+            "缺失的 agent 变量必须被探测值补入"
+        );
+
+        // 平台优先分支:显式覆盖层已有该变量 ⇒ 保留显式值。
+        let mut process = ProcessManager::spawn(
+            "/bin/sh",
+            &["-c", &script],
+            &std::env::current_dir().expect("cwd"),
+            &BTreeMap::from([(free_var.to_string(), "/explicit/agent-dir".to_string())]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("spawn explicit env printer");
+        let mut stdout = String::new();
+        let mut reader = std::pin::pin!(process.stdout);
+        reader.read_to_string(&mut stdout).await.expect("read env");
+        let _ = process.child.wait().await;
+        assert_eq!(
+            stdout, "/explicit/agent-dir",
+            "覆盖层已有值不得被探测值覆盖"
+        );
     }
 }
 

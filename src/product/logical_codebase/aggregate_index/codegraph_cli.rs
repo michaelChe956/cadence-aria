@@ -38,6 +38,13 @@ pub fn parse_codegraph_version(output: &str) -> Option<(u64, u64, u64)> {
 }
 const OUTPUT_LIMIT_BYTES: usize = 1024 * 1024;
 
+/// `codegraph files --json` 的专用 stdout 上限。
+///
+/// 文件清单载荷随聚合根规模线性膨胀（实测 9k~20k 文件时为 1.3~3.9 MB），
+/// 通用 1 MiB 上限会把 JSON 尾部截断并把残缺载荷误报成解析失败。
+/// 该上限只用于 `files`，其余命令维持 1 MiB。
+const FILES_OUTPUT_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AggregateIndexError {
     #[error("aggregate_index_degraded:{code}: {message}")]
@@ -51,6 +58,9 @@ pub struct CodeGraphCommandResult {
     pub stdout: String,
     pub stderr: String,
     pub duration_ms: u64,
+    /// stdout 是否被上限截断——载荷不完整，调用方不得把它当完整结果用
+    /// （例如把截断后的 JSON 前缀当合法载荷解析）。
+    pub stdout_truncated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -124,6 +134,7 @@ impl CodeGraphCli {
             Path::new("."),
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_version_failed",
+            OUTPUT_LIMIT_BYTES,
         )?;
         let actual = output.stdout.trim();
         let in_range = parse_codegraph_version(actual).is_some_and(|version| {
@@ -145,6 +156,7 @@ impl CodeGraphCli {
             root,
             AggregateIndexBudget::FIFTY_MEMBER_INITIAL,
             "codegraph_init_failed",
+            OUTPUT_LIMIT_BYTES,
         )
     }
 
@@ -154,6 +166,7 @@ impl CodeGraphCli {
             root,
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_sync_failed",
+            OUTPUT_LIMIT_BYTES,
         )
     }
 
@@ -191,7 +204,19 @@ impl CodeGraphCli {
             root,
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_files_failed",
+            FILES_OUTPUT_LIMIT_BYTES,
         )?;
+        // 截断判定必须先于解析：stdout 被上限切掉后剩下的是 JSON 前缀，
+        // 解析必然失败。若继续落到解析分支，截断会被混报成
+        // `codegraph_files_invalid_json`（上游协议异常），把排障方向带偏。
+        if output.stdout_truncated {
+            return Err(AggregateIndexError::Failed {
+                code: "codegraph_files_output_truncated",
+                message: format!(
+                    "codegraph files --json 输出被截断：stdout 超过 {FILES_OUTPUT_LIMIT_BYTES} 字节上限，文件清单不完整",
+                ),
+            });
+        }
         // codegraph 1.6 实证契约缺陷：空索引（0 文件）时 `files --json`
         // 以 exit 0 输出人读提示而非 JSON 数组。先识别该形态返回专用
         // 空索引码，交给上层归并为业务语义的覆盖不足错误；
@@ -223,6 +248,7 @@ impl CodeGraphCli {
             root,
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_query_failed",
+            OUTPUT_LIMIT_BYTES,
         )?;
         serde_json::from_str(&output.stdout).map_err(|error| AggregateIndexError::Failed {
             code: "codegraph_query_invalid_json",
@@ -236,6 +262,7 @@ impl CodeGraphCli {
             root,
             AggregateIndexBudget::INCREMENTAL,
             "codegraph_status_failed",
+            OUTPUT_LIMIT_BYTES,
         )?;
         serde_json::from_str(&output.stdout).map_err(|error| AggregateIndexError::Failed {
             code: "codegraph_status_invalid_json",
@@ -249,8 +276,9 @@ impl CodeGraphCli {
         root: &Path,
         budget: AggregateIndexBudget,
         failure_code: &'static str,
+        stdout_limit: usize,
     ) -> Result<CodeGraphCommandResult, AggregateIndexError> {
-        let output = self.run(argv, root, budget.fail_secs)?;
+        let output = self.run(argv, root, budget.fail_secs, stdout_limit)?;
         if output.exit_code != Some(0) {
             return Err(AggregateIndexError::Failed {
                 code: failure_code,
@@ -265,6 +293,7 @@ impl CodeGraphCli {
         argv: &[&str],
         root: &Path,
         timeout_secs: u64,
+        stdout_limit: usize,
     ) -> Result<BoundedCommandResult, AggregateIndexError> {
         let request = BoundedCommandRequest {
             executable: self.executable.clone(),
@@ -273,7 +302,7 @@ impl CodeGraphCli {
             timeout: Duration::from_secs(timeout_secs),
             cancellation: CancellationToken::new(),
             environment: sanitized_environment(),
-            stdout_limit: OUTPUT_LIMIT_BYTES,
+            stdout_limit,
             stderr_limit: OUTPUT_LIMIT_BYTES,
         };
         let runner = self.runner.clone();
@@ -340,6 +369,7 @@ fn command_result(output: BoundedCommandResult) -> CodeGraphCommandResult {
         stdout: output.stdout,
         stderr: output.stderr,
         duration_ms: output.duration_ms,
+        stdout_truncated: output.stdout_truncated,
     }
 }
 
@@ -376,6 +406,16 @@ mod tests {
         fn success(stdout: &str) -> Self {
             Self {
                 result: Ok(command_result_with(stdout, "", Some(0), false, false)),
+            }
+        }
+
+        /// 构造 stdout 已被上限截断的成功结果（上游按上限保留前缀、丢弃其余）。
+        fn truncated_success(stdout: &str) -> Self {
+            Self {
+                result: Ok(BoundedCommandResult {
+                    stdout_truncated: true,
+                    ..command_result_with(stdout, "", Some(0), false, false)
+                }),
             }
         }
 
@@ -636,6 +676,118 @@ mod tests {
                 if *code == "codegraph_files_empty_index"),
             "empty index must be business-semantic, got: {error}"
         );
+    }
+
+    /// 现场（聚合根 9k~20k 文件，`codegraph files --json` 载荷 1.3~3.9 MB）：
+    /// stdout 超过上限后被截断成 JSON 前缀，解析必然失败。截断必须以专用码
+    /// 报出（不得混同为「输出不是合法 JSON」），消息要带上上限字节数。
+    #[test]
+    fn files_reports_truncated_output_with_dedicated_code() {
+        let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
+            CommandCapture::truncated_success("[{\"path\":\"src/lib.rs\""),
+        ]));
+        let cli = CodeGraphCli::new(runner, "codegraph".into());
+        let error = cli.files(Path::new("/aggregate")).unwrap_err();
+        match error {
+            AggregateIndexError::Failed { code, message } => {
+                assert_eq!(
+                    code, "codegraph_files_output_truncated",
+                    "truncated output must not be reported as an invalid-JSON failure"
+                );
+                assert!(
+                    message.contains(&FILES_OUTPUT_LIMIT_BYTES.to_string()),
+                    "message must carry the stdout limit in bytes: {message}"
+                );
+                assert!(
+                    message.contains("截断"),
+                    "message must state that the output was truncated: {message}"
+                );
+            }
+            other => panic!("expected a failed error, got {other:?}"),
+        }
+    }
+
+    /// 大负载但**完整**（stdout 未被截断）时，files() 必须照常返回清单：
+    /// 现场证明 9k~20k 文件的清单载荷 1.3~3.9 MB，通用 1 MiB 上限会把 JSON
+    /// 尾部切掉。用例同时断言「下发的 stdout 上限能容纳整份载荷」——只有上限
+    /// 在挡路，解析本身不是问题。
+    #[test]
+    fn files_parses_large_complete_payload() {
+        let entry_count = 20_000usize;
+        let mut payload = String::from("[");
+        for index in 0..entry_count {
+            if index > 0 {
+                payload.push(',');
+            }
+            payload.push_str(&format!(
+                "{{\"path\":\"src/aggregate/module_{index:06}/nested/directory/structure/with/a/long/path/file_{index:06}.rs\"}}"
+            ));
+        }
+        payload.push(']');
+        assert!(
+            payload.len() > OUTPUT_LIMIT_BYTES,
+            "载荷必须大于通用上限，用例才有意义：{}",
+            payload.len()
+        );
+
+        let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
+            CommandCapture::success(&payload),
+        ]));
+        let cli = CodeGraphCli::new(runner.clone(), "codegraph".into());
+        let entries = cli.files(Path::new("/aggregate")).unwrap();
+        assert_eq!(entries.len(), entry_count);
+        assert_eq!(
+            entries[0],
+            PathBuf::from(format!(
+                "src/aggregate/module_{:06}/nested/directory/structure/with/a/long/path/file_{:06}.rs",
+                0, 0
+            ))
+        );
+        assert_eq!(
+            entries[entry_count - 1],
+            PathBuf::from(format!(
+                "src/aggregate/module_{:06}/nested/directory/structure/with/a/long/path/file_{:06}.rs",
+                entry_count - 1,
+                entry_count - 1
+            ))
+        );
+
+        let requests = runner.requests();
+        assert!(
+            requests[0].stdout_limit >= payload.len(),
+            "stdout 上限必须能容纳整份载荷：limit={} payload={}",
+            requests[0].stdout_limit,
+            payload.len()
+        );
+    }
+
+    /// `files` 走专用抓取配额（64 MiB）；`status` / `query_json` 等其余命令
+    /// 维持 1 MiB 通用上限（不得被一起放大）。
+    ///
+    /// owner 2026-11-13 裁决：不传 `--no-metadata`（实测该旗标在 `--json`
+    /// 模式下载荷逐字节不变、零收益，却引入「未来 CLI 移除该旗标 ⇒ `files`
+    /// 全线失败」的风险）。
+    #[test]
+    fn files_uses_dedicated_output_limit() {
+        let runner = Arc::new(ScriptedCodeGraphRunner::from_results(vec![
+            CommandCapture::success(r#"[{"path":"src/lib.rs"}]"#),
+            CommandCapture::success(r#"[{"name":"crossRepoGreeting"}]"#),
+            CommandCapture::success(
+                r#"{"initialized":true,"version":"1.6.0","projectPath":"/aggregate","indexPath":"/aggregate/.codegraph","lastIndexed":"2026-08-09T00:00:00Z","fileCount":1,"nodeCount":1,"edgeCount":1,"dbSizeBytes":1}"#,
+            ),
+        ]));
+        let cli = CodeGraphCli::new(runner.clone(), "codegraph".into());
+        let root = Path::new("/aggregate");
+
+        cli.files(root).unwrap();
+        cli.query_json(root, "crossRepoGreeting").unwrap();
+        cli.status(root).unwrap();
+
+        let requests = runner.requests();
+        assert_eq!(requests[0].argv, ["files", "--json"]);
+        assert_eq!(requests[0].stdout_limit, FILES_OUTPUT_LIMIT_BYTES);
+        assert_eq!(requests[1].stdout_limit, OUTPUT_LIMIT_BYTES);
+        assert_eq!(requests[2].stdout_limit, OUTPUT_LIMIT_BYTES);
     }
 
     fn assert_clean_environment(request: &BoundedCommandRequest) {

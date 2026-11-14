@@ -369,9 +369,7 @@ fn entry_from_result(
 
     let stdout = first_non_empty_line(&result.stdout);
     let stderr = first_non_empty_line(&result.stderr);
-    let version = stdout
-        .and_then(parse_version_token)
-        .or_else(|| stderr.and_then(parse_version_token));
+    let version = version_token_from_output(&result.stdout, &result.stderr);
     let Some(version) = version else {
         return unavailable_entry(
             provider,
@@ -427,6 +425,16 @@ fn unavailable_entry(
 
 fn first_non_empty_line(output: &str) -> Option<&str> {
     output.lines().map(str::trim).find(|line| !line.is_empty())
+}
+
+/// `--version` 输出 → 版本 token。**更新前后共用的唯一口径**：装后（provider
+/// health 快照）与装前（`provider_installation` 的 `--version` 探测）都必须
+/// 走这里，否则「装前原始行 `kimi 2.6.1`、装后解析 token `2.6.1`」永不相等
+/// ⇒ 版本没变的更新会被静默判成功（REQ-PCI-10）。
+pub(crate) fn version_token_from_output(stdout: &str, stderr: &str) -> Option<String> {
+    first_non_empty_line(stdout)
+        .and_then(parse_version_token)
+        .or_else(|| first_non_empty_line(stderr).and_then(parse_version_token))
 }
 
 fn parse_version_token(output: &str) -> Option<String> {

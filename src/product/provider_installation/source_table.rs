@@ -17,6 +17,16 @@ pub const NPM_PREFIX_ENV: &str = "NPM_PREFIX";
 pub const DEFAULT_NPM_PREFIX_DIR: &str = ".npm-global";
 /// Kimi Code 官方安装脚本（非 npm 包，REQ-PCI-01）。
 pub const KIMI_INSTALL_SCRIPT_URL: &str = "https://code.kimi.com/kimi-code/install.sh";
+/// Kimi Code 安装目录名（**假设**：来自官方脚本的 `KIMI_INSTALL_DIR`
+/// 约定；容器实测脚本输出 `Installed to /root/.kimi-code/bin/kimi`，离线无法
+/// 二次核实 ⇒ 登记条件以「脚本实际输出 / 实际存在的文件」为准，不依赖本
+/// 常量）。
+pub const KIMI_INSTALL_DIR_NAME: &str = ".kimi-code";
+
+/// Kimi 安装产物目录（`<home>/.kimi-code/bin`）。
+pub fn kimi_install_bin_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(KIMI_INSTALL_DIR_NAME).join("bin")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InstallSourceRow {
