@@ -161,10 +161,8 @@ pub(crate) fn ensure_aggregate_root_unowned(
         }) {
             continue;
         }
-        let existing_root = canonicalize_for_preflight(
-            &existing.provider_context_root,
-            "aggregate_root_overlap",
-        )?;
+        let existing_root =
+            canonicalize_for_preflight(&existing.provider_context_root, "aggregate_root_overlap")?;
         if paths_overlap(canonical_root, &existing_root) {
             return Err(preflight_error(
                 "aggregate_root_overlap",
@@ -256,8 +254,7 @@ fn collect_project_lc_roots(
     canonical_root: &Path,
     roots: &mut Vec<ExistingLcManifest>,
 ) -> Result<(), AggregateRootPreflightError> {
-    let legacy_id =
-        crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id);
+    let legacy_id = crate::product::logical_codebase::store::legacy_logical_codebase_id(project_id);
     let mut subtree_lc_ids = Vec::new();
     let codebases_root = paths.logical_codebases_root(project_id);
     match std::fs::read_dir(&codebases_root) {
@@ -452,14 +449,11 @@ fn is_linked_worktree(path: &Path) -> Result<bool, AggregateRootPreflightError> 
                 ),
             )
         })?;
-    if canonical_gitdir
+    // 1.100 clippy(needless_bool)：等价化简，行为不变。
+    Ok(canonical_gitdir
         .parent()
         .and_then(Path::file_name)
-        .is_some_and(|name| name == "worktrees")
-    {
-        return Ok(true);
-    }
-    Ok(false)
+        .is_some_and(|name| name == "worktrees"))
 }
 
 fn paths_overlap(left: &Path, right: &Path) -> bool {

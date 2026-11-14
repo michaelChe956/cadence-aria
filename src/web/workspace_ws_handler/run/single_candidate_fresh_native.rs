@@ -15,6 +15,7 @@ use crate::product::workspace_engine::WorkspaceEngine;
 /// 按 durable `source_ref` 装载上一版 candidate source 全文（fresh 返修 prompt
 /// 的 `[previous_source]` 段来源）。装载失败保持显式 `Message` 失败面——全新
 /// native 拿不到上一版 source 会退化成无上下文的盲改。
+#[allow(clippy::result_large_err)] // 与同目录既有 typed 出口同型：错误体必要且不装箱。
 pub(super) fn load_previous_candidate_source(
     engine: &WorkspaceEngine,
     lifecycle: &LifecycleStore,
@@ -26,16 +27,14 @@ pub(super) fn load_previous_candidate_source(
         issue_id: session.issue_id.clone(),
         plan_id: session.entity_id.clone(),
     };
-    crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(
-        lifecycle.app_paths(),
-    )
-    .get_source_revision(&scope, source_ref)
-    .map_err(|error| {
-        SingleCandidateProviderRunError::Message(format!(
-            "load previous source for sc fresh revision failed: {error:?}"
-        ))
-    })
-    .map(|revision| revision.source)
+    crate::product::work_item_plan_source_store::WorkItemPlanSourceStore::new(lifecycle.app_paths())
+        .get_source_revision(&scope, source_ref)
+        .map_err(|error| {
+            SingleCandidateProviderRunError::Message(format!(
+                "load previous source for sc fresh revision failed: {error:?}"
+            ))
+        })
+        .map(|revision| revision.source)
 }
 
 #[cfg(test)]
