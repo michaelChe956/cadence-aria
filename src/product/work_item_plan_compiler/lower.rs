@@ -17,6 +17,12 @@ use crate::product::work_item_contract::{
     WorkItemGoal, WorkItemTask, WorkItemWritePolicy,
 };
 
+// lower 侧 canonical enum 词表（T3）：三个 enum 字段的合法值表 + 非法值
+// 渲染 + 解析（一次表查，单一事实源），与本文件同目录挂载。
+#[path = "lower_vocab.rs"]
+mod lower_vocab;
+use lower_vocab::{parse_blocker_route, parse_compatibility_policy, parse_evidence_kind};
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlanCandidateIr {
     pub source_revision_hash: String,
@@ -1099,75 +1105,6 @@ fn append_first_seen(target: &mut Vec<String>, incoming: Vec<String>) {
             target.push(value);
         }
     }
-}
-fn parse_compatibility_policy(
-    value: &str,
-    diagnostics: &mut Vec<CompilerDiagnostic>,
-    line: usize,
-) -> Option<ContractCompatibilityPolicy> {
-    match value {
-        "require_all" => Some(ContractCompatibilityPolicy::RequireAll),
-        "require_any" => Some(ContractCompatibilityPolicy::RequireAny),
-        _ => {
-            diagnostics.push(diagnostic(
-                "compatibility_policy",
-                "字段值不符合 canonical enum。",
-                line,
-                "- compatibility_policy: require_all",
-            ));
-            None
-        }
-    }
-}
-
-fn parse_blocker_route(
-    value: &str,
-    diagnostics: &mut Vec<CompilerDiagnostic>,
-    line: usize,
-) -> Option<BlockerRoute> {
-    let route = match value {
-        "coder_rework" => BlockerRoute::CoderRework,
-        "verification_retry" => BlockerRoute::VerificationRetry,
-        "plan_repair_current" => BlockerRoute::PlanRepairCurrent,
-        "plan_repair_upstream" => BlockerRoute::PlanRepairUpstream,
-        "subgraph_replan" => BlockerRoute::SubgraphReplan,
-        "story_amendment" => BlockerRoute::StoryAmendment,
-        "design_amendment" => BlockerRoute::DesignAmendment,
-        "operational_gate" => BlockerRoute::OperationalGate,
-        _ => {
-            diagnostics.push(diagnostic(
-                "route",
-                "字段值不符合 canonical enum。",
-                line,
-                "- route: operational_gate",
-            ));
-            return None;
-        }
-    };
-    Some(route)
-}
-
-fn parse_evidence_kind(
-    value: &str,
-    diagnostics: &mut Vec<CompilerDiagnostic>,
-    line: usize,
-) -> Option<EvidenceKind> {
-    let evidence = match value {
-        "source_diff" => EvidenceKind::SourceDiff,
-        "non_zero_test_execution" => EvidenceKind::NonZeroTestExecution,
-        "manual_check" => EvidenceKind::ManualCheck,
-        "handoff_field" => EvidenceKind::HandoffField,
-        _ => {
-            diagnostics.push(diagnostic(
-                "required_evidence",
-                "字段值不符合 canonical enum。",
-                line,
-                "- required_evidence: source_diff",
-            ));
-            return None;
-        }
-    };
-    Some(evidence)
 }
 pub(super) fn diagnostic(
     field: &str,
