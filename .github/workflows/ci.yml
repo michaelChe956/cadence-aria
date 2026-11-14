@@ -25,6 +25,13 @@ jobs:
           components: rustfmt, clippy
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          # 被 runner 回收（`The runner has received a shutdown signal` / exit 143）
+          # 时也落盘 cargo 缓存：release 门禁作业要在两个不同 profile 目录里各做
+          # 一次全量 release 编译（40~80 分钟），必被 GitHub 回收；而默认
+          # CACHE_ON_FAILURE=false ⇒ 被杀就不写缓存 ⇒ 每次重试又从冷编译开始
+          # ⇒ 红灯自锁。开启后首次（哪怕被杀）也会留下缓存，重试即快速收敛。
+          cache-on-failure: true
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -84,6 +91,13 @@ jobs:
           toolchain: stable
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          # 被 runner 回收（`The runner has received a shutdown signal` / exit 143）
+          # 时也落盘 cargo 缓存：release 门禁作业要在两个不同 profile 目录里各做
+          # 一次全量 release 编译（40~80 分钟），必被 GitHub 回收；而默认
+          # CACHE_ON_FAILURE=false ⇒ 被杀就不写缓存 ⇒ 每次重试又从冷编译开始
+          # ⇒ 红灯自锁。开启后首次（哪怕被杀）也会留下缓存，重试即快速收敛。
+          cache-on-failure: true
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -148,6 +162,13 @@ jobs:
           toolchain: stable
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          # 被 runner 回收（`The runner has received a shutdown signal` / exit 143）
+          # 时也落盘 cargo 缓存：release 门禁作业要在两个不同 profile 目录里各做
+          # 一次全量 release 编译（40~80 分钟），必被 GitHub 回收；而默认
+          # CACHE_ON_FAILURE=false ⇒ 被杀就不写缓存 ⇒ 每次重试又从冷编译开始
+          # ⇒ 红灯自锁。开启后首次（哪怕被杀）也会留下缓存，重试即快速收敛。
+          cache-on-failure: true
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
