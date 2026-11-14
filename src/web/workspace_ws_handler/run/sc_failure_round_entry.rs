@@ -26,6 +26,19 @@ use crate::product::models::{
 use crate::web::workspace_ws_handler::run::gateway_start::PlanAuthorLaunch;
 use crate::web::workspace_ws_types::{ScFailureChainIdentity, ScFailureScope};
 
+// 四段时刻采集（TTFT 归因）的入口侧接线：① 在真实 provider start **之前**登记，
+// 驱动返回**之后**才收口落 sidecar。载体与 schema 见
+// `workspace_engine::provider_drive::work_item_plan` 的 `round-timing.jsonl`
+// （append-only sidecar，不动既有 durable schema）。
+/// 初轮：与教学轮分账（`role_run_seq` 之外再带一个稳定的轮类型标签）。
+const SC_ROUND_TIMING_KIND_INITIAL: &str = "initial";
+/// 教学轮。
+const SC_ROUND_TIMING_KIND_TEACHING: &str = "teaching";
+/// 驱动正常返回（收口成功与否不计入：时刻只属于这次驱动）。
+const SC_ROUND_TIMING_OUTCOME_COMPLETED: &str = "completed";
+/// 驱动失败（拒启会被观测态改写为 `refused`，见 `start_state`）。
+const SC_ROUND_TIMING_OUTCOME_FAILED: &str = "failed";
+
 /// 显式 fresh operation 的物理身份锚（P08 Case 5/6）。
 ///
 /// 事实只取 **durable** 记录：当前 operation item（`fresh_operations` 中与 root
@@ -349,6 +362,13 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_ready_sc_round(
     prompt: &str,
     bound: &ScBoundProviderRound,
 ) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
+    // ① 轮启动：真实 provider start 之前登记（登记时刻即 epoch）。零 await、零 IO。
+    engine.begin_work_item_plan_round_timing(
+        node_id,
+        &bound.round.round_id,
+        bound.round.role_run_seq,
+        SC_ROUND_TIMING_KIND_INITIAL,
+    );
     let provider_session =
         crate::web::workspace_ws_handler::run::gateway_start::start_work_item_plan_author(
             launch.clone(),
@@ -358,17 +378,22 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_ready_sc_round(
             Some(&bound.split),
         )
         .await;
-    let full_output = match engine
+    let drive_result = engine
         .drive_work_item_plan_provider_session_to_output(
             provider_session,
             command_rx,
             node_id.to_string(),
             author_provider.clone(),
         )
-        .await
-    {
-        Ok(output) => output,
+        .await;
+    // ②③④ 的收口：驱动已返回（首字节早已发生）——此处的落盘不影响首字节延迟。
+    let full_output = match drive_result {
+        Ok(output) => {
+            engine.finish_work_item_plan_round_timing(node_id, SC_ROUND_TIMING_OUTCOME_COMPLETED);
+            output
+        }
         Err(message) => {
+            engine.finish_work_item_plan_round_timing(node_id, SC_ROUND_TIMING_OUTCOME_FAILED);
             crate::web::workspace_ws_handler::run::fail_plan_split_run(
                 Some(&bound.split),
                 &format!("provider session drive failed: {message}"),
@@ -497,7 +522,15 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_sc_teaching_entry(
 ) -> Result<ScAuthorRoundDelivery, SingleCandidateProviderRunError> {
     match entry {
         ScRoundEntry::Ready(bound) => {
-            drive_single_candidate_reredrive(
+            // ① 轮启动：`drive_single_candidate_reredrive` 内部才真实发 prompt，故在此
+            // 登记（零 await、零 IO）；驱动返回后才收口落盘。
+            engine.begin_work_item_plan_round_timing(
+                node_id,
+                &bound.round.round_id,
+                bound.round.role_run_seq,
+                SC_ROUND_TIMING_KIND_TEACHING,
+            );
+            let result = drive_single_candidate_reredrive(
                 engine,
                 launch,
                 provider_for_run,
@@ -512,7 +545,16 @@ pub(in crate::web::workspace_ws_handler::run) async fn drive_sc_teaching_entry(
                 sc_teaching_attempt,
                 Some(sent_boundary),
             )
-            .await
+            .await;
+            engine.finish_work_item_plan_round_timing(
+                node_id,
+                if result.is_ok() {
+                    SC_ROUND_TIMING_OUTCOME_COMPLETED
+                } else {
+                    SC_ROUND_TIMING_OUTCOME_FAILED
+                },
+            );
+            result
         }
         ScRoundEntry::Completed {
             bound,

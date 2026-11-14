@@ -1898,9 +1898,111 @@ def run_arm(binary, tag, arm, port, seed_ws, seed_manifest, out_root):
     return _finish_arm(manifest, run, tag, arm, port)
 
 
+ROUND_TIMING_FILE = "round-timing.jsonl"
+ROUND_TIMING_SCHEMA = "wig-round-timing/1"
+ROUND_TIMING_UNKNOWN = "unknown"
+
+
+def _timing_slot(rec, key):
+    """时刻槽位：缺失/None/非整数 ⇒ "unknown"。
+
+    0 是**合法**毫秒值（哨兵是 u64::MAX），必须原样保留为 0；只有真正缺失才
+    输出 "unknown"，绝不把「未采集」写成 0。
+    """
+    value = (rec or {}).get(key, ROUND_TIMING_UNKNOWN)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return ROUND_TIMING_UNKNOWN
+    return value
+
+
+def normalize_round_timing(session_id, rec):
+    """一条 sidecar 记录 → manifest 结构；缺值一律 unknown。"""
+    return {
+        "session_id": session_id,
+        "schema": rec.get("schema") or ROUND_TIMING_UNKNOWN,
+        # 版本不对不是错误：版本不符仍原样保留全部时刻，只标出不可按本 schema 解读。
+        "schema_ok": rec.get("schema") == ROUND_TIMING_SCHEMA,
+        "node_id": rec.get("node_id") or ROUND_TIMING_UNKNOWN,
+        "round_id": rec.get("round_id") or ROUND_TIMING_UNKNOWN,
+        "role_run_seq": rec.get("role_run_seq", ROUND_TIMING_UNKNOWN),
+        "round_kind": rec.get("round_kind") or ROUND_TIMING_UNKNOWN,
+        "start_state": rec.get("start_state") or ROUND_TIMING_UNKNOWN,
+        "drive_outcome": rec.get("drive_outcome") or ROUND_TIMING_UNKNOWN,
+        "round_start_unix_ms": _timing_slot(rec, "round_start_unix_ms"),
+        "provider_session_ready_ms": _timing_slot(rec, "provider_session_ready_ms"),
+        "first_model_delta_ms": _timing_slot(rec, "first_model_delta_ms"),
+        "first_display_chunk_ms": _timing_slot(rec, "first_display_chunk_ms"),
+        "client_receive_ms": _timing_slot(rec, "client_receive_ms"),
+        "client_receive_reason": rec.get("client_receive_reason")
+                                 or ROUND_TIMING_UNKNOWN,
+        "ttft_ms": _timing_slot(rec, "ttft_ms"),
+        "drive_terminal_ms": _timing_slot(rec, "drive_terminal_ms"),
+    }
+
+
+def collect_round_timings(run):
+    """汇总本臂所有会话 timeline 根下的 `round-timing.jsonl`（只读 sidecar）。
+
+    不存在 ⇒ 空列表（= 本臂未采集，而不是「时刻全是 0」）；坏行显式标
+    `record_state="unparsable"` 而不是丢弃。
+    """
+    records = []
+    issues_root = os.path.join(run, ".aria", "projects", PROJECT, "issues")
+    if not os.path.isdir(issues_root):
+        return records
+    for issue in sorted(os.listdir(issues_root)):
+        timelines_root = os.path.join(issues_root, issue, "workspace-timelines")
+        if not os.path.isdir(timelines_root):
+            continue
+        for session_id in sorted(os.listdir(timelines_root)):
+            path = os.path.join(timelines_root, session_id, ROUND_TIMING_FILE)
+            if not os.path.isfile(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        records.append({"session_id": session_id,
+                                        "record_state": "unparsable"})
+                        continue
+                    if not isinstance(rec, dict):
+                        records.append({"session_id": session_id,
+                                        "record_state": "unparsable"})
+                        continue
+                    records.append(normalize_round_timing(session_id, rec))
+    return records
+
+
+def summarize_round_timings(records):
+    """按轮类型汇总 TTFT：unknown 单独计数，绝不进入均值（不污染为 0）。"""
+    summary = {"records": len(records), "by_kind": {}}
+    for rec in records:
+        kind = rec.get("round_kind") or ROUND_TIMING_UNKNOWN
+        bucket = summary["by_kind"].setdefault(
+            kind, {"rounds": 0, "ttft_ms": [], "ttft_unknown": 0,
+                   "display_unknown": 0})
+        bucket["rounds"] += 1
+        ttft = rec.get("ttft_ms", ROUND_TIMING_UNKNOWN)
+        if isinstance(ttft, int) and not isinstance(ttft, bool):
+            bucket["ttft_ms"].append(ttft)
+        else:
+            bucket["ttft_unknown"] += 1
+        if rec.get("first_display_chunk_ms", ROUND_TIMING_UNKNOWN) \
+                == ROUND_TIMING_UNKNOWN:
+            bucket["display_unknown"] += 1
+    return summary
+
+
 def _finish_arm(manifest, run, tag, arm, port):
     """落 run-manifest.json + sequence.log（失败证据不删、invalid 显式）。"""
     manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    manifest["round_timing"] = collect_round_timings(run)
+    manifest["round_timing_summary"] = summarize_round_timings(
+        manifest["round_timing"])
     with open(os.path.join(run, "run-manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
     if log_path:
@@ -2109,6 +2211,9 @@ def _write_failed_manifest(out_root, arm, tag, port, binary, seed_ws,
         "checks": {}, "valid": False,
         "invalid_reason": "臂执行中断（%s）" % reason,
     }
+    manifest["round_timing"] = collect_round_timings(run)
+    manifest["round_timing_summary"] = summarize_round_timings(
+        manifest["round_timing"])
     with open(mpath, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=1)
 
