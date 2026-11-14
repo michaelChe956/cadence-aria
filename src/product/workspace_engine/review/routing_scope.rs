@@ -1,4 +1,4 @@
-use super::policy_routing::{GateSnapshotContext, policy_route_record_values, route_outcome};
+use super::policy_routing::policy_route_record_values;
 use super::*;
 use crate::product::lifecycle_store::workspace_policy_route::{legacy_b1_used, preclaim_budget};
 use crate::product::work_item_plan_policy::classify::classify_finding;
@@ -1110,53 +1110,6 @@ impl WorkspaceEngine {
             self.session.session_status = record.status;
         }
     }
-}
-
-pub(super) fn route_outcome_from_decision(
-    decision: EvaluationDecision,
-    policy: RunPolicy,
-    history: &RunHistory,
-    invocation: &ReviewInvocationScope,
-    findings: Vec<ClassifiedFinding>,
-    author_budget_available: Option<u32>,
-) -> RoutingAction {
-    let (outcome, outcome_findings, repeated_fingerprints, trigger) = match &decision.outcome {
-        PlanOutcome::HumanRequired {
-            findings,
-            repeated_fingerprints,
-            reason,
-        } => (
-            decision.outcome.clone(),
-            findings.clone(),
-            repeated_fingerprints.clone(),
-            *reason,
-        ),
-        PlanOutcome::Repairable { findings } => (
-            decision.outcome.clone(),
-            findings.clone(),
-            Vec::new(),
-            HumanReason::RepairBudgetExhausted,
-        ),
-        _ => (
-            decision.outcome.clone(),
-            findings,
-            Vec::new(),
-            HumanReason::NativeHumanRequired,
-        ),
-    };
-    route_outcome(
-        outcome,
-        policy,
-        GateSnapshotContext {
-            history: history.clone(),
-            budgets: RunBudgets::default(),
-            invocation: invocation.clone(),
-            findings: outcome_findings,
-            repeated_fingerprints,
-            trigger,
-            author_budget_available,
-        },
-    )
 }
 
 fn verification_scope_source_store_error(

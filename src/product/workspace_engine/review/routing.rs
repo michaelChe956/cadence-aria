@@ -1,7 +1,9 @@
 #[path = "routing_scope.rs"]
 pub(crate) mod routing_scope;
 use super::feedback::{format_actionable_review_feedback, format_review_feedback};
-use super::policy_routing::{RoutingAction, carry_forward_open_gate_budget};
+use super::policy_routing::{
+    RoutingAction, carry_forward_open_gate_budget, route_outcome_from_decision,
+};
 use super::*;
 use crate::product::lifecycle_store::PolicyRoutePersist;
 use crate::product::work_item_plan_policy::{
@@ -17,7 +19,7 @@ use routing_platform_rescue::{
     legacy_work_item_plan_repair_finding, merge_platform_compile_failure_origin,
     platform_gate_carried_budget, rescue_platform_compile_failure_repair,
 };
-use routing_scope::{route_outcome_from_decision, single_candidate_review_cycle};
+use routing_scope::single_candidate_review_cycle;
 impl WorkspaceEngine {
     pub(crate) async fn complete_review(
         &mut self,
@@ -578,6 +580,7 @@ impl WorkspaceEngine {
                 self.session.run_policy,
                 &history,
                 &invocation,
+                &cycle_key,
                 findings,
                 Some(gate_budget),
             );
@@ -588,6 +591,7 @@ impl WorkspaceEngine {
             self.session.run_policy,
             &history,
             &invocation,
+            &cycle_key,
             findings,
             Some(gate_budget),
         );

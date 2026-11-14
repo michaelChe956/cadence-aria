@@ -45,6 +45,7 @@ fn conversational_gate_revision_repeated_fingerprint_returns_same_gate() {
         findings: Vec::new(),
         repeated_fingerprints: vec![fingerprint.clone()],
         trigger: HumanReason::RepeatedFingerprint,
+        cycle_key: None,
         author_budget_available: None,
     };
     let action = route_outcome(

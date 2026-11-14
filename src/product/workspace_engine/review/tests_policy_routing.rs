@@ -24,6 +24,8 @@ fn normalized_route(engine: &WorkspaceEngine, nodes_before: usize) -> Normalized
 }
 #[path = "tests_policy_routing_artifact.rs"]
 mod tests_policy_routing_artifact;
+#[path = "tests_policy_routing_content_repair.rs"]
+mod tests_policy_routing_content_repair;
 use tests_policy_routing_artifact::artifact_variant;
 fn normalized_stage(stage: WorkspaceStage) -> String {
     format!("{stage:?}")
@@ -293,6 +295,9 @@ fn gate_context(trigger: HumanReason) -> GateSnapshotContext {
             Some("WI-001.output_contracts[CT-001].capabilities"),
         )],
         trigger,
+        // 内容级缺口的额外返修额度按该工件 cycle 判定；夹具保持 fresh cycle
+        // （repairs_used=0 < max_repairs）⇒ 额度未用。
+        cycle_key: Some("review:outline_review".to_owned()),
         author_budget_available: None,
     }
 }
@@ -386,6 +391,7 @@ fn policy_route_outcome_covers_terminal_matrix_for_each_run_policy() {
             PlanOutcome::Valid,
             HumanReason::NativeHumanRequired,
             "completed",
+            "completed",
         ),
         (
             "first_repairable",
@@ -393,6 +399,7 @@ fn policy_route_outcome_covers_terminal_matrix_for_each_run_policy() {
                 findings: vec![repairable.clone()],
             },
             HumanReason::RepairBudgetExhausted,
+            "repair",
             "repair",
         ),
         (
@@ -403,6 +410,7 @@ fn policy_route_outcome_covers_terminal_matrix_for_each_run_policy() {
                 reason: HumanReason::RepeatedFingerprint,
             },
             HumanReason::RepeatedFingerprint,
+            "human",
             "human",
         ),
         (
@@ -417,6 +425,7 @@ fn policy_route_outcome_covers_terminal_matrix_for_each_run_policy() {
             },
             HumanReason::NativeHumanRequired,
             "human",
+            "repair",
         ),
         (
             "repair_budget_exhausted",
@@ -429,6 +438,7 @@ fn policy_route_outcome_covers_terminal_matrix_for_each_run_policy() {
                 reason: HumanReason::RepairBudgetExhausted,
             },
             HumanReason::RepairBudgetExhausted,
+            "human",
             "human",
         ),
         (
@@ -443,6 +453,7 @@ fn policy_route_outcome_covers_terminal_matrix_for_each_run_policy() {
             },
             HumanReason::VerificationNewFindings,
             "human",
+            "repair",
         ),
         (
             "state_corruption",
@@ -456,16 +467,26 @@ fn policy_route_outcome_covers_terminal_matrix_for_each_run_policy() {
             },
             HumanReason::NativeHumanRequired,
             "fatal",
+            "fatal",
         ),
     ];
 
     for policy in [RunPolicy::Interactive, RunPolicy::AutoIfValid] {
-        for (case, outcome, trigger, expected) in &cases {
+        for (case, outcome, trigger, interactive_expected, auto_expected) in &cases {
             let action = route_outcome(outcome.clone(), policy, gate_context(*trigger));
-            match (*expected, policy, action) {
+            let expected = match policy {
+                RunPolicy::Interactive => *interactive_expected,
+                RunPolicy::AutoIfValid => *auto_expected,
+            };
+            match (expected, policy, action) {
                 ("completed", _, RoutingAction::ContinueToCompleted) => {}
                 ("repair", _, RoutingAction::TriggerAggregateRepair { findings }) => {
-                    assert_eq!(findings, vec![repairable.clone()], "{case}");
+                    let expected_findings = match outcome {
+                        PlanOutcome::Repairable { findings }
+                        | PlanOutcome::HumanRequired { findings, .. } => findings.clone(),
+                        _ => Vec::new(),
+                    };
+                    assert_eq!(findings, expected_findings, "{case}");
                 }
                 ("human", RunPolicy::Interactive, RoutingAction::EnterHumanGate { snapshot }) => {
                     assert_eq!(snapshot.trigger, *trigger, "{case}");
