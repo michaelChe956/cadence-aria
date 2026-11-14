@@ -46,7 +46,7 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
          Inputs 四行且 contract_id 首行：contract_id、provider_logical_work_item_id、required_capabilities、compatibility_policy: require_all|require_any，四行缺一不可；无依赖时留空 section。\n\
          反例：provider_logical_work_item_id 的合法值只能来自本计划的 `## Work Item` 标题中的 `WI-<数字>`；story_spec_0001/design_spec_0001 等 spec id 一律非法。\n\
          同一 Work Item 内同一 command 至多声明一次；复合验证合并为一条 check 或改用 manual_instruction（重复 → 编译器拒绝）。\n\
-         值域：kind={item_kinds}；intent=create、existing（新建一律 create）。\n\
+         值域：kind={item_kinds}；intent=create、existing（新建一律 create）；route={blocker_routes}；required_evidence={evidence_kinds}。\n\
          Plan Intent 分支必填：intent_target_kind=single_repository 时必写 intent_target_repo；intent_target_kind=logical_codebase 时必写 intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）。两分支 key 不顶替。intent_target_repo 取值来源按会话类型唯一、不得混填：单仓会话（本 prompt 无成员仓清单）逐字取 [issue] 头 repo= 的 repository id；LC 多仓会话（有成员仓清单）逐字取该清单的物理成员仓 ID。\n\
          未知结构化 key 一律拒绝（{unknown_key_policy}）；未知 section、非法 ID、EARS 非法与缺 section/field 均失败关闭。\n\n",
         document_heading = grammar::DOCUMENT_HEADING,
@@ -54,6 +54,8 @@ pub(crate) fn work_item_plan_markdown_grammar() -> String {
         ears_template = grammar::EARS_STATEMENT_TEMPLATE,
         item_kinds = grammar::ALLOWED_ITEM_KINDS.join("、"),
         unknown_key_policy = grammar::UNKNOWN_STRUCTURED_KEY_POLICY,
+        blocker_routes = grammar::ALLOWED_BLOCKER_ROUTES.join("|"),
+        evidence_kinds = grammar::ALLOWED_EVIDENCE_KINDS.join("|"),
     )
 }
 
@@ -67,7 +69,7 @@ pub(crate) fn work_item_plan_markdown_reference_discipline(
     format!(
         "[design_requirements] {requirement_ids}\n\
          [cross_reference_discipline]\n\
-         done_when_refs 仅引用先定义 criterion_id。\n\
+         done_when_refs 仅引用**本 WI** 自己的 `- criterion_id:`；不得跨 WI，也不得取自 [design_requirements]。\n\
          target_contract_refs 仅逐字引用已登记 input/output contract_id。\n\
          requirement_refs 仅引用 [design_requirements] 清单。\n\
          handoff 的 reviewer_check_refs 与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）。\n\
@@ -90,7 +92,7 @@ pub(crate) const WORK_ITEM_PLAN_WEAK_MODEL_PRECISION_DISCIPLINE: &str = "\
 \
 AC 纪律：每个 `- criterion_id: AC-xxx` 在 Handoff Schema 配对一行 `- reviewer_check_refs: AC-xxx`；漏写 → acceptance_criterion_without_reviewer_check。
 \
-引用纪律：requirement_refs/done_when_refs 只能逐字复制 spec 已定义 id（REQ-*/AC-*/NFR-*），且都逐字取自 [design_requirements] 清单；清单外 REQ-*/NFR-* → unknown_requirement_ref、清单外 AC-* → unknown_done_when_ref。
+引用纪律：requirement_refs 逐字取 [design_requirements] 的 spec id（REQ-*/NFR-*），清单外 → unknown_requirement_ref。done_when_refs 只引用**本 WI** 自己的 `- criterion_id:`，跨 WI 或清单外 AC-* → unknown_done_when_ref。\
 \
 输出契约纪律：下游 required_capabilities 写什么，上游被 (provider_logical_work_item_id, contract_id) 指向的 Outputs capabilities 就逐字复制什么（require_all 逐项覆盖）；同一契约全计划只声明一次——多个下游消费同一契约时把全部能力串合并进这唯一一份 capabilities，不按下游重复声明。反例①改写/概括/漏一项 → required_capability_missing；反例②按下游重复声明 → duplicate_contract_id。
 成对书写纪律（DEF-PVR-ALL）：跨 WI 依赖两侧成对书写——下游写 `- required_capabilities: [X]` 时，在上游被 (provider_logical_work_item_id, contract_id) 指向的 Outputs 同一契约补 `- capabilities: X`，两侧能力串逐字相同才算写完这一对；反例只写消费侧忘写提供侧 → required_capability_missing。
@@ -239,4 +241,27 @@ pub(crate) fn work_item_plan_confirmed_member_order_teaching(
         "成员归属纪律（LC 多仓会话）：intent_target_kind=logical_codebase 时 intent_target_logical_repo 只能逐字取上列成员 logical UUID；intent_target_kind=single_repository 时 intent_target_repo 只能逐字取上列物理成员仓 ID（不取 [issue] 头 repo=）；会话根仓/聚合根视图 ID 不得替代业务成员 target（→ work_item_target_missing 拒绝）。Plan Intent 仍为可选 section，不新增任何创建/入站授权。\n\n",
     );
     lines
+}
+
+#[cfg(test)]
+mod section_keys_prompt_tests {
+    use super::{grammar, work_item_plan_markdown_grammar};
+
+    /// 首轮 prompt 必须给出两个此前缺失的 enum 完整值域（值取自同一常量，不另写）。
+    #[test]
+    fn first_round_prompt_lists_blockers_route_and_required_evidence_values() {
+        let prompt = work_item_plan_markdown_grammar();
+        for route in grammar::ALLOWED_BLOCKER_ROUTES {
+            assert!(
+                prompt.contains(route),
+                "首轮 prompt 缺少 route 合法值: {route}"
+            );
+        }
+        for kind in grammar::ALLOWED_EVIDENCE_KINDS {
+            assert!(
+                prompt.contains(kind),
+                "首轮 prompt 缺少 required_evidence 合法值: {kind}"
+            );
+        }
+    }
 }

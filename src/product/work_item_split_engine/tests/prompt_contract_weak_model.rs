@@ -37,8 +37,8 @@ fn work_item_plan_markdown_prompt_teaches_weak_model_precision_discipline() {
         "[weak_model_precision]",
         "AC 纪律：每个 `- criterion_id: AC-xxx` 在 Handoff Schema 配对一行 `- reviewer_check_refs: AC-xxx`",
         "漏写 → acceptance_criterion_without_reviewer_check",
-        "引用纪律：requirement_refs/done_when_refs 只能逐字复制 spec 已定义 id（REQ-*/AC-*/NFR-*）",
-        "且都逐字取自 [design_requirements] 清单",
+        "引用纪律：requirement_refs 逐字取 [design_requirements] 的 spec id（REQ-*/NFR-*）",
+        "done_when_refs 只引用**本 WI** 自己的 `- criterion_id:`",
         "清单外 AC-* → unknown_done_when_ref",
     ] {
         assert!(
@@ -147,7 +147,11 @@ fn weak_model_precision_teaching_matches_contract_validator_judgement() {
         "unknown_requirement_ref",
         "`- criterion_id: AC-xxx`",
         "`- reviewer_check_refs: AC-xxx`",
-        "REQ-*/AC-*/NFR-*",
+        // 引用域按校验器分账：requirement_refs 取 spec 编号，done_when_refs 只取
+        // 本 WI 的 criterion id（此前把两者合并成 `REQ-*/AC-*/NFR-*` 与校验器相反）。
+        "REQ-*/NFR-*",
+        "只引用**本 WI** 自己的",
+        "unknown_done_when_ref",
     ] {
         assert!(
             prompt.contains(taught),

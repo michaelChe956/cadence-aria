@@ -100,6 +100,82 @@ pub const STRUCTURED_KEYS: [&str; 40] = [
     "requirement_id",
 ];
 
+/// 每个结构化 section 允许的 key 词表（section → key 单一事实源）。
+///
+/// 与 [`STRUCTURED_KEYS`] 同源：映射里出现的每个 key 都取自该白名单，白名单里
+/// 的每个 key 至少被一个 section 认领。`contract_id` 由 `Inputs` 与 `Outputs`
+/// 共用、`statement` 由 `Tasks` 与 `Acceptance Criteria` 共用——两者在各自
+/// section 语义本就相同形状，故在映射中各出现两次（其余 key 恰好一次）。
+///
+/// 渲染面（SC author prompt 的 `[section_keys]` 段）只从本映射生成，不另立
+/// 第二份 key 列表；映射与白名单的一致性由本模块的 `section_keys_*` 用例
+/// 双向钉死（防漂移）。
+pub const SECTION_KEYS: &[(&str, &[&str])] = &[
+    (
+        "Identity",
+        &["schema_version", "logical_work_item_id", "title", "kind"],
+    ),
+    ("Goal", &["summary"]),
+    ("Non Goals", &["non_goals"]),
+    ("Dependencies", &[DEPENDENCIES_KEY]),
+    (
+        "Plan Intent",
+        &[
+            "intent",
+            "provider_work_item_id",
+            "intent_target_kind",
+            "intent_target_repo",
+            "intent_target_codebase",
+            "intent_target_logical_repo",
+        ],
+    ),
+    (
+        "Inputs",
+        &[
+            "contract_id",
+            "provider_logical_work_item_id",
+            "required_capabilities",
+            "compatibility_policy",
+        ],
+    ),
+    ("Outputs", &["contract_id", "capabilities"]),
+    (
+        "Tasks",
+        &["task_id", "statement", "requirement_refs", "done_when_refs"],
+    ),
+    ("Write Policy", &["exclusive_scopes", "forbidden_scopes"]),
+    (
+        "Acceptance Criteria",
+        &["criterion_id", "statement", "required_evidence"],
+    ),
+    (
+        "Verification",
+        &[
+            "check_id",
+            "command",
+            "manual_instruction",
+            "required",
+            "non_zero_test_execution_required",
+        ],
+    ),
+    (
+        "Handoff Schema",
+        &[
+            "required_fields",
+            "provided_contract_refs",
+            "reviewer_check_refs",
+        ],
+    ),
+    (
+        "Blockers",
+        &["reason_code", "route", "target_contract_refs"],
+    ),
+    (
+        "Traceability",
+        &["source_type", "source_id", "requirement_id"],
+    ),
+];
+
 /// `kind` 的现有契约允许值，与 [`crate::product::models::WorkItemKind`] 保持一致。
 pub const ALLOWED_ITEM_KINDS: [&str; 7] = [
     crate::product::models::WorkItemKind::Backend.as_str(),
@@ -157,3 +233,62 @@ pub const UNKNOWN_STRUCTURED_KEY_POLICY: &str = "fail_closed";
 pub const FREE_TEXT_SECTION_POLICY: &str = "allow_free_text";
 /// EARS statement 的关键字元数据。
 pub const EARS_KEYWORDS: [&str; 2] = ["WHEN", "THE SYSTEM SHALL"];
+
+#[cfg(test)]
+mod tests {
+    use super::{SECTION_KEYS, STRUCTURED_KEYS, STRUCTURED_SECTIONS};
+
+    /// section→key 映射与 `STRUCTURED_KEYS` 白名单双向一致（防漂移）：
+    /// 映射里不得出现白名单外的 key；白名单里的每个 key 至少被一个 section
+    /// 认领。跨 section 共用的 key 只有 `contract_id`（Inputs/Outputs）与
+    /// `statement`（Tasks/Acceptance Criteria）——两者在各自 section 语义
+    /// 本就同形，故各出现两次；其余 key 恰好出现一次。
+    #[test]
+    fn section_keys_match_structured_key_whitelist() {
+        let mapped: Vec<&str> = SECTION_KEYS
+            .iter()
+            .flat_map(|(_, keys)| keys.iter().copied())
+            .collect();
+        for key in &mapped {
+            assert!(
+                STRUCTURED_KEYS.contains(key),
+                "section→key 映射不得引入白名单外 key：{key}"
+            );
+        }
+        for key in STRUCTURED_KEYS {
+            assert!(
+                mapped.contains(&key),
+                "白名单 key {key} 必须在 section→key 映射中被至少一个 section 认领"
+            );
+        }
+        let shared = ["contract_id", "statement"];
+        for key in STRUCTURED_KEYS {
+            let count = mapped
+                .iter()
+                .filter(|mapped_key| **mapped_key == key)
+                .count();
+            let expected = if shared.contains(&key) { 2 } else { 1 };
+            assert_eq!(
+                count, expected,
+                "key {key} 在 section→key 映射中的出现次数必须为 {expected}"
+            );
+        }
+    }
+
+    /// section→key 映射覆盖 `STRUCTURED_SECTIONS` 的每个 section，且顺序
+    /// 与 canonical 顺序一致（渲染面按此顺序输出）。
+    #[test]
+    fn section_keys_cover_every_structured_section() {
+        let mapped_sections: Vec<&str> = SECTION_KEYS.iter().map(|(section, _)| *section).collect();
+        assert_eq!(
+            mapped_sections, STRUCTURED_SECTIONS,
+            "section→key 映射必须逐个覆盖 STRUCTURED_SECTIONS 且顺序一致"
+        );
+        for (section, keys) in SECTION_KEYS {
+            assert!(
+                !keys.is_empty(),
+                "section {section} 在映射中显式列出结构化 key（无结构化 key 的 section 才可为空）"
+            );
+        }
+    }
+}

@@ -837,7 +837,7 @@ fn work_item_plan_markdown_prompt_inlines_grammar_boundaries_and_real_findings()
         "intent_target_codebase 与 intent_target_logical_repo（logical codebase id 与成员仓 UUID）",
         "[design_requirements] REQ-002、NFR-001",
         "[cross_reference_discipline]",
-        "done_when_refs 仅引用先定义 criterion_id",
+        "done_when_refs 仅引用**本 WI** 自己的 `- criterion_id:`",
         "target_contract_refs 仅逐字引用已登记 input/output contract_id",
         "requirement_refs 仅引用 [design_requirements] 清单。",
         "handoff 的 reviewer_check_refs 与全部且仅本 item 的 acceptance criterion ID 集合完全一致（每条 AC 恰好被检查一次）",
@@ -1421,8 +1421,9 @@ fn outline_fresh_contract_fixture() -> OutlineFreshContractFixture {
         project_id: "project_0001".to_string(),
         repo_id: Some("repository_0001".to_string()),
         base_branch: None,
-        logical_codebase_id:
-            crate::product::logical_codebase::legacy_logical_codebase_id("project_0001"),
+        logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+            "project_0001",
+        ),
         title: "T15 计划".to_string(),
         description: Some("T15 描述".to_string()),
         change_id: "change_0001".to_string(),
