@@ -259,6 +259,24 @@ def main():
         share_light = light_tools.get(name, 0)
         print(f"  {name:24s} 合计 {count:4d}  其中重工具轮 {share_heavy:4d} / 轻工具轮 {share_light:4d}")
 
+    # 轮型对照：initial（模型自行探索）vs teaching/repair（上下文已喂足）
+    kind_rows = {}
+    for entry in matched:
+        rollout = entry["rollout"]
+        key = entry.get("kind") or "unknown"
+        bucket = kind_rows.setdefault(key, {"ttft": [], "tools": [], "dur": []})
+        if isinstance(entry.get("ttft_ms"), int):
+            bucket["ttft"].append(entry["ttft_ms"])
+        bucket["tools"].append(rollout["tool_calls"])
+        if rollout["first_text"]:
+            bucket["dur"].append(round((rollout["first_text"] - rollout["prompt"]).total_seconds() * 1000))
+    print("\n== 轮型对照（initial=模型自行探索；teaching=上下文已喂足）")
+    for key, bucket in sorted(kind_rows.items()):
+        print(f"  {key:9s} 轮数={len(bucket['ttft']):3d} "
+              f"工具调用中位={median(bucket['tools']):5.1f} 次 | "
+              f"我方 ttft 中位={median(bucket['ttft']) / 1000:7.1f}s | "
+              f"prompt→正文 中位={median(bucket['dur']) / 1000:7.1f}s")
+
     unknown_client = sum(1 for entry in matched if entry.get("client_receive") == "unknown")
     print(f"\nclient_receive 未埋点：{unknown_client}/{len(matched)} 轮")
     batches = sorted({entry["batch"] for entry in matched})
