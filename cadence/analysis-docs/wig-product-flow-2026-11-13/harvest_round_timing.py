@@ -69,6 +69,7 @@ def load_rollouts(root):
         last_activity = None
         first_text = None
         tool_calls = 0
+        tool_events = []
         try:
             with open(path, encoding="utf-8", errors="replace") as handle:
                 for line in handle:
@@ -91,6 +92,8 @@ def load_rollouts(root):
                             last_activity = stamp
                         elif sub == "function_call":
                             tool_calls += 1
+                            tool_name = (payload.get("name") or payload.get("tool_name") or "?")
+                            tool_events.append((tool_name, stamp))
                             if first_activity is None:
                                 first_activity = stamp
                             last_activity = stamp
@@ -111,6 +114,7 @@ def load_rollouts(root):
             "last_activity": parse_ts(last_activity) if last_activity else None,
             "first_text": parse_ts(first_text) if first_text else None,
             "tool_calls": tool_calls,
+            "tool_events": tool_events,
         })
     return out
 
@@ -225,6 +229,35 @@ def main():
         rho = spearman([c for c, _ in ttft_pairs], [t for _, t in ttft_pairs])
         if rho is not None:
             print(f"Spearman(工具轮次, ttft) = {rho:.3f}（n={len(ttft_pairs)}）")
+
+    # 工具调用序列：哪些工具、长 ttft 的轮次在调什么
+    tool_counter = {}
+    heavy_tools = {}
+    light_tools = {}
+    first_call_delay = []
+    for entry in matched:
+        rollout = entry["rollout"]
+        names = [name for name, _ in rollout["tool_events"]]
+        for name in names:
+            tool_counter[name] = tool_counter.get(name, 0) + 1
+        if not names:
+            continue
+        first_stamp = parse_ts(rollout["tool_events"][0][1])
+        first_call_delay.append(round((first_stamp - rollout["prompt"]).total_seconds() * 1000))
+        if not isinstance(entry.get("ttft_ms"), int):
+            continue
+        bucket = heavy_tools if rollout["tool_calls"] >= 5 else light_tools
+        for name in names:
+            bucket[name] = bucket.get(name, 0) + 1
+
+    print("\n== 工具调用画像")
+    print(f"有工具调用的轮：{len(first_call_delay)}；首个工具调用延迟 中位 "
+          f"{median(first_call_delay) / 1000:.1f}s p90 {p90(first_call_delay) / 1000:.1f}s")
+    print("工具调用次数分布（全部轮）:")
+    for name, count in sorted(tool_counter.items(), key=lambda kv: -kv[1])[:10]:
+        share_heavy = heavy_tools.get(name, 0)
+        share_light = light_tools.get(name, 0)
+        print(f"  {name:24s} 合计 {count:4d}  其中重工具轮 {share_heavy:4d} / 轻工具轮 {share_light:4d}")
 
     unknown_client = sum(1 for entry in matched if entry.get("client_receive") == "unknown")
     print(f"\nclient_receive 未埋点：{unknown_client}/{len(matched)} 轮")
