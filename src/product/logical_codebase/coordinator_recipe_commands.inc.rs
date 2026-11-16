@@ -54,11 +54,25 @@ impl GatewayBackedAggregateProviderTurnDriver {
         provider: crate::product::models::ProviderName,
     ) -> String {
         format!(
-            "{}{}{}",
+            "{}{}{}{}",
             Self::recipe_commands(step, provider).join("\n"),
             Self::scope_discipline_section(aggregate_root),
+            Self::index_boundary_section(),
             Self::unattended_section()
         )
+    }
+
+    /// 索引由平台后续步骤负责；关联脚本只配置，不改变固定 skill 命令身份。
+    fn index_boundary_section() -> &'static str {
+        "\n[aggregate_index_boundary]\n\
+         本轮只完成根级配置，索引由平台在初始化成功后的聚合索引步骤负责。\
+         调用 rule-config 关联脚本时，dry-run 和 apply 必须显式携带 \
+         --defer-codegraph-index，替代 Python 调用也须保留该参数。\
+         不得自行执行 codegraph init/index/sync；不得用 nohup、后台任务、sleep \
+         或轮询等待来补建索引，也不得因代码阅读规则自行初始化索引。\
+         脚本参数不支持或执行失败时，保留真实错误并停止，\
+         不得退回不带参数重跑，不得用手工修改或已有文件变化代替成功报告。\
+         完成本步配置和报告后结束会话；配置成功不代表索引就绪。\n"
     }
 
     /// 无人值守指令段（聚合初始化与知识库操作共用同一口径）。
@@ -66,5 +80,48 @@ impl GatewayBackedAggregateProviderTurnDriver {
         "\n\n（无人值守执行：本次操作没有交互通道。不要向用户提问，也不要请求授权\
          或等待回答；遇到需要用户决策的分支，按 skill 规定的非破坏性默认路径继续\
          （无法安全继续时停止并在产物中写明），不要停在等待回答上。）\n"
+    }
+}
+
+#[cfg(test)]
+mod recipe_index_boundary_tests {
+    use super::*;
+    use crate::product::models::ProviderName;
+
+    #[test]
+    fn recipe_prompt_defers_index_without_changing_command_identity() {
+        let root = std::path::Path::new("/tmp/aggregate-root");
+        for provider in [
+            ProviderName::ClaudeCode,
+            ProviderName::Codex,
+            ProviderName::Pi,
+            ProviderName::KimiCode,
+        ] {
+            for step in [
+                AggregateInitializationStepKind::PreCheck,
+                AggregateInitializationStepKind::RuleAndMcpConfig,
+                AggregateInitializationStepKind::OpenspecAndExamples,
+            ] {
+                let commands = GatewayBackedAggregateProviderTurnDriver::recipe_commands(
+                    step,
+                    provider.clone(),
+                );
+                let prompt = GatewayBackedAggregateProviderTurnDriver::recipe_prompt(
+                    step,
+                    root,
+                    provider.clone(),
+                );
+                assert!(prompt.starts_with(&commands.join("\n")));
+                for command in commands {
+                    assert_eq!(prompt.matches(&command).count(), 1);
+                }
+                assert!(prompt.contains("[aggregate_index_boundary]"));
+                assert!(prompt.contains("--defer-codegraph-index"));
+                assert!(prompt.contains("dry-run 和 apply"));
+                assert!(prompt.contains("初始化成功后的聚合索引步骤"));
+                assert!(prompt.contains("不得自行执行 codegraph init/index/sync"));
+                assert!(prompt.contains("不得退回不带参数重跑"));
+            }
+        }
     }
 }

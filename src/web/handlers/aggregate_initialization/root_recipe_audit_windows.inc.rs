@@ -71,6 +71,9 @@ fn begin_root_recipe_command_watches(
 /// 真机：已初始化的聚合根上重跑 recipe ⇒ 旧判据把幂等成功判成失败）。
 /// 脚本报告失败 / 没有报告（命令可能没执行）⇒ 仍判失败。
 ///
+/// 显式失败优先于变更事实：脚本自报 Failed ⇒ 即便窗口内已有落盘变更
+/// （receipts 已全部 durable 保留后才拒绝）也判失败，变更不能掩盖失败。
+///
 /// 失败诊断同时携带 **provider 的真实输出尾部**（`turn_output`）：零变更
 /// 本身不说明原因——命令没被执行、命令执行了但失败、命令按契约幂等无变更，
 /// 三种情形的 provider 输出完全不同（本仓 2026-11-12 真机：pre-check 脚本
@@ -98,6 +101,35 @@ fn complete_root_recipe_command_receipts(
     let zero_change = store
         .append_turn_receipts(project_id, step, provider, receipts)
         .map_err(|error| root_recipe_audit_failure(step, error))?;
+    // 显式失败优先于变更事实：脚本自报 Failed ⇒ 即便本 turn 已有落盘变更
+    // 也判失败（receipts 已全部 durable 落盘后才拒绝，证据保留）。
+    if outcome.report
+        == crate::product::logical_codebase::aggregate_initialization_coordinator::RecipeCommandReport::Failed
+    {
+        let reason = format!(
+            "root recipe script reported failure (provider={}, step={})",
+            crate::product::logical_codebase::provider_trust::provider_wire_label(provider),
+            step.as_str(),
+        );
+        return Err(AggregateInitializationError::ProviderTurnDiagnosed {
+            step,
+            reason: reason.clone(),
+            retryable: true,
+            provider: Some(
+                crate::product::logical_codebase::provider_trust::provider_wire_label(provider)
+                    .to_string(),
+            ),
+            diagnostic: TurnDiagnostic {
+                cause: Some("root_recipe_script_failed".to_string()),
+                output: Some(
+                    crate::product::logical_codebase::aggregate_initialization_coordinator::provider_turn_failure_output(
+                        &reason,
+                        &outcome.summary,
+                    ),
+                ),
+            },
+        });
+    }
     match zero_change {
         None => Ok(()),
         Some(reason) => {
