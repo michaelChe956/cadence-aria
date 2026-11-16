@@ -72,8 +72,8 @@ fn ceil_char_boundary(value: &str, mut index: usize) -> usize {
 
 /// OracleAggInitScope 红绿测共用断言(镜像 r54
 /// `assert_worktree_discipline` 形态):root recipe prompt 必须携带 scope
-/// 纪律段四句结构(聚合根真实绝对路径硬钉+成员仓负边界+auditor 后果+
-/// zero-action 正向句)。供本文件 `provider_turn_lcg_tests` 与
+/// 纪律结构(聚合根真实绝对路径硬钉+成员仓负边界+auditor 后果)。
+/// 供本文件 `provider_turn_lcg_tests` 与
 /// coordinator_tests 的 `mod tests`(profile_trust 全链测试)共用。
 #[cfg(test)]
 pub(crate) fn assert_aggregate_scope_discipline(prompt: &str, aggregate_root: &std::path::Path) {
@@ -100,10 +100,6 @@ pub(crate) fn assert_aggregate_scope_discipline(prompt: &str, aggregate_root: &s
     assert!(
         prompt.contains("fail-closed"),
         "纪律段必须声明越界=该命令 rejected+发布 fail-closed 后果:\n{prompt}"
-    );
-    assert!(
-        prompt.contains("零文件变更的空完成"),
-        "纪律段必须携带 zero-action 正向句:\n{prompt}"
     );
 }
 

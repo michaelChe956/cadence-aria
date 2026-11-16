@@ -210,7 +210,7 @@ impl GatewayBackedAggregateProviderTurnDriver {
              - 你的工作区是且只是聚合根（provider context root 绝对路径）：{path}。上述 recipe 命令的全部文件写入都必须落在 {path} 下的允许面（{allowed}）内；聚合根里的成员目录（例如 alpha、beta）不属于允许面。\n\
              - 禁止在任何成员仓目录（成员 checkout 及其 .git/worktrees，无论位于聚合根内还是聚合根外）执行写操作、git mutation 或构建命令；也禁止写 {path} 以外的任何路径——本阶段不存在写允许面之外路径的合法理由。\n\
              - root recipe auditor 逐路径把关：任何越界写都会使该命令被 rejected（unknown_path DENY），聚合初始化发布 fail-closed——不要尝试越界或试探边界。\n\
-             - 必须实际逐条执行上述命令并产生真实文件变更；零文件变更的空完成不满足本任务要求，不得在未实际执行命令的情况下宣告完成。\n",
+             - 必须实际逐条执行上述命令并保留真实脚本报告；幂等执行允许零文件变更，不得为制造变更而改写文件，也不得在未实际执行命令的情况下宣告完成。\n",
             path = aggregate_root.display(),
             allowed = crate::product::logical_codebase::ROOT_RECIPE_ALLOWLIST.join("、")
         )

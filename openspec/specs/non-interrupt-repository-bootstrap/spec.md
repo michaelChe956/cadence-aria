@@ -521,9 +521,10 @@ Codex | `$cadence-init:<skill>` |
 - **WHEN** 生成任一步的命令文本
 - **THEN** 除这四条命令外，系统 SHALL NOT 生成任何其它 skill 调用文本；SHALL NOT 改写既有四条的命令名或参数
 
+
 ### Requirement: root recipe turn 零变更必须显式失败（REQ-BOOT-17）
 
-root recipe 的四个 step（`PreCheck` / `RuleAndMcpConfig` / `OpenspecAndExamples`）中，任一 turn 结束时若**未产生任何工作区变更**（receipt 判为零动作），系统 SHALL 判该 step **失败**并保留可诊断失败事实；SHALL NOT 把该 turn 记为成功。
+root recipe 的 provider turn（`PreCheck` / `RuleAndMcpConfig` / `OpenspecAndExamples`）结束时，明确的工具失败报告（`overall=failed`）SHALL 优先于工作区变化：无论是否写入文件，步骤失败、后续不推进，cause为`root_recipe_script_failed`，审计receipt照常保留。没有明确失败报告时，零变更除下述幂等成功例外外仍判失败；不得以制造文件变化代替脚本成功。
 
 零变更失败的诊断 SHALL 同时携带**失败事实**（provider、step、零变更）与 **provider 的真实输出**（该 turn 的输出尾部，含 Cadence-skills 脚本的报告原文）。理由：零变更本身不说明原因——「命令未被识别」「命令执行了但失败」「命令按契约幂等无变更」三种情形的 provider 输出各不相同；诊断只有 `zero_change` 一句时，用户无法分辨是哪一种（本仓 2026-11-12 真机：pre-check 脚本某个 phase 失败 → `--no-interrupt` 中止 → 聚合根零落盘 → 界面只显示 `root recipe turn produced no workspace change (provider=pi, step=pre_check, zero_change=true)`，脚本的 JSON 报告整段丢失）。
 
@@ -547,12 +548,12 @@ provider turn 的输出超预算时，系统 SHALL 保留输出的**头部与尾
 
 #### Scenario: 脚本报告失败仍判失败
 
-- **WHEN** 某个 root recipe step 的 turn 结束时 receipt 判为零动作，且该 turn 的工具结果里出现脚本的失败报告（`overall=failed`）或没有脚本报告
-- **THEN** 该 step SHALL 判为失败，诊断 SHALL 携带脚本报告原文
+- **WHEN** 某个root recipe step的工具结果中出现`overall=failed`，无论receipt有无变更
+- **THEN** 步骤SHALL失败、后续保持pending，cause=`root_recipe_script_failed`；保留审计receipt与真实输出，不以zero_change替代脚本失败原因
 
 #### Scenario: 有变更的 recipe turn 照旧成功
 
-- **WHEN** root recipe 的某个 step 结束时 receipt 判出实际变更
+- **WHEN** root recipe 的某个 step 结束时 receipt 判出实际变更，且没有明确失败报告
 - **THEN** 该 step SHALL 照既有语义成功；本 requirement SHALL NOT 放宽任何既有成功判据
 
 #### Scenario: 既有成功判据不被改写
@@ -655,3 +656,18 @@ provider run 的每个**未装箱** async 对象 SHALL 受**按归属分层的�
 
 - **WHEN** 某对象按宏体档或 P1 engine 过渡档判绿
 - **THEN** 该对象 SHALL 已登记其归属的独立 change 与收紧条件；SHALL NOT 被当作已收敛
+
+### Requirement: LC 配置阶段与索引构建分离
+
+固定四条skill命令文本 SHALL 不变。LC追加上下文 MUST 要求rule-config关联脚本dry-run/apply透传`--defer-codegraph-index`；不得自行追加索引构建或等待。真实索引归既有后续aggregate_index，配置成功不得当作PlanningReady。
+
+#### Scenario: 新聚合根配置
+
+- **WHEN** 聚合根没有`.codegraph`
+- **THEN** 先完成规则/MCP配置，不在provider turn内初始化索引；成功后交给后续索引步骤
+
+#### Scenario: 旧Skills不认识参数
+
+- **WHEN** 关联脚本拒绝`--defer-codegraph-index`
+- **THEN** provider保留真实错误并停止，不退回无参数调用；平台对可识别failed报告作明确失败判定，本次不重写缺报告兼容路径
+

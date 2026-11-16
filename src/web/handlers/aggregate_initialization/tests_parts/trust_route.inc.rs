@@ -107,7 +107,8 @@ struct RecipeFixtureOptions {
     /// 该 step 必须判失败（零动作 turn 不得静默通过）。
     zero_change_pre_check: bool,
     /// pre_check turn 的**脚本报告**（工具结果原文）。`Some(report)` 时 turn
-    /// 产出该报告且零落盘——「命令确实执行且按契约幂等无变更」的形态。
+    /// 产出该报告；是否落盘**独立**由 `zero_change_pre_check` 决定（报告
+    /// 与变更互不隐含：可「报告+变更」，也可「报告+零变更」）。
     recipe_report: Option<String>,
 }
 
@@ -244,16 +245,6 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
         // - pre_check 写 `.claude/`（真实 pre-check 写 .agents/.claude/...）；
         // - project_rules_examples 写 `cadence/project-rules/examples`
         //   （真实落盘面，见 ROOT_RECIPE_ALLOWLIST 的实测证据）。
-        // 「命令确实执行且按契约幂等无变更」形态：turn 产出脚本报告（工具
-        // 结果原文）但不产生任何落盘——零变更判据据此判成功。
-        if input.prompt.contains(pre_check) && self.options.recipe_report.is_some() {
-            let report = self
-                .options
-                .recipe_report
-                .clone()
-                .expect("recipe report option present");
-            return Ok(reported_provider_session(&report));
-        }
         if input.prompt.contains(pre_check) && !self.options.zero_change_pre_check {
             let claude_dir = input.working_dir.join(".claude");
             std::fs::create_dir_all(&claude_dir).expect("create root .claude dir");
@@ -266,6 +257,17 @@ impl crate::cross_cutting::streaming_provider::StreamingProviderAdapter
                 .expect("open root claude settings");
             std::io::Write::write_all(&mut marker, b"{\"pre_check\":true}\n")
                 .expect("append root claude settings");
+        }
+        // 「命令确实执行」的形态：turn 产出脚本报告（工具结果原文）；是否
+        // 落盘独立由上方 zero_change_pre_check 决定——报告与变更互不隐含
+        // （幂等成功=报告+零变更；显式失败也可能伴随 allowlisted 变更）。
+        if input.prompt.contains(pre_check) && self.options.recipe_report.is_some() {
+            let report = self
+                .options
+                .recipe_report
+                .clone()
+                .expect("recipe report option present");
+            return Ok(reported_provider_session(&report));
         }
         if input.prompt.contains(project_rules_examples) {
             let examples = input
