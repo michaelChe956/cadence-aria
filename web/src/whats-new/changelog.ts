@@ -5,10 +5,22 @@ export interface ChangelogEntry {
   highlights: string[];
 }
 
-export const CURRENT_VERSION = "0.1.6";
+export const CURRENT_VERSION = "0.1.7";
 
 // 发布升版本时请裁剪数组，仅保留最新 4 条。
 export const CHANGELOG: ChangelogEntry[] = [
+  {
+    version: "0.1.7",
+    date: "2026-11-16",
+    title: "LC 初始化失败不再误放行 · 配置与聚合索引分离",
+    highlights: [
+      "预检脚本明确失败时，即使已经修改文件也不再判为通过；保留审计证据和真实失败诊断，后续步骤停止推进",
+      "LC 规则与 MCP 配置阶段不再重复构建或等待 CodeGraph 索引；初始化成功后仍由平台自动执行聚合索引构建",
+      "幂等执行允许零文件变化，不再要求为了通过初始化而制造文件变更；配置完成不等于索引已就绪",
+      "升级前请先更新 Cadence-skills（包含 #117）：兼容 OpenSpec 2.0 的 Pi/Kimi 共享技能布局，并支持延后索引参数；无需删除已有配置或索引",
+      "运行信息、npm 包和产品内版本号统一为 0.1.7，不再沿用历史内嵌版本号",
+    ],
+  },
   {
     version: "0.1.6",
     date: "2026-11-14",
@@ -47,19 +59,6 @@ export const CHANGELOG: ChangelogEntry[] = [
       "两处 CI 慢机竞态修复：pid 文件空读、worktree 注册消失",
       "仓库初始化夹具轮询改用真实时间预算（CI 慢机竞态）",
       "「聚合初始化零变更诊断」的 OpenSpec change 已归档，主规格同步",
-    ],
-  },
-  {
-    version: "0.1.3",
-    date: "2026-11-11",
-    title: "LC 仓管理知识库模块全量交付 · macOS 构建修复 · CI 红灯链条补记",
-    highlights: [
-      "LC 仓管理知识库模块全量交付（含 WIG 优化的同期改动）",
-      "「不替换改名」按平台拆分，修 macOS 构建失败",
-      "CI 两个红 job 修复：fmt 与 release poll 帧门禁，并补两条文档证据",
-      "CI 红灯的完整链条补记：4 层独立问题逐层定位，另记明 release.yml 不 needs Rust CI 的依赖缺口",
-      "记录 0.1.2 tag 与 CI 的关系及不重打 tag 的理由",
-      "根目录散落的 F58 教学注入报告归位到 cadence/reports/",
     ],
   },
 ];
