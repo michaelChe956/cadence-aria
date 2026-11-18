@@ -8,7 +8,7 @@
 2. **`REQ-IND-06` 不做自动发现**：新增源码只在「下次验收/重建」时重新判断，不引入后台扫描、不在 freshness 里盘检。
 3. **告警结构化**：卡片与成员列表的跳过提示是 `{code, message_zh}` 对象，与证据面 `not_searched.code` 同构；不是纯字符串。
 4. **`not_searched` 的审计原因是纯加法**：既有审计字段与判定口径不变，新字段可选、只解释「为什么没检索」。
-5. **源码后缀探针不是开工门禁**：探针并行前置，先按保守清单落地盘检；探针结论回来以「增补清单」方式落地。
+5. **源码后缀清单是代码内静态常量、按 codegraph 1.6.3 一次性校准**：校准是**实施期一次性动作**（产出固化成清单 + 基线注释），**不是运行期流程、不是开工门禁**；版本漂移只记可审计 warning、不阻断索引构建（D2）。
 
 ## D1 · 判定与跳过的数据流（谁在何时判、事实落在哪、谁消费）
 
@@ -36,18 +36,21 @@
 
 **不因跳过而改变的东西**：项目成员集合（不移除成员）、成员授权与 ACL、选仓资格、checkout 与工作区准入、Issue 的 `selection.focus_repository_ids` 语义。
 
-## D2 · Aria 源码口径与探针（保守清单先开工）
+## D2 · Aria 源码口径（静态清单，按 codegraph 1.6.3 校准）
 
 **约束（硬）**：Aria 自有的源码类型清单必须满足「**由 Aria 自有**」且「**是 CodeGraph 支持后缀的真子集**」。理由：若清单纳入 CodeGraph 根本不索引的后缀，会把「CodeGraph 根本不索引的文件」误判成「索引漏收」并报错——这正是本变更要消灭的假阳性。
 
-**实施顺序（已裁决）**：**保守清单先开工，探针并行前置，结论回来再增补**。
+**清单形态与校准基线（owner 拍板，S1/S4）**：Aria 维护一份**静态**源码后缀清单（代码内常量，实施落在 `source_scan.rs`），发布时固化；**不在运行期测量**。
 
-- 保守清单只纳入「确定被 CodeGraph 收录」的常见源码后缀（`.rs/.ts/.tsx/.js/.jsx/.py/.go/.java/...` 这类），实施不等待探针。
-- 逐后缀探针按语言各造**最小有效样本**（不能拿同一个 JS 样本改后缀），每个版本用独立临时根，按生产 argv 跑 `init .` / `sync .` / `files --json`，正反两组逐项出表；产物只落 `/tmp`。
-- 探针必须覆盖部署支持的版本基线（现行兼容区间 `>=1.6.0, <2.0.0`，`src/product/logical_codebase/aggregate_index/codegraph_cli.rs` 的版本常量与探测函数）。
-- **可见范围口径探针（G5）**：每个版本基线各验一次「被 `.gitignore` 忽略的文件不被 codegraph 收录、git 可见范围内的文件（含未跟踪但未被忽略的）被收录」这一条，正反两组逐项出表，使探针结论与扫描口径一致；该探针与后缀探针同属**并行前置、非阻塞门禁**，未跑完不阻塞盘检实现与其余工作包。
-- 探针结论 SHALL 以「增补已登记后缀」的方式落地；探针未跑完 **MUST NOT 阻塞**盘检实现与其余工作包。保守清单的偏保守后果是「多跳过」（不报错）而不是「误报错」，方向安全；探针回来后增补即可减少跳过面。
-- 清单、兼容基线或推荐版本变更前重跑探针；探针未跑通则**不宣称**兼容已验收。
+- **校准基线 = 当前机器已安装的 codegraph 1.6.3**。owner 原话：「就使用当前机器上 codegraph 版本进行测试吧；如果后续有新版本不兼容，遇到问题咱们再更新解决。」⇒ 清单只按 **1.6.3** 校准，不再对兼容区间 `>=1.6.0, <2.0.0`（`src/product/logical_codebase/aggregate_index/codegraph_cli.rs` 的 `CODEGRAPH_MIN_VERSION` / `CODEGRAPH_MAX_VERSION_EXCLUSIVE`，区间常量本身不动）内每个版本各测一遍。
+- **可复现的测量命令（实施期一次性动作）**：临时目录里每个候选后缀各放一个该语言的**最小有效样本**（不得拿同一份 JS 样本改后缀）→ `codegraph init .` → `codegraph files --json` → 出现的后缀 = 该版本会收录的后缀；产物只落 `/tmp`。正控至少一条已知被收录后缀（如 `.ts`）；负控记录配置/文档类后缀的收录数（只要求它们**不进** Aria 清单）。
+- **Aria 清单取其子集**：只纳入「我们希望当源码看待」的常见语言；`.json/.md/.toml/.txt/.csv/.html/.htm`（文档/配置）**不算** Aria 源码；`.yaml/.yml/.xml/.properties/.tf/.tfvars/.tofu` 虽被 1.6.3 收录也**不算** Aria 源码。
+- **清单处必须写明**：① 校准基线版本 = **1.6.3**（附 `codegraph --version` 原始输出）；② 上面这条**可复现测量命令**；③ **复校准步骤**（换 codegraph 版本后重跑测量 → 更新清单 → 更新基线注释 → 追加一行新基线）。
+- **校准动作是一次性的、不是门禁、不是运行期流程**：实施期跑一次，产出固化成静态清单 + 基线注释；后续实施不等待它，运行期不重测。
+- **明确不做**：机器级 durable 能力记录、运行期测量、版本键缓存、自动重校准。
+- **可见范围口径（G5）**：同一次校准动作里记录「被 `.gitignore` 忽略的文件不被 codegraph 收录、git 可见范围内的文件（含未跟踪但未被忽略的）被收录」这一条正反两组，使校准结论与扫描口径一致。
+
+**版本漂移只记警告（S2）**：已安装 codegraph 版本 **≠** 清单校准基线（1.6.3）⇒ 验收层在既有可审计软告警通道（`AggregateIndexAcceptance.warning`）追加一条 warning，**不改判定、不阻断索引构建**。**已知风险与触发条件**：新版若不再收录清单内某个后缀，该类仓会被判成「漏收」而失败；届时按上面的**复校准步骤**更新清单与基线注释。**不实现自动重校准**，也**不**把版本漂移升级为失败。
 
 旧稿曾引用本机安装包内的上游表（`lib/dist/extraction/grammars.js`）——**未证实（沿用旧稿勘察记录）**，本次不得作为产品运行依赖，也不得复制整表或生成 `extensions` 配置。
 
@@ -56,7 +59,7 @@
 - 只按**后缀**做元数据判定，不读文件内容、不推断语言或符号、不看仓库类型或标签；后缀按最后一个扩展名做 ASCII 不区分大小写匹配。
 - `.yaml/.yml/.xml/.properties/.tf/.tfvars/.tofu`、`.json/.md/.toml/.txt/.csv/.html/.htm` **不算**源码（属配置/文档）。是否产出符号不是判据（上游对 yaml/xml 属 file-level-only，不据此断言「无符号」）。
 - 符号链接（目录与文件）与非普通文件**都不算**源码；目录打开不跟随符号链接。
-- 排除口径**复用**既有 11 条内建规则（`src/product/logical_codebase/aggregate_index/exclude.rs` 的 `BUILTIN_EXCLUDES`）与 `codegraph.json` 生成口径，**不另写副本**；普通遍历剪枝 `.git/.aria/node_modules/target/build/dist/.worktrees`。其中 4 条非目录固定名模式（`**/.env`、`**/.env.*`、`**/*credential*`、`**/*secret*`）在**目录条目**上按名字匹配剪枝（`credentials/`、`secret-notes/` 这类目录不进入），不得改成文件级规则或另行放宽。
+- 排除口径**复用**既有 11 条内建规则（`src/product/logical_codebase/aggregate_index/exclude.rs` 的 `BUILTIN_EXCLUDES`；它经 `CodeGraphExcludeGenerator::from_member_roots` 原样写进聚合根 `codegraph.json` 的 `exclude`），**Aria 排除集 = codegraph 排除集、同源，MUST NOT 自建第二份**；普通遍历剪枝 `.git/.aria/node_modules/target/build/dist/.worktrees`。其中 4 条非目录固定名模式（`**/.env`、`**/.env.*`、`**/*credential*`、`**/*secret*`）**目录级与文件级都要扣除**：命中这些模式的**目录条目**剪枝（`credentials/`、`secret-notes/` 这类目录不进入），命中这些模式的**文件条目**同样不算源码候选（如 `credentials.rs`、`secret_manager.ts`）。**理由**：这 4 条写进 `codegraph.json` 的 `exclude` 后按路径 glob 生效，能命中 `credentials.rs` 这类**文件**，codegraph 会把它排除出索引；若盘检因后缀 `.rs` 在清单里就把它当成源码，就会出现「源码存在却没收录」的**永久假漏收**，该仓永远建不出索引。因此 MUST NOT 只在目录级过滤、放过文件级命中（旧稿「MUST NOT 改写成文件级规则」的措辞作废）。
 - `.worktrees/` 是**独立的第二段诊断**：普通路径查完且无源码时才查 `.worktrees/` 子树；两段都无候选且都完成 ⇒ `NoSource`；在 `.worktrees/` 找到候选 ⇒ `SourceOnlyInWorktrees`（失败，不是跳过）。`.worktrees` 入口本身是符号链接或不存在 ⇒ 该段「无候选且完成」，不跟随、不算失败。
 - **可见范围与 codegraph 同口径（G1 · 方向性更正，取代旧稿「不模拟 `.gitignore`」）**：判定「该成员有没有源码」时，源码候选**只取 git 可见范围**——在该成员**主工作目录**内执行 `git ls-files --cached --others --exclude-standard`（已跟踪的文件 + 未跟踪且未被忽略的文件），与 Aria 源码后缀集求交，再扣除 Aria 自身排除（与既有内建排除规则表同源、不另写副本；与本条直接相关的典型项为 `build/`、`dist/`、`node_modules/`、`.worktrees/`、`.aria/`、`.env*`、`*credential*`、`*secret*`）。**被 `.gitignore` 忽略的文件不算源码**：既不判「漏收」失败，该成员按「无源码成员」走跳过分支（只跳过代码检索，不移除成员、不阻断激活）。旧稿「普通路径有源码但被 ignore 仍是真漏收」**已作废**——它会把「codegraph 永不收录、git 也看不见」的文件算成漏收，产出「任何含被忽略源码文件的仓永远建不出索引」的死锁（同步多少次都没用）。
 - **第二段诊断不受可见范围收窄**：上条只界定**普通路径**的「有没有源码」；`.worktrees/` 仍是 D2 既有的独立第二段诊断（物理扫描 `.worktrees/` 子树），它的用途正是报告「源码存在但被 Aria 排除」这一事实，失败码 `aggregate_index_member_source_excluded` 的语义不变。`.worktrees/` 条目在可见范围求交时按 Aria 自身排除扣掉，因此它**不计入**普通路径的源码判定。
@@ -173,7 +176,7 @@ skip_reason: Option<AggregateIndexMemberSkipReason>   // wire: "no_source"
 
 **专用入口（D-2 收敛）。** 刷新 SHALL 是 **Story 生成专用**的入口/模式：
 
-- Story 生成（`src/web/handlers/lifecycle.rs` 中构造 `AggregateStorySpecScope` 的那条路径）SHALL 走新的「必须先确保最新」入口（例如 `PlanningContextResolver` 上新增 `build_with_verified_index`，名字由实施定）；
+- Story 生成（`src/web/handlers/lifecycle.rs` 中构造 `AggregateStorySpecScope` 的那条路径）SHALL 走新的「必须先确保最新」入口（Plan 的 `build_with_fresh_index_for_story`，名字由实施定）；实现 SHALL 落在**新模块 + 新窄 trait**（Plan 的 `story_index_refresh.rs` / `StoryIndexFreshness`），**MUST NOT 扩展既有 `PlanningIndexFreshness`**、MUST NOT 改 `resume_with_fresh_index` 的既有语义（避免把 Story 的停机语义渗进 Design/WorkItemPlan，并把改动隔离在既有大测试文件之外）；
 - `build_with_fresh_index` **保持现语义**，继续服务 Design 生成（`lifecycle.rs` 的 `AggregateDesignSpecScope` 路径）与工作区上下文读取（`src/web/workspace_context/builder.rs` 的 `Story | Design | WorkItemPlan` 分支）：stale 才按需同步、degraded 只加告警、绝不停机；
 - 两个入口 MUST NOT 互相借用语义：Story 不停机不成立，Design/WorkItemPlan 停机也不成立。
 
@@ -228,7 +231,7 @@ skip_reason: Option<AggregateIndexMemberSkipReason>   // wire: "no_source"
 - `message_zh` = 同源成品模板渲染结果：卡片按成员列表渲染（「已跳过无源码成员：…」并点名），成员行按单个成员渲染（「未纳入代码搜索，可修改配置或文档」）；
 - 无跳过事实时字段省略（不返回空串/空对象）；旧响应无该字段 ⇒ 前端不显示提示。
 
-字段名由实施统一（建议两处都用 `source_less_notice`），MUST NOT 一处叫 `notice` 一处叫 `skip_warning`；该字段是 `serde(default, skip_serializing_if = "Option::is_none")` 的可选对象。
+字段名以实施 Plan 为准：**卡片响应 `source_less_alert`、成员列表 `index_alert`、证据 `not_searched`**；三者形状**同构**（都是 `{code, message_zh}`、承载同一个告警码），字段名不同只是因为分属不同响应 DTO，**同一响应内 MUST NOT 用两个名字承载同一含义**、MUST NOT 退化成裸字符串、MUST NOT 用布尔标记代替；各自是 `serde(default, skip_serializing_if = "Option::is_none")` 的可选对象。
 
 **匹配口径（同时适用于卡片与成员列表）。** 提示与成员的关联只用 **(成员 ID, 当前 Main checkout ID)**：
 
@@ -236,7 +239,7 @@ skip_reason: Option<AggregateIndexMemberSkipReason>   // wire: "no_source"
 - 当前 Main checkout ID = 该成员**当前可用** `CheckoutKind::Main` 检出记录的 `checkout_id`（`src/product/logical_codebase/types.rs` 的 `RepositoryCheckoutRecord` / `CheckoutKind`）；
 - MUST NOT 用显示名、别名或裸成员 ID 单独匹配；主 checkout 已更换、当前无可用 Main checkout、记录缺失或世代不同 ⇒ 该成员不出提示。
 
-**卡片从被投影的那一代取（投影一致性）。** `read_active_projection` 目前有两套选择：`degraded_record`（决定投影 `state`）与 `usable_generation`（决定证据面可用性）。跳过提示 MUST 派生自**实际投影的那一条记录**（与 `state` 同源），不得再选一遍；degraded 投影时提示用 degraded 世代的跳过事实，措辞由同名模板产生（必要时前端按既有失败三段的「上次可用索引」语境补语境，但正文仍来自同一模板）。
+**卡片从被投影的那一代取（投影一致性）。** `read_active_projection` 目前有两套选择：`degraded_record`（决定投影 `state`）与 `usable_generation`（决定证据面可用性）。跳过提示 MUST 派生自**实际投影的那一条记录**（与 `state` 同源），不得再选一遍；degraded 投影时提示用 degraded 世代的跳过事实，**措辞由同一张码表的降级历史变体产出**（「上次可用索引跳过了无源码成员：…」），前端 MUST NOT 自补中文语境或正文。
 
 **三个提示落点**（都只渲染服务端下发的成品文本，前端**不自写中文正文**）：
 
@@ -246,21 +249,46 @@ skip_reason: Option<AggregateIndexMemberSkipReason>   // wire: "no_source"
 
 **选择与提交资格不变**：提示**不是**准入条件。有无提示、有无跳过标记，都不改变：成员是否列出、是否可勾选、是否可提交、是否可作 Issue 目标仓、checkout 与工作区准入、授权判定。
 
-**文案单一来源**：`src/product/logical_codebase/failure_copy_table.inc.rs` 的码表是**唯一**中文成品来源。新增告警成品（跳过提示 / 逐仓标注 / 未检索说明）以**同一个告警码 + 同一模板**登记一次，三处消费面渲染同一模板产出的文本。失败面仍走既有五字段合同（`title_zh` / `reason_zh` / `action_zh` / `triage` / `machine_line`，`REQ-BOOT-11`），告警**不**占用 `FailureCopy`、不分配 `FailureTriage`、不触发失败通知。**不新建第二份中文文案表、不在 Rust 投影 / 通知 / TSX 维护同义文案。**
+**文案单一来源**：`src/product/logical_codebase/failure_copy_table.inc.rs` 的码表是**唯一**中文成品来源。新增告警成品（跳过提示 / 逐仓标注 / 未检索说明）以**同一个告警码 + 同一登记块**登记一次，三处消费面渲染同一模板产出的文本。同一告警码按消费形态由该码表渲染**四种文本**：卡片一行（成员列表）、成员行（单成员）、降级历史（「上次可用索引跳过了无源码成员：…」）、证据未检索说明；四种中文都只在该码表出现。失败面仍走既有五字段合同（`title_zh` / `reason_zh` / `action_zh` / `triage` / `machine_line`，`REQ-BOOT-11`），告警**不**占用 `FailureCopy`、不分配 `FailureTriage`、不触发失败通知。**不新建第二份中文文案表、不在 Rust 投影 / 通知 / TSX 维护同义文案。**
 
 ## D8 · 取舍、残余风险与未证实项
 
 - **判定放在验收层而非 UI 层**：UI 只消费成品，不复算「有没有源码」；避免前后端两套口径。
-- **盘检是元数据扫描**：只按后缀、不读内容；源码候选只取 **git 可见范围**（`git ls-files --cached --others --exclude-standard`，只读调用 git，不起 CodeGraph）；代价是保守清单（探针未跑完前）会少认一些语言 —— 方向是「多跳过」而不是「误报错」，探针结论回来后增补后缀即可收窄。
+- **盘检是元数据扫描**：只按后缀、不读内容；源码候选只取 **git 可见范围**（`git ls-files --cached --others --exclude-standard`，只读调用 git，不起 CodeGraph）；代价是清单是**按 1.6.3 校准的静态集合**，未收录的语言会被判成「无源码」⇒ 方向是「多跳过」而不是「误报错」，要收窄就按 D2 的复校准步骤增补后缀。
 - **超限宁可失败**：扫描超限要求修复可读性或缩小工作树，宁可保留 last-known-good，也不扩大预算临时放行；无法确认绝不等于无源码。
 - **「上次与本次都脏」必须同步**：牺牲 3.4s 量级，换取 Story 引用的是当次工作区内容；这是把「不能确认没变」并入第三分支的代价。**「含跳过成员」不再强制同步**（G2 已撤回），否则每次 Story 都要多跑一次增量同步。
 - **不拉远端**：「最新」只指本地成员主工作目录；远端更新由用户自己同步后再生成为准。
 - **不做自动发现**：跳过成员的源码后来出现时，要等下一次验收/重建才重新判断；时间窗是已接受的残余风险，不用后台扫描或 freshness 盘检来消除。
 - **残余风险（已知）**：CodeGraph 已覆盖但内容不足仍由既有验收边界负责；`REQ-BOOT-10` 的标题仍写「七个」（为 delta 匹配保留），以正文的十个失败码为准。
+- **残余风险（S2 已知，未阻断）**：**codegraph 版本漂移** —— 触发条件 = 已安装版本 ≠ 清单校准基线 1.6.3；后果 = 新版若不再收录清单内某个后缀，该类仓被判成「漏收」而失败（不是误跳过）；处置 = 按 D2 的**复校准步骤**更新清单与基线注释。运行期只记一条可审计 warning，**不改判定、不阻断构建**，也**不实现**自动重校准。
 - **残余风险（G1 带来，已接受）**：源码写在被 `.gitignore` 忽略的路径里的成员，会被判为「无源码」并进入跳过告警——**不报漏收**（codegraph 同样不收录它，报漏收是死锁）。用户看到的措辞仍是「确认无源码」口径，**不新增文案**（文案单一来源在 `failure_copy_table.inc.rs`）；「被忽略的源码要不要纳入索引」是用户自己管理 `.gitignore` 的事，本变更不介入。
 - **未证实（实施时必须验证，不得在契约里假定）**：
-  1. Aria 源码类型清单的**具体后缀集合**（D2 的探针；不阻塞开工）；
+  1. Aria 源码清单的**具体后缀集合**——由实施期**一次性校准动作**（`codegraph init .` / `codegraph files --json`，D2）逐条实测后填入；它不阻塞开工（校准动作可与其它工作并行），但**校准未跑完前不得宣称清单已按 1.6.3 校准**；
   2. 本机 CodeGraph 安装包内上游扩展名表的准确位置与内容（旧稿勘察记录，**未证实**）；
   3. 全员无源码夹具下 `init/sync` 的真实输出形态；
   4. 配置目标的真实 provider 操作（工作区读写配置文件）未于本次运行验证；
   5. 上表耗时来自临时夹具（`/tmp` 隔离），**不是用户现场**。
+
+### D8.1 与实施 Plan §26 决策登记的对齐（D-1–D-15，逐条可核）
+
+> Plan 是 `cadence/plans/2026-11-18_计划文档_实施_聚合索引源码范围与Story前刷新_v1.0.md`（commit `b2c739d4`）。本表逐条给出契约落点；**契约与 Plan 无措辞冲突**（不一致时不必再回落到 Plan）。
+
+| Plan 决策 | 契约落点 |
+|---|---|
+| **D-1** 告警「一个登记块 + 渲染函数 + `{code, message_zh}`」 | 本文 D7「结构化提示（唯一形状）」「文案单一来源」 + `REQ-BOOT-11` |
+| **D-2** 第六条 `rule_zh` 新措辞；旧变体只换规则依据句 | 本文 D3、`REQ-LAYOUT-04`、`REQ-BOOT-10` |
+| **D-3** 封套解析唯一入口在产品层 | 本文 D3「失败封套的解析只有一个出口」 + `REQ-IND-04`、`REQ-BOOT-10` |
+| **D-4** Story 用新窄 trait + 新模块，不扩展 `PlanningIndexFreshness` | 本文 D5「专用入口」 |
+| **D-5** `story_can_reuse` 住新模块，不改 `member_evidence_drifted` | 本文 D4「漂移与巡检」、D5 三分支 + `REQ-IND-03` |
+| **D-6** 「含跳过成员 ⇒ 落分支 3」 | **已被 Plan §0.4 G2 撤回，以 D-13 为准**（契约按撤回后口径：分支 2 不含该条件）——见 `REQ-PLN-18` |
+| **D-7** 变体 key 只查表，归因与 `machine_line` 用 canonical 码 | 本文 D3「变体只挑模板」 + `REQ-BOOT-10` |
+| **D-8** 集成用注入式覆盖判定（`with_coverage_probe`）+ 自建 runner | 实施细节（Plan §18）；契约只要求验收可注入时钟/取消信号与预算（`REQ-IND-01`） |
+| **D-9** 按 (成员 ID, 当前 Main checkout ID) 匹配；卡片取被投影记录 | 本文 D7「匹配口径」「投影一致性」 + `REQ-IND-06` |
+| **D-10** 两个新可选覆盖点 | 实施细节（Plan §12）；契约无冲突 |
+| **D-11** 静态清单 + 1.6.3 校准基线；漂移只记告警 | 本文 D2 全节 |
+| **D-12** 源码 = git 可见范围 ∩ 静态清单 ∩ 非 Aria 排除 | 本文 D2 + `REQ-IND-01` |
+| **D-13** G2：分支 2 不要求「当前世代不含跳过成员」 | 本文 D5「为什么分支 2 不再要求…」 + `REQ-PLN-18` |
+| **D-14** 4 条非目录模式**目录级与文件级都扣除** | 本文 D2「排除口径」 + `REQ-IND-01`、`tasks.md` T01/T10 |
+| **D-15** 空索引归一为「全员未覆盖」并继续交叉验收 | 本文 D1 第 1 点 + `REQ-IND-01`「空索引仍需交叉判定」 |
+
+> **D-6 的处置说明（消除兜底）**：Plan §26.1 的 D-6 行仍写着旧的「含跳过成员 ⇒ 落分支 3」，与同一份 Plan 的 §0.4 G2、§0.5 与 §11.2（`story_can_reuse` 已删第 5 条）冲突；**G2 是后出的显式撤回**，契约按 G2/D-13 冻结。Plan 的 D-6 行属其内部残留，由 Plan 侧另行修正，不影响本契约的实施口径。

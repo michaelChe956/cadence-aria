@@ -8,9 +8,9 @@
 
 仅在 SDK 未安装或与受支持版本不兼容时 MAY 回退既有 CLI 文件清单路径，且 SHALL 留审计痕迹。识别到的 `codegraph_files_empty_index` 通知或合法空清单 SHALL 在聚合验收层视为所有成员未覆盖；工具执行失败、SDK 协议错误/缺成员、非法 JSON 或截断 MUST NOT 被视为空索引。
 
-**磁盘交叉验收（成员未收录时才做）**：对每个**未被索引收录**的成员，平台 SHALL 在该成员的**主工作目录**内做一次**有界盘检**，用 Aria 自有的源码类型清单判定该成员是否真的没有源码。盘检 SHALL 只按后缀做元数据判定，MUST NOT 读文件内容、推断语言或符号、按仓名/标签/角色判断，也不 MUST 跟随符号链接（符号链接与非普通文件都不算源码）。Aria 源码类型清单 SHALL 由 Aria 自有且 MUST 是 CodeGraph 支持后缀的**真子集**；清单的具体后缀集合 SHALL 在实施时用真实 CodeGraph 逐后缀验证后确定，MUST NOT 依赖上游内部表或内部 API 取得该清单。清单与探针的关系 SHALL 是「保守清单先开工、探针结论回来再增补」：实施 SHALL 先以保守集合（只含确定被 CodeGraph 收录的常见源码后缀）落地盘检，逐后缀探针 MUST NOT 作为开工门禁；探针结论 SHALL 以「增补已登记后缀」的方式落地，MUST NOT 借此放宽「无法确认不等于无源码」的判定口径。探针 SHALL 额外覆盖**可见范围口径**：每个版本基线各验一次「被 `.gitignore` 忽略的文件不被 CodeGraph 收录、git 可见范围内的文件（含未跟踪但未被忽略的）被收录」，正反两组逐项出表，使探针结论与扫描口径一致；该探针与逐后缀探针同属**并行前置、非阻塞门禁**，MUST NOT 作为开工门禁。`.yaml/.yml/.xml/.properties/.tf/.tfvars/.tofu` 一类配置格式与 `.json/.md/.toml/.txt/.csv/.html/.htm` 一类文档格式 SHALL NOT 计入 Aria 源码；是否产出符号 MUST NOT 作为判据。
+**磁盘交叉验收（成员未收录时才做）**：对每个**未被索引收录**的成员，平台 SHALL 在该成员的**主工作目录**内做一次**有界盘检**，用 Aria 自有的源码类型清单判定该成员是否真的没有源码。盘检 SHALL 只按后缀做元数据判定，MUST NOT 读文件内容、推断语言或符号、按仓名/标签/角色判断，也不 MUST 跟随符号链接（符号链接与非普通文件都不算源码）。**Aria 源码类型清单 SHALL 是代码内的静态常量**（发布时固化），由 Aria 自有且 MUST 是 CodeGraph 支持后缀的**真子集**；清单的具体后缀集合 SHALL 按**当前机器已安装的 codegraph 1.6.3** 实测校准后确定，MUST NOT 依赖上游内部表或内部 API 取得该清单。**校准方法（可复现）**：临时目录里每个候选后缀各放一个该语言的**最小有效样本** → `codegraph init .` → `codegraph files --json` → 出现的后缀 = 1.6.3 会收录的后缀；Aria 清单取其**子集**（只含「我们希望当源码看待」的常见语言）。清单处 SHALL 写明：① 校准基线版本 = **1.6.3**；② 上述**可复现测量命令**；③ **复校准步骤**（换 codegraph 版本后重跑测量、更新清单与基线注释）。**校准 SHALL 是实施期一次性动作**，产出固化成静态清单 + 基线注释；MUST NOT 作为运行期流程或开工门禁。系统 MUST NOT 做机器级 durable 能力记录、运行期测量、版本键缓存或自动重校准。**版本漂移只记警告**：已安装 codegraph 版本 ≠ 清单校准基线（1.6.3）⇒ 系统 SHALL 记一条**可审计 warning**，MUST NOT 改判定、MUST NOT 阻断索引构建；**已知风险与触发条件**：新版若不再收录清单内某个后缀，该类仓会被判成「漏收」而失败，届时 SHALL 按复校准步骤更新清单与基线注释（MUST NOT 自动重校准，MUST NOT 把版本漂移升级为失败）。**可见范围口径（G5）**：同一次校准动作 SHALL 记录「被 `.gitignore` 忽略的文件不被 CodeGraph 收录、git 可见范围内的文件（含未跟踪但未被忽略的）被收录」这一条正反两组，使校准结论与扫描口径一致。`.yaml/.yml/.xml/.properties/.tf/.tfvars/.tofu` 一类配置格式与 `.json/.md/.toml/.txt/.csv/.html/.htm` 一类文档格式 SHALL NOT 计入 Aria 源码（`.yaml/.yml/.xml` 虽被 1.6.3 收录也不算）；是否产出符号 MUST NOT 作为判据。
 
-盘检 SHALL 复用聚合索引既有的内建排除口径，MUST NOT 另写一份排除表；`.worktrees/` 第二段诊断的物理遍历 SHALL 剪枝 `.git/.aria/node_modules/target/build/dist/.worktrees`。**盘检的源码候选 SHALL 只取 git 可见范围**：在该成员**主工作目录**内执行 `git ls-files --cached --others --exclude-standard`（已跟踪的文件 + 未跟踪且未被忽略的文件），与 Aria 源码后缀集求交，再扣除 Aria 自身排除（`build/`、`dist/`、`node_modules/`、`.worktrees/`、`.aria/`、`.env*`、`*credential*`、`*secret*` 等既有内建排除项，与内建排除规则表同源，MUST NOT 另写副本）。**被 `.gitignore` 忽略的文件 SHALL NOT 计入源码**：MUST NOT 判「漏收」失败，该成员按「确认无源码」走跳过分支；「源码存在却未被收录」只在 **git 可见范围内**成立，判定时 MUST 能区分「不在范围（被忽略 / Aria 自身排除）」与「在范围却漏收」。git 侧异常（主工作目录不是 git 仓、git 不可用、命令失败或超时）SHALL 归「无法确认」，MUST NOT 当成无源码。11 条内建规则里的 4 条非目录固定名模式（`**/.env`、`**/.env.*`、`**/*credential*`、`**/*secret*`）SHALL 在可见清单上按目录名/路径名匹配过滤（例如 `credentials/`、`secret-notes/` 这类目录下的文件不进入候选），MUST NOT 被忽略、被改写成文件级规则或另行放宽。`.worktrees/` SHALL 作为独立的第二段诊断：仅当普通路径查完且无源码时才检查 `.worktrees/` 子树；该入口本身是符号链接时 SHALL 视为「该段无候选」而不跟随，入口不存在时同样 SHALL 视为「该段已完成且无候选」，两种情形都 MUST NOT 被记成盘检失败。
+盘检 SHALL 复用聚合索引既有的内建排除口径，MUST NOT 另写一份排除表；`.worktrees/` 第二段诊断的物理遍历 SHALL 剪枝 `.git/.aria/node_modules/target/build/dist/.worktrees`。**盘检的源码候选 SHALL 只取 git 可见范围**：在该成员**主工作目录**内执行 `git ls-files --cached --others --exclude-standard`（已跟踪的文件 + 未跟踪且未被忽略的文件），与 Aria 源码后缀集求交，再扣除 Aria 自身排除（`build/`、`dist/`、`node_modules/`、`.worktrees/`、`.aria/`、`.env*`、`*credential*`、`*secret*` 等既有内建排除项，与内建排除规则表同源，MUST NOT 另写副本）。**被 `.gitignore` 忽略的文件 SHALL NOT 计入源码**：MUST NOT 判「漏收」失败，该成员按「确认无源码」走跳过分支；「源码存在却未被收录」只在 **git 可见范围内**成立，判定时 MUST 能区分「不在范围（被忽略 / Aria 自身排除）」与「在范围却漏收」。git 侧异常（主工作目录不是 git 仓、git 不可用、命令失败或超时）SHALL 归「无法确认」，MUST NOT 当成无源码。11 条内建规则里的 4 条非目录固定名模式（`**/.env`、`**/.env.*`、`**/*credential*`、`**/*secret*`）**目录级与文件级都要扣除**：命中这些模式的**目录条目** SHALL 被剪枝（例如 `credentials/`、`secret-notes/` 这类目录下的文件不进入候选），命中这些模式的**文件条目**同样 SHALL NOT 被算作源码候选（例如 `credentials.rs`、`secret_manager.ts`）。**理由**：这 4 条写进 `codegraph.json` 的 `exclude` 后按路径 glob 生效、能命中文件，CodeGraph 会把这些文件排除出索引；若盘检因后缀在清单里就把它们算作「盘上有源码」，会造成**永久假漏收**、该仓永远建不出索引（同步多少次都没用）。故系统 MUST NOT 只在目录级过滤而放过文件级命中，MUST NOT 为它另建第二份排除表（**Aria 排除集 = codegraph 排除集，同源**）。`.worktrees/` SHALL 作为独立的第二段诊断：仅当普通路径查完且无源码时才检查 `.worktrees/` 子树；该入口本身是符号链接时 SHALL 视为「该段无候选」而不跟随，入口不存在时同样 SHALL 视为「该段已完成且无候选」，两种情形都 MUST NOT 被记成盘检失败。
 
 盘检 SHALL 是有界的：根深度 0、上限深度 32（深度上限约束物理扫描段，即 `.worktrees/` 第二段诊断）；可见清单的枚举与后缀过滤同样计入预算——每成员最多 20,000 个条目，单次验收整批最多 100,000 个条目、整批 2 秒（含 `.worktrees/` 诊断，共享同一计数与同一 deadline）；命中普通路径源码即停止扩散。上限 SHALL 固化为常量并可注入时钟/取消信号以便测试，MUST NOT 依赖真实 sleep。MUST NOT 展开全量路径、读文件内容或为盘检启动 CodeGraph 进程；盘检 MAY 且 MUST 调用只读的 `git ls-files --cached --others --exclude-standard` 取可见范围，MUST NOT 写 git 状态或改动工作区。
 
@@ -128,6 +128,16 @@
 
 - **WHEN** SDK 确认全部未覆盖，或回退 CLI 返回空 notice / 空清单
 - **THEN** SHALL 逐成员交叉判定；全部确认无源码才用 `aggregate_index_all_members_source_less`，有普通路径源码用覆盖失败码；两者均不得生成 active
+
+#### Scenario: 文件命中非目录内建模式不算源码
+
+- **WHEN** 未覆盖成员的 git 可见范围里只有命中 `**/*credential*` / `**/*secret*` / `**/.env*` 的**文件**（如 `credentials.rs`、`secret_manager.ts`），没有其它源码
+- **THEN** 盘检 SHALL NOT 把它们算作源码候选（CodeGraph 会把这些文件排除出索引），该成员 SHALL 按「确认无源码」处理并走跳过分支；MUST NOT 报 `aggregate_index_member_coverage_failed`，也 MUST NOT 只在目录级过滤而放过文件级命中
+
+#### Scenario: 版本漂移只记告警不阻断
+
+- **WHEN** 已安装 codegraph 版本 ≠ 清单校准基线 1.6.3，其余验收全部通过
+- **THEN** 系统 SHALL 在成功世代留一条可审计 warning；判定与激活口径 MUST NOT 改变，MUST NOT 因此阻断索引构建或把版本漂移报成失败；更新清单只能按复校准步骤人工完成，MUST NOT 自动重校准
 
 #### Scenario: 盘检不扩大 CodeGraph 收录范围
 
