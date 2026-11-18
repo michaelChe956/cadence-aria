@@ -79,6 +79,8 @@ export function AggregateIndexCard({
   const evidenceCopy = index.evidence_copy ?? null;
   // 最新一代聚合索引失败时的成品同样由后端渲染，前端不另写中文。
   const failureCopy = index.failure_copy ?? null;
+  // 无源码成员告警：结构化 `{code, message_zh}`，正文由后端下发，前端只渲染一行文案。
+  const sourceLessAlert = index.source_less_alert ?? null;
 
   // 「重建索引」按钮只有一处：索引不可用时随失败面一起给（失败面自带上动作，
   // 用户不必回到面板顶部找入口），其余状态留在标题行。
@@ -155,6 +157,17 @@ export function AggregateIndexCard({
         <p className="mt-2 text-xs text-[var(--aria-ink-muted)]">
           成员版本：{index.revision}
           {index.indexed_at ? ` · 索引时间：${index.indexed_at}` : ""}
+        </p>
+      ) : null}
+
+      {/* 无源码成员告警：不是失败面，只在索引摘要下补一行中性提示；
+          正文只渲染后端下发的 `message_zh`，前端不另写中文、不加动作。 */}
+      {sourceLessAlert ? (
+        <p
+          data-testid="aggregate-index-source-less-alert"
+          className="mt-2 break-words text-xs text-[var(--aria-ink-muted)]"
+        >
+          {sourceLessAlert.message_zh}
         </p>
       ) : null}
 
