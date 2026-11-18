@@ -1057,3 +1057,45 @@ fn table_entry(key: &str) -> Option<Entry> {
                 .map(|(_, entry)| *entry)
         })
 }
+
+/// 告警码：成员经确认无源码、被跳过代码检索，但仍是项目成员。
+///
+/// 非阻断告警：MUST NOT 进失败码集合（不进 `TABLE`、不进 `LAYOUT_RULES`），
+/// MUST NOT 以 `FailureCopy` 五字段传输（不占分诊、不触发失败通知）。
+pub const MEMBER_SOURCE_LESS_CODE: &str = "aggregate_index_member_source_less";
+
+/// 结构化告警对象（与证据面 `not_searched` 同构）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceLessAlert {
+    pub code: String,
+    pub message_zh: String,
+}
+
+/// 逐仓标注：单成员被跳过的说明。
+pub fn member_source_less_member_copy(member: &str) -> String {
+    format!("{member}")
+}
+
+/// 卡片一行：点名全部被跳过的成员。
+pub fn member_source_less_summary_copy(members: &[&str]) -> String {
+    members.join("、")
+}
+
+/// 降级态历史措辞：上次可用索引里被跳过的成员。
+pub fn member_source_less_history_copy(members: &[&str]) -> String {
+    members.join("、")
+}
+
+/// 证据说明：目标仓无源码，未检索聚合索引。
+pub fn member_source_less_evidence_copy(member: &str) -> String {
+    format!("{member}")
+}
+
+/// 组装结构化告警对象 `{code, message_zh}`。
+pub fn member_source_less_alert(members: &[&str], degraded: bool) -> SourceLessAlert {
+    SourceLessAlert {
+        code: MEMBER_SOURCE_LESS_CODE.to_string(),
+        message_zh: format!("{}{degraded}", members.join("、")),
+    }
+}

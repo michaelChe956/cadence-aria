@@ -362,6 +362,37 @@ fn extract_between(message: &str, prefix: &str, suffix: &str) -> Option<String> 
     (!extracted.is_empty()).then(|| extracted.to_string())
 }
 
+/// 持久化失败封套 → (内层稳定码, 原始事实 message, 是否 degraded 封套)。
+///
+/// 封套形态（`aggregate_index/codegraph_cli.rs` 的 Display）：
+/// - `aggregate_index_failed:<code>: <message>`
+/// - `aggregate_index_degraded:<code>: <message>`
+///
+/// 解析不出内层码 ⇒ `None`（调用方回落到通用码），**不得**用裸前缀
+/// `contains` 猜码。
+pub fn parse_failure_envelope(envelope: &str) -> Option<(String, String, bool)> {
+    let _ = envelope;
+    None
+}
+
+/// 已持有内层稳定码 + 原始事实 → 三段成品（**含成员点名**）。
+///
+/// 点名逻辑只在这里一处：`subject_from_message(code, fact)` 抽出的成员名写进
+/// `FailureInput::with_subject`，于是 `reason_zh` 里出现「gray-config、msha-sdk」
+/// 这类点名。**任何调用方都不得自己拼点名**。
+pub fn describe_fact(code: &str, fact: &str) -> FailureCopy {
+    describe_code(code, Some(fact))
+}
+
+/// 持久化失败封套 → (内层稳定码, 三段成品)。
+///
+/// 唯一把「封套 → 成品」串起来的入口；解析不出封套 ⇒ `None`
+/// （调用方回落到通用码）。
+pub fn describe_envelope(envelope: &str) -> Option<(String, FailureCopy)> {
+    let _ = envelope;
+    None
+}
+
 /// 文本序列化器：问题 → 原因 → 怎么做 → 机器码 → 已脱敏原文。
 ///
 /// 只序列化成品，不做任何查表；`sanitized_detail` 为空时不追加诊断段
@@ -810,4 +841,7 @@ mod tests {
         }
         false
     }
+
+    // 新增失败码 / 告警码 / 封套解析入口的用例（同一模块、同一过滤器）。
+    include!("failure_copy_new_tests.inc.rs");
 }
