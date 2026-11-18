@@ -26,8 +26,8 @@ use crate::cross_cutting::bounded_command_runner::{
     TokioBoundedCommandRunner,
 };
 
-use super::exclude::BUILTIN_EXCLUDES;
 use super::AggregateIndexError;
+use super::exclude::BUILTIN_EXCLUDES;
 
 /// `git` 可见范围探测的超时与输出上限。
 const GIT_TIMEOUT_SECS: u64 = 10;
@@ -131,7 +131,8 @@ impl SourceScanBudget {
     }
 
     fn deadline_passed(&self) -> bool {
-        self.deadline.is_some_and(|deadline| Instant::now() > deadline)
+        self.deadline
+            .is_some_and(|deadline| Instant::now() > deadline)
     }
 
     /// 预算耗尽（取消 / 超时 / 条目用尽）⇒ 该段不再可信。
@@ -182,11 +183,7 @@ impl GitVisibleFiles {
     }
 
     /// 跑一条 `git` 命令（平台受信禁桥参数 + 净化环境 + 超时 + 输出上限）。
-    fn git(
-        &self,
-        cwd: &Path,
-        argv: &[&str],
-    ) -> Result<BoundedCommandResult, AggregateIndexError> {
+    fn git(&self, cwd: &Path, argv: &[&str]) -> Result<BoundedCommandResult, AggregateIndexError> {
         // 平台受信启动面：argv 前置禁桥参数（与 cross_cutting::git_command
         // 同源），避免仓库 hooks / fsmonitor 探针借平台进程自动执行。
         let mut full_argv: Vec<String> = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
@@ -205,18 +202,20 @@ impl GitVisibleFiles {
             stderr_limit: GIT_OUTPUT_LIMIT_BYTES,
         };
         let runner = self.runner.clone();
-        std::thread::spawn(move || -> Result<BoundedCommandResult, AggregateIndexError> {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| AggregateIndexError::Failed {
-                    code: "aggregate_index_source_scan_git_runtime",
-                    message: error.to_string(),
-                })?;
-            runtime
-                .block_on(runner.run(request))
-                .map_err(map_runner_error)
-        })
+        std::thread::spawn(
+            move || -> Result<BoundedCommandResult, AggregateIndexError> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| AggregateIndexError::Failed {
+                        code: "aggregate_index_source_scan_git_runtime",
+                        message: error.to_string(),
+                    })?;
+                runtime
+                    .block_on(runner.run(request))
+                    .map_err(map_runner_error)
+            },
+        )
         .join()
         .map_err(|_| AggregateIndexError::Failed {
             code: "aggregate_index_source_scan_git_panic",
@@ -254,7 +253,10 @@ impl MemberSourceVisibility for GitVisibleFiles {
                 ),
             });
         }
-        let listing = self.git(member_root, &["ls-files", "--cached", "--others", "--exclude-standard"])?;
+        let listing = self.git(
+            member_root,
+            &["ls-files", "--cached", "--others", "--exclude-standard"],
+        )?;
         if listing.timed_out || listing.cancelled || listing.exit_code != Some(0) {
             return Err(AggregateIndexError::Failed {
                 code: "aggregate_index_source_scan_git_failed",
@@ -337,12 +339,18 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 /// 目录名是否命中排除规则（目录规则 + 非目录模式）。
 fn is_excluded_directory_name(rules: &ExcludeRules, name: &str) -> bool {
     rules.directories.iter().any(|rule| rule == name)
-        || rules.file_patterns.iter().any(|rule| glob_matches(rule, name))
+        || rules
+            .file_patterns
+            .iter()
+            .any(|rule| glob_matches(rule, name))
 }
 
 /// 文件名是否命中排除规则（4 条非目录模式在文件级同样扣除）。
 fn is_excluded_file_name(rules: &ExcludeRules, name: &str) -> bool {
-    rules.file_patterns.iter().any(|rule| glob_matches(rule, name))
+    rules
+        .file_patterns
+        .iter()
+        .any(|rule| glob_matches(rule, name))
 }
 
 /// 相对路径是否落在排除范围（中间目录按目录规则剪枝，末段按文件规则扣除）。
@@ -393,11 +401,9 @@ fn collect_all_files(root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
                 message: format!("directory depth limit exceeded under {}", root.display()),
             });
         }
-        let entries = fs::read_dir(&directory).map_err(|error| {
-            AggregateIndexError::Failed {
-                code: "aggregate_index_source_scan_io",
-                message: format!("{}: {error}", directory.display()),
-            }
+        let entries = fs::read_dir(&directory).map_err(|error| AggregateIndexError::Failed {
+            code: "aggregate_index_source_scan_io",
+            message: format!("{}: {error}", directory.display()),
         })?;
         for entry in entries {
             let entry = entry.map_err(|error| AggregateIndexError::Failed {
@@ -405,12 +411,11 @@ fn collect_all_files(root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
                 message: format!("{}: {error}", directory.display()),
             })?;
             let path = entry.path();
-            let metadata = fs::symlink_metadata(&path).map_err(|error| {
-                AggregateIndexError::Failed {
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|error| AggregateIndexError::Failed {
                     code: "aggregate_index_source_scan_io",
                     message: format!("{}: {error}", path.display()),
-                }
-            })?;
+                })?;
             if metadata.file_type().is_symlink() {
                 continue;
             }
@@ -446,7 +451,29 @@ pub fn scan_member_source(
     visibility: &dyn MemberSourceVisibility,
     budget: &mut SourceScanBudget,
 ) -> MemberSourceVerdict {
-    unimplemented!()
+    if budget.exhausted() {
+        return MemberSourceVerdict::Unknown;
+    }
+    let visible = match visibility.visible_files(member_root) {
+        Ok(visible) => visible,
+        // git 不可用 / 命令失败 / 权限问题 ⇒ 无法确认（不得当作「无源码」）。
+        Err(_) => return MemberSourceVerdict::Unknown,
+    };
+    if budget.exhausted() {
+        return MemberSourceVerdict::Unknown;
+    }
+    let mut member_entries = 0usize;
+    match scan_visible_range(member_root, &visible, budget, &mut member_entries) {
+        // 正证据优先：普通路径命中源码后不再扫描 `.worktrees/`。
+        StageOutcome::Found => return MemberSourceVerdict::SourceInNormalPath,
+        StageOutcome::Incomplete => return MemberSourceVerdict::Unknown,
+        StageOutcome::Clean => {}
+    }
+    match scan_worktrees_tree(member_root, budget, &mut member_entries) {
+        StageOutcome::Found => MemberSourceVerdict::SourceOnlyInWorktrees,
+        StageOutcome::Incomplete => MemberSourceVerdict::Unknown,
+        StageOutcome::Clean => MemberSourceVerdict::NoSource,
+    }
 }
 
 /// 第一段：可见范围内的源码判定。
@@ -456,7 +483,34 @@ fn scan_visible_range(
     budget: &mut SourceScanBudget,
     member_entries: &mut usize,
 ) -> StageOutcome {
-    unimplemented!()
+    let rules = exclude_rules();
+    for relative in visible {
+        if !budget.consume_entry() {
+            return StageOutcome::Incomplete;
+        }
+        *member_entries += 1;
+        if *member_entries > SOURCE_SCAN_MAX_ENTRIES_PER_MEMBER {
+            return StageOutcome::Incomplete;
+        }
+        let joined = root.join(relative);
+        let Ok(metadata) = fs::symlink_metadata(&joined) else {
+            continue;
+        };
+        // 符号链接一律跳过（不跟随、也不算源码）。
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        if is_excluded_relative_path(rules, relative) {
+            continue;
+        }
+        if is_source_path(relative) {
+            return StageOutcome::Found;
+        }
+    }
+    if budget.remaining_entries() == 0 {
+        return StageOutcome::Incomplete;
+    }
+    StageOutcome::Clean
 }
 
 /// 第二段：`.worktrees/` 子树的物理扫描（独立诊断段，不计入普通路径判定）。
@@ -465,7 +519,20 @@ fn scan_worktrees_tree(
     budget: &mut SourceScanBudget,
     member_entries: &mut usize,
 ) -> StageOutcome {
-    unimplemented!()
+    let worktrees = root.join(".worktrees");
+    let metadata = match fs::symlink_metadata(&worktrees) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // 入口不存在 ⇒ 该段「已完成且无候选」（诊断段，不是主段）。
+            return StageOutcome::Clean;
+        }
+        Err(_) => return StageOutcome::Incomplete,
+    };
+    // 入口是符号链接 ⇒ 不跟随、无候选（也不是无法确认）。
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return StageOutcome::Clean;
+    }
+    walk_directory(&worktrees, 0, budget, member_entries)
 }
 
 /// 物理扫描：递归遍历一个目录（深度受限、条目受限、不跟随符号链接）。
@@ -475,7 +542,77 @@ fn walk_directory(
     budget: &mut SourceScanBudget,
     member_entries: &mut usize,
 ) -> StageOutcome {
-    unimplemented!()
+    if budget.exhausted() {
+        return StageOutcome::Incomplete;
+    }
+    let rules = exclude_rules();
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(_) => return StageOutcome::Incomplete,
+    };
+    let mut outcome = StageOutcome::Clean;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                outcome = StageOutcome::Incomplete;
+                continue;
+            }
+        };
+        let child_depth = depth + 1;
+        if child_depth > SOURCE_SCAN_MAX_DEPTH {
+            return StageOutcome::Incomplete;
+        }
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                outcome = StageOutcome::Incomplete;
+                continue;
+            }
+        };
+        // 符号链接一律跳过（目录与文件都跳过，不跟随）。
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if metadata.is_dir() {
+            if is_excluded_directory_name(rules, &name) {
+                continue;
+            }
+            if !budget.consume_entry() {
+                return StageOutcome::Incomplete;
+            }
+            *member_entries += 1;
+            if *member_entries > SOURCE_SCAN_MAX_ENTRIES_PER_MEMBER {
+                return StageOutcome::Incomplete;
+            }
+            match walk_directory(&path, child_depth, budget, member_entries) {
+                StageOutcome::Found => return StageOutcome::Found,
+                StageOutcome::Incomplete => outcome = StageOutcome::Incomplete,
+                StageOutcome::Clean => {}
+            }
+        } else if metadata.is_file() {
+            if is_excluded_file_name(rules, &name) {
+                continue;
+            }
+            if !budget.consume_entry() {
+                return StageOutcome::Incomplete;
+            }
+            *member_entries += 1;
+            if *member_entries > SOURCE_SCAN_MAX_ENTRIES_PER_MEMBER {
+                return StageOutcome::Incomplete;
+            }
+            if is_source_name(&name) {
+                return StageOutcome::Found;
+            }
+        }
+        // 其它类型（socket / fifo / 设备文件）跳过。
+    }
+    if budget.remaining_entries() == 0 {
+        outcome = StageOutcome::Incomplete;
+    }
+    outcome
 }
 
 /// 净化环境（PATH-only）。
@@ -516,11 +653,17 @@ mod tests {
     struct AllVisible;
 
     impl MemberSourceVisibility for AllVisible {
-        fn visible_files(
-            &self,
-            member_root: &Path,
-        ) -> Result<Vec<PathBuf>, AggregateIndexError> {
+        fn visible_files(&self, member_root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
             collect_all_files(member_root)
+        }
+    }
+
+    /// 固定可见范围的提供者（模拟 `git ls-files` 的输出）。
+    struct VisibleFiles(Vec<PathBuf>);
+
+    impl MemberSourceVisibility for VisibleFiles {
+        fn visible_files(&self, _member_root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
+            Ok(self.0.clone())
         }
     }
 
@@ -613,7 +756,13 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
         }
-        assert_eq!(scan(root), MemberSourceVerdict::SourceInNormalPath);
+        // git 可见范围不含被忽略的 `.worktrees/` 子树（生产口径）。
+        let visible = VisibleFiles(vec![PathBuf::from("src/main.rs")]);
+        let mut budget = SourceScanBudget::new_batch();
+        assert_eq!(
+            scan_member_source(root, &visible, &mut budget),
+            MemberSourceVerdict::SourceInNormalPath
+        );
     }
 
     /// 5：时限已过且无正证据 ⇒ 无法确认。
@@ -622,10 +771,8 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let root = temp.path();
         write_file(root, "src/main.rs");
-        let mut budget = SourceScanBudget::for_tests(
-            usize::MAX,
-            Some(Instant::now() - Duration::from_secs(1)),
-        );
+        let mut budget =
+            SourceScanBudget::for_tests(usize::MAX, Some(Instant::now() - Duration::from_secs(1)));
         assert_eq!(
             scan_member_source(root, &AllVisible, &mut budget),
             MemberSourceVerdict::Unknown
@@ -871,10 +1018,9 @@ mod tests {
     /// 21：清单是校准 notes 的 1.6.3 实测收录集的子集，且不含配置/文档后缀。
     #[test]
     fn aria_source_extensions_are_subset_of_calibrated_1_6_3_set() {
-        let notes = fs::read_to_string(
-            "cadence/notes/2026-11-18_校准_CodeGraph源码后缀清单_1.6.3_v1.0.md",
-        )
-        .expect("calibration notes must exist");
+        let notes =
+            fs::read_to_string("cadence/notes/2026-11-18_校准_CodeGraph源码后缀清单_1.6.3_v1.0.md")
+                .expect("calibration notes must exist");
         for extension in ARIA_SOURCE_EXTENSIONS {
             let row = format!("| .{extension} |");
             let line = notes
@@ -886,7 +1032,9 @@ mod tests {
                 "{extension} is not collected by codegraph 1.6.3: {line}"
             );
         }
-        for excluded in ["json", "md", "toml", "txt", "csv", "html", "yaml", "yml", "xml"] {
+        for excluded in [
+            "json", "md", "toml", "txt", "csv", "html", "yaml", "yml", "xml",
+        ] {
             assert!(
                 !ARIA_SOURCE_EXTENSIONS.contains(&excluded),
                 "{excluded} must not be an Aria source extension"
