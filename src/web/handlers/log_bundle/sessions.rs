@@ -154,9 +154,40 @@ impl<'a> Discovery<'a> {
 
     /// 列出相对目录下的条目（按名称稳定排序）；预算耗尽时返回空并标记截断。
     fn list(&mut self, relative: &Path) -> Vec<Entry> {
+        match self.try_list(relative) {
+            Ok(entries) => entries,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    self.truncated = true;
+                }
+                Vec::new()
+            }
+        }
+    }
+
+    /// 列出根目录本身：根在 `fs::Root` 里既可能写作 `""` 也可能写作 `"."`，
+    /// 两种写法各试一次；两次都失败才按“不可读”记账（不掩盖真实错误）。
+    fn list_root(&mut self) -> Vec<Entry> {
+        match self.try_list(Path::new("")) {
+            Ok(entries) => entries,
+            Err(first) => match self.try_list(Path::new(".")) {
+                Ok(entries) => entries,
+                Err(second) => {
+                    if first.kind() != std::io::ErrorKind::NotFound
+                        && second.kind() != std::io::ErrorKind::NotFound
+                    {
+                        self.truncated = true;
+                    }
+                    Vec::new()
+                }
+            },
+        }
+    }
+
+    fn try_list(&mut self, relative: &Path) -> Result<Vec<Entry>, std::io::Error> {
         if self.dir_budget == 0 {
             self.truncated = true;
-            return Vec::new();
+            return Err(std::io::Error::other("扫描预算耗尽"));
         }
         let mut remaining = self.dir_budget.min(MAX_LIST_ENTRIES);
         let before = remaining;
@@ -166,14 +197,11 @@ impl<'a> Discovery<'a> {
             Ok(mut entries) => {
                 self.dir_budget = self.dir_budget.saturating_sub(consumed.max(entries.len()));
                 entries.sort_by(|left, right| left.name.cmp(&right.name));
-                entries
+                Ok(entries)
             }
             Err(error) => {
                 self.dir_budget = self.dir_budget.saturating_sub(consumed.max(1));
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    self.truncated = true;
-                }
-                Vec::new()
+                Err(error)
             }
         }
     }
@@ -311,7 +339,7 @@ fn select_sessions(discovery: &mut Discovery<'_>, groups: Vec<Group>) -> Vec<Ses
 fn discover_claude(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
     let mut groups: Vec<Group> = Vec::new();
-    for project in discovery.list(Path::new("")) {
+    for project in discovery.list_root() {
         if project.kind != Kind::Dir {
             continue;
         }
@@ -415,7 +443,7 @@ fn discover_claude(discovery: &mut Discovery<'_>) -> Vec<Group> {
 fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
     let mut groups: Vec<Group> = Vec::new();
-    for year in discovery.list(Path::new("")) {
+    for year in discovery.list_root() {
         if year.kind != Kind::Dir {
             continue;
         }
@@ -487,7 +515,7 @@ fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
 fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
     let mut groups: Vec<Group> = Vec::new();
-    for cwd in discovery.list(Path::new("")) {
+    for cwd in discovery.list_root() {
         if cwd.kind != Kind::Dir {
             continue;
         }
@@ -532,7 +560,7 @@ fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
 fn discover_kimi(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
     let mut groups: Vec<Group> = Vec::new();
-    for workspace in discovery.list(Path::new("")) {
+    for workspace in discovery.list_root() {
         if workspace.kind != Kind::Dir {
             continue;
         }
