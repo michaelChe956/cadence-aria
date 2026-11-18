@@ -165,25 +165,7 @@ impl<'a> Discovery<'a> {
         }
     }
 
-    /// 列出根目录本身：根在 `fs::Root` 里既可能写作 `""` 也可能写作 `"."`，
-    /// 两种写法各试一次；两次都失败才按“不可读”记账（不掩盖真实错误）。
-    fn list_root(&mut self) -> Vec<Entry> {
-        match self.try_list(Path::new("")) {
-            Ok(entries) => entries,
-            Err(first) => match self.try_list(Path::new(".")) {
-                Ok(entries) => entries,
-                Err(second) => {
-                    if first.kind() != std::io::ErrorKind::NotFound
-                        && second.kind() != std::io::ErrorKind::NotFound
-                    {
-                        self.truncated = true;
-                    }
-                    Vec::new()
-                }
-            },
-        }
-    }
-
+    /// 列举一次目录；相对路径为空即根目录本身。
     fn try_list(&mut self, relative: &Path) -> Result<Vec<Entry>, std::io::Error> {
         if self.dir_budget == 0 {
             self.truncated = true;
@@ -196,6 +178,10 @@ impl<'a> Discovery<'a> {
         match outcome {
             Ok(mut entries) => {
                 self.dir_budget = self.dir_budget.saturating_sub(consumed.max(entries.len()));
+                // 预算被列举耗尽时 `remaining == 0`：可能仍有目录项没被看到，保守记为截断。
+                if remaining == 0 {
+                    self.truncated = true;
+                }
                 entries.sort_by(|left, right| left.name.cmp(&right.name));
                 Ok(entries)
             }
@@ -272,27 +258,40 @@ pub(super) fn discover(
     root: &Root,
     warnings: &mut Vec<&'static str>,
 ) -> Vec<Session> {
-    let spec = match provider {
+    let Some(canonical) = canonical_provider(provider) else {
+        if !warnings.contains(&UNKNOWN_PROVIDER) {
+            warnings.push(UNKNOWN_PROVIDER);
+        }
+        return Vec::new();
+    };
+
+    let spec = match canonical {
         PROVIDER_CLAUDE_CODE => ProviderWarnings::claude_code(),
         PROVIDER_CODEX => ProviderWarnings::codex(),
         PROVIDER_PI => ProviderWarnings::pi(),
-        PROVIDER_KIMI_CODE => ProviderWarnings::kimi_code(),
-        _ => {
-            if !warnings.contains(&UNKNOWN_PROVIDER) {
-                warnings.push(UNKNOWN_PROVIDER);
-            }
-            return Vec::new();
-        }
+        _ => ProviderWarnings::kimi_code(),
     };
 
     let mut discovery = Discovery::new(root, warnings, spec);
-    let groups = match provider {
+    let groups = match canonical {
         PROVIDER_CLAUDE_CODE => discover_claude(&mut discovery),
         PROVIDER_CODEX => discover_codex(&mut discovery),
         PROVIDER_PI => discover_pi(&mut discovery),
         _ => discover_kimi(&mut discovery),
     };
     select_sessions(&mut discovery, groups)
+}
+
+/// 归一化 provider 名：wire 名用下划线，provider 家族名用连字符，两种写法都接受。
+fn canonical_provider(provider: &str) -> Option<&'static str> {
+    let normalized = provider.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        "claude_code" => Some(PROVIDER_CLAUDE_CODE),
+        "codex" => Some(PROVIDER_CODEX),
+        "pi" => Some(PROVIDER_PI),
+        "kimi_code" => Some(PROVIDER_KIMI_CODE),
+        _ => None,
+    }
 }
 
 /// 去重（同一原生 ID 只留最新的一份）、排序（mtime 倒序，ID 稳定打破并列）并截断到三个。
@@ -339,7 +338,7 @@ fn select_sessions(discovery: &mut Discovery<'_>, groups: Vec<Group>) -> Vec<Ses
 fn discover_claude(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
     let mut groups: Vec<Group> = Vec::new();
-    for project in discovery.list_root() {
+    for project in discovery.list(Path::new("")) {
         if project.kind != Kind::Dir {
             continue;
         }
@@ -443,7 +442,7 @@ fn discover_claude(discovery: &mut Discovery<'_>) -> Vec<Group> {
 fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
     let mut groups: Vec<Group> = Vec::new();
-    for year in discovery.list_root() {
+    for year in discovery.list(Path::new("")) {
         if year.kind != Kind::Dir {
             continue;
         }
@@ -515,7 +514,7 @@ fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
 fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
     let mut groups: Vec<Group> = Vec::new();
-    for cwd in discovery.list_root() {
+    for cwd in discovery.list(Path::new("")) {
         if cwd.kind != Kind::Dir {
             continue;
         }
@@ -560,7 +559,7 @@ fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
 fn discover_kimi(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
     let mut groups: Vec<Group> = Vec::new();
-    for workspace in discovery.list_root() {
+    for workspace in discovery.list(Path::new("")) {
         if workspace.kind != Kind::Dir {
             continue;
         }

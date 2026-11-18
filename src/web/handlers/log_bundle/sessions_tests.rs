@@ -371,6 +371,15 @@ fn each_provider_is_discovered_by_its_own_wire_name() {
     // 形态不匹配时不得把别的 provider 的目录当成会话。
     assert!(discover("codex", &open_root(&claude_dir), &mut warnings).is_empty());
     assert!(discover("pi", &open_root(&kimi_dir), &mut warnings).is_empty());
+    // wire 名（下划线）与 provider 家族名（连字符）指向同一 provider。
+    assert_eq!(
+        discover("claude-code", &open_root(&claude_dir), &mut warnings).len(),
+        1
+    );
+    assert_eq!(
+        discover("kimi-code", &open_root(&kimi_dir), &mut warnings).len(),
+        1
+    );
 }
 
 #[test]
