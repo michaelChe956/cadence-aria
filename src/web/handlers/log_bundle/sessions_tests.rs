@@ -1,6 +1,7 @@
 //! sessions.rs 的外置测试模块：经 sessions.rs 内 `#[path = "sessions_tests.rs"]` 引入。
 //!
-//! 全部夹具只写入 `/tmp` 下的临时目录，不读取真实 HOME、不接触真实 provider 日志。
+//! 全部夹具只写入 `/tmp` 下的临时目录，会话 ID 用真实 UUID，不读取真实 HOME、
+//! 不接触真实 provider 日志。
 
 use super::*;
 use std::fs;
@@ -8,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use tempfile::TempDir;
+use uuid::Uuid;
 
 use super::super::fs::Root;
 
@@ -39,23 +41,29 @@ fn codex_header(session_id: &str) -> String {
     )
 }
 
+fn pi_header(session_id: &str) -> String {
+    format!("{{\"type\":\"session\",\"id\":\"{session_id}\"}}\n")
+}
+
 #[test]
 fn claude_ranks_by_newest_member_mtime_and_attaches_subagents() {
     let dir = TempDir::new_in("/tmp").expect("临时目录");
+    let session_id = Uuid::new_v4().to_string();
     let parent_a = dir
         .path()
         .join("proj-a")
-        .join("11111111-1111-1111-1111-111111111111.jsonl");
+        .join(format!("{session_id}.jsonl"));
     let subagent_a = dir
         .path()
         .join("proj-a")
-        .join("11111111-1111-1111-1111-111111111111")
+        .join(&session_id)
         .join("subagents")
         .join("agent-1.jsonl");
+    let other_id = Uuid::new_v4().to_string();
     let parent_b = dir
         .path()
         .join("proj-b")
-        .join("22222222-2222-2222-2222-222222222222.jsonl");
+        .join(format!("{other_id}.jsonl"));
     write_file(&parent_a, "{}\n");
     write_file(&subagent_a, "{}\n");
     write_file(&parent_b, "{}\n");
@@ -71,9 +79,9 @@ fn claude_ranks_by_newest_member_mtime_and_attaches_subagents() {
     assert_eq!(
         sessions[0].members,
         vec![
-            PathBuf::from("proj-a").join("11111111-1111-1111-1111-111111111111.jsonl"),
+            PathBuf::from("proj-a").join(format!("{session_id}.jsonl")),
             PathBuf::from("proj-a")
-                .join("11111111-1111-1111-1111-111111111111")
+                .join(&session_id)
                 .join("subagents")
                 .join("agent-1.jsonl"),
         ]
@@ -81,7 +89,7 @@ fn claude_ranks_by_newest_member_mtime_and_attaches_subagents() {
     assert_eq!(sessions[0].modified, epoch(300));
     assert_eq!(
         sessions[1].members,
-        vec![PathBuf::from("proj-b").join("22222222-2222-2222-2222-222222222222.jsonl")]
+        vec![PathBuf::from("proj-b").join(format!("{other_id}.jsonl"))]
     );
     assert_eq!(sessions[1].modified, epoch(200));
 }
@@ -89,10 +97,11 @@ fn claude_ranks_by_newest_member_mtime_and_attaches_subagents() {
 #[test]
 fn claude_ignores_subagents_without_parent_session() {
     let dir = TempDir::new_in("/tmp").expect("临时目录");
+    let session_id = Uuid::new_v4().to_string();
     let orphan = dir
         .path()
         .join("proj-a")
-        .join("33333333-3333-3333-3333-333333333333")
+        .join(&session_id)
         .join("subagents")
         .join("agent-9.jsonl");
     write_file(&orphan, "{}\n");
@@ -117,14 +126,15 @@ fn claude_ignores_subagents_without_parent_session() {
 #[test]
 fn claude_duplicate_ids_do_not_consume_extra_slots() {
     let dir = TempDir::new_in("/tmp").expect("临时目录");
+    let session_id = Uuid::new_v4().to_string();
     let first = dir
         .path()
         .join("proj-a")
-        .join("44444444-4444-4444-4444-444444444444.jsonl");
+        .join(format!("{session_id}.jsonl"));
     let second = dir
         .path()
         .join("proj-b")
-        .join("44444444-4444-4444-4444-444444444444.jsonl");
+        .join(format!("{session_id}.jsonl"));
     write_file(&first, "{}\n");
     write_file(&second, "{}\n");
     set_mtime(&first, 100);
@@ -137,7 +147,7 @@ fn claude_duplicate_ids_do_not_consume_extra_slots() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(
         sessions[0].members,
-        vec![PathBuf::from("proj-b").join("44444444-4444-4444-4444-444444444444.jsonl")]
+        vec![PathBuf::from("proj-b").join(format!("{session_id}.jsonl"))]
     );
     assert_eq!(sessions[0].modified, epoch(500));
 }
@@ -145,26 +155,27 @@ fn claude_duplicate_ids_do_not_consume_extra_slots() {
 #[test]
 fn codex_deduplicates_by_native_session_id_and_skips_missing_header() {
     let dir = TempDir::new_in("/tmp").expect("临时目录");
+    let session_id = Uuid::new_v4().to_string();
     let first = dir
         .path()
         .join("2025")
         .join("01")
         .join("02")
-        .join("rollout-2025-01-02T00-00-00-a.jsonl");
+        .join(format!("rollout-2025-01-02T00-00-00-{session_id}.jsonl"));
     let second = dir
         .path()
         .join("2025")
         .join("01")
         .join("03")
-        .join("rollout-2025-01-03T00-00-00-b.jsonl");
+        .join(format!("rollout-2025-01-03T00-00-00-{session_id}.jsonl"));
     let broken = dir
         .path()
         .join("2025")
         .join("01")
         .join("04")
-        .join("rollout-2025-01-04T00-00-00-c.jsonl");
-    write_file(&first, &codex_header("codex-session-1"));
-    write_file(&second, &codex_header("codex-session-1"));
+        .join("rollout-2025-01-04T00-00-00-broken.jsonl");
+    write_file(&first, &codex_header(&session_id));
+    write_file(&second, &codex_header(&session_id));
     write_file(&broken, "not-json\n");
     set_mtime(&first, 100);
     set_mtime(&second, 600);
@@ -177,7 +188,9 @@ fn codex_deduplicates_by_native_session_id_and_skips_missing_header() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(
         sessions[0].members,
-        vec![PathBuf::from("2025/01/03").join("rollout-2025-01-03T00-00-00-b.jsonl")]
+        vec![PathBuf::from("2025/01/03").join(format!(
+            "rollout-2025-01-03T00-00-00-{session_id}.jsonl"
+        ))]
     );
     assert_eq!(sessions[0].modified, epoch(600));
     assert!(
@@ -191,13 +204,12 @@ fn pi_reads_first_session_header_and_keeps_at_most_three() {
     let dir = TempDir::new_in("/tmp").expect("临时目录");
     let mut expected: Vec<PathBuf> = Vec::new();
     for index in 0..5u32 {
-        let path = dir
-            .path()
-            .join("cwd-a")
-            .join(format!("2025-01-0{index}-session.jsonl"));
-        write_file(&path, &format!("{{\"type\":\"session\",\"id\":\"pi-{index}\"}}\n"));
+        let session_id = Uuid::new_v4().to_string();
+        let name = format!("2025-01-0{index}-{session_id}.jsonl");
+        let path = dir.path().join("cwd-a").join(&name);
+        write_file(&path, &pi_header(&session_id));
         set_mtime(&path, 100 + u64::from(index));
-        expected.push(PathBuf::from("cwd-a").join(format!("2025-01-0{index}-session.jsonl")));
+        expected.push(PathBuf::from("cwd-a").join(name));
     }
     let broken = dir.path().join("cwd-a").join("broken.jsonl");
     write_file(&broken, "{\"type\":\"other\"}\n");
@@ -222,10 +234,11 @@ fn pi_reads_first_session_header_and_keeps_at_most_three() {
 #[test]
 fn pi_deduplicates_native_session_id_across_working_directories() {
     let dir = TempDir::new_in("/tmp").expect("临时目录");
+    let session_id = Uuid::new_v4().to_string();
     let first = dir.path().join("cwd-a").join("a.jsonl");
     let second = dir.path().join("cwd-b").join("b.jsonl");
-    write_file(&first, "{\"type\":\"session\",\"id\":\"pi-same\"}\n");
-    write_file(&second, "{\"type\":\"session\",\"id\":\"pi-same\"}\n");
+    write_file(&first, &pi_header(&session_id));
+    write_file(&second, &pi_header(&session_id));
     set_mtime(&first, 100);
     set_mtime(&second, 700);
 
@@ -244,24 +257,26 @@ fn pi_deduplicates_native_session_id_across_working_directories() {
 #[test]
 fn kimi_groups_all_agent_streams_under_one_parent_session() {
     let dir = TempDir::new_in("/tmp").expect("临时目录");
+    let session_id = Uuid::new_v4().to_string();
+    let other_id = Uuid::new_v4().to_string();
     let main_wire = dir
         .path()
         .join("wd-1")
-        .join("session_kimi-1")
+        .join(format!("session_{session_id}"))
         .join("agents")
         .join("main")
         .join("wire.jsonl");
     let aux_wire = dir
         .path()
         .join("wd-1")
-        .join("session_kimi-1")
+        .join(format!("session_{session_id}"))
         .join("agents")
         .join("aux")
         .join("wire.jsonl");
     let other = dir
         .path()
         .join("wd-2")
-        .join("session_kimi-2")
+        .join(format!("session_{other_id}"))
         .join("agents")
         .join("main")
         .join("wire.jsonl");
@@ -280,14 +295,26 @@ fn kimi_groups_all_agent_streams_under_one_parent_session() {
     assert_eq!(
         sessions[0].members,
         vec![
-            PathBuf::from("wd-1/session_kimi-1/agents/main/wire.jsonl"),
-            PathBuf::from("wd-1/session_kimi-1/agents/aux/wire.jsonl"),
+            PathBuf::from("wd-1")
+                .join(format!("session_{session_id}"))
+                .join("agents")
+                .join("main")
+                .join("wire.jsonl"),
+            PathBuf::from("wd-1")
+                .join(format!("session_{session_id}"))
+                .join("agents")
+                .join("aux")
+                .join("wire.jsonl"),
         ]
     );
     assert_eq!(sessions[0].modified, epoch(800));
     assert_eq!(
         sessions[1].members,
-        vec![PathBuf::from("wd-2/session_kimi-2/agents/main/wire.jsonl")]
+        vec![PathBuf::from("wd-2")
+            .join(format!("session_{other_id}"))
+            .join("agents")
+            .join("main")
+            .join("wire.jsonl")]
     );
     assert_eq!(sessions[1].modified, epoch(200));
 }
@@ -299,27 +326,28 @@ fn each_provider_is_discovered_by_its_own_wire_name() {
         &claude_dir
             .path()
             .join("proj")
-            .join("55555555-5555-5555-5555-555555555555.jsonl"),
+            .join(format!("{}.jsonl", Uuid::new_v4())),
         "{}\n",
     );
     let codex_dir = TempDir::new_in("/tmp").expect("临时目录");
+    let codex_id = Uuid::new_v4().to_string();
     write_file(
         &codex_dir
             .path()
             .join("2025/07/08")
-            .join("rollout-2025-07-08T00-00-00-a.jsonl"),
-        &codex_header("codex-only"),
+            .join(format!("rollout-2025-07-08T00-00-00-{codex_id}.jsonl")),
+        &codex_header(&codex_id),
     );
     let pi_dir = TempDir::new_in("/tmp").expect("临时目录");
     write_file(
         &pi_dir.path().join("cwd").join("s.jsonl"),
-        "{\"type\":\"session\",\"id\":\"pi-only\"}\n",
+        &pi_header(&Uuid::new_v4().to_string()),
     );
     let kimi_dir = TempDir::new_in("/tmp").expect("临时目录");
     write_file(
         &kimi_dir
             .path()
-            .join("wd/session_kimi-only/agents/main/wire.jsonl"),
+            .join(format!("wd/session_{}/agents/main/wire.jsonl", Uuid::new_v4())),
         "{}\n",
     );
 
@@ -350,11 +378,11 @@ fn fewer_than_three_sessions_are_reported_as_missing() {
     let dir = TempDir::new_in("/tmp").expect("临时目录");
     write_file(
         &dir.path().join("cwd").join("a.jsonl"),
-        "{\"type\":\"session\",\"id\":\"pi-1\"}\n",
+        &pi_header(&Uuid::new_v4().to_string()),
     );
     write_file(
         &dir.path().join("cwd").join("b.jsonl"),
-        "{\"type\":\"session\",\"id\":\"pi-2\"}\n",
+        &pi_header(&Uuid::new_v4().to_string()),
     );
 
     let root = open_root(&dir);
@@ -373,7 +401,7 @@ fn unknown_provider_yields_no_sessions_and_a_warning() {
     let dir = TempDir::new_in("/tmp").expect("临时目录");
     write_file(
         &dir.path().join("cwd").join("a.jsonl"),
-        "{\"type\":\"session\",\"id\":\"pi-1\"}\n",
+        &pi_header(&Uuid::new_v4().to_string()),
     );
 
     let root = open_root(&dir);
