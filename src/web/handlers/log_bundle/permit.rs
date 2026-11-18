@@ -23,6 +23,8 @@ const GRANT_TTL: Duration = Duration::from_secs(300);
 const MAX_PENDING_PER_INSTANCE: usize = 8;
 /// 单次通道 I/O 的超时上限。
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// 宿主在终端上明确确认的等待上限（人的输入不适用机器级 I/O 超时）。
+const HUMAN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
 /// 申请号长度：32 位小写十六进制（公开 id）。
 const REQUEST_ID_LEN: usize = 32;
 /// 下载句柄长度：64 位小写十六进制（与申请号独立随机）。
@@ -283,9 +285,11 @@ pub(crate) async fn approve_local(request_id: &str) -> io::Result<()> {
             "未确认，本次日志下载没有被批准",
         ));
     }
-    write_with_deadline(&mut stream, b"y\n", deadline).await?;
+    // 人确认可能耗时，确认之后重新起算通道 I/O 期限。
+    let verdict_deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+    write_with_deadline(&mut stream, b"y\n", verdict_deadline).await?;
     let mut verdict = vec![0u8; MAX_REPLY_MESSAGE];
-    let read = read_with_deadline(&mut stream, &mut verdict, deadline).await?;
+    let read = read_with_deadline(&mut stream, &mut verdict, verdict_deadline).await?;
     let verdict = String::from_utf8_lossy(&verdict[..read]).trim().to_string();
     if verdict != "ok" {
         return Err(io::Error::new(
@@ -396,7 +400,11 @@ fn handle_approval_client(
     if stream.write_all(prompt.as_bytes()).is_err() {
         return ApprovalOutcome::Failed;
     }
-    let answer = match read_line_bounded(&mut stream, MAX_REPLY_MESSAGE, deadline) {
+    let answer = match read_line_bounded(
+        &mut stream,
+        MAX_REPLY_MESSAGE,
+        Instant::now() + HUMAN_RESPONSE_TIMEOUT,
+    ) {
         Ok(line) => line,
         Err(_) => return ApprovalOutcome::Failed,
     };
