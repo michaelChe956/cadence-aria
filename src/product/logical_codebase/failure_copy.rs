@@ -321,6 +321,18 @@ pub fn record_diagnostic(record: &AggregateInitializationErrorRecord) -> String 
 /// 原始整句仍原样进折叠区诊断。
 pub fn subject_from_message(code: &str, message: &str) -> Option<String> {
     let extracted = match canonical_key(code) {
+        "aggregate_index_member_coverage_failed" => {
+            // 覆盖失败抽出的是「逗号分隔的成员名清单」，不是路径：按逗号
+            // 切分、逐段 trim、丢空串后用中文顿号连接，直接返回，不走
+            // 函数尾部「路径形态只点名最后一段」的收尾处理。
+            let extracted = extract_between(message, "included members [", "]")?;
+            let members: Vec<&str> = extracted
+                .split(',')
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .collect();
+            return (!members.is_empty()).then(|| members.join("、"));
+        }
         "aggregate_root_member_outside_root"
         | "aggregate_root_member_symlink_escape"
         | "aggregate_root_nested_worktree" => {

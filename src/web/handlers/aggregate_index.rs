@@ -33,6 +33,13 @@ pub struct AggregateIndexActiveResponse {
     /// 不进本分支（200 不变）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_copy: Option<FailureCopyDto>,
+    /// 最新一代聚合索引失败时的中文成品（问题/原因/怎么做/机器码）。
+    ///
+    /// 码来源＝持久化失败封套（`aggregate_index_failed:<code>: <message>` /
+    /// `aggregate_index_degraded:<code>: <message>`）里的稳定内层码，
+    /// 文案取自 `failure_copy` 唯一码表；无失败（或封套解析不出稳定码）时缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_copy: Option<FailureCopyDto>,
 }
 
 pub async fn get_active_aggregate_index(
@@ -233,17 +240,49 @@ fn read_active_projection(
     Ok(response)
 }
 
+/// 从持久化失败封套（`aggregate_index_failed:<code>: <message>` 或
+/// `aggregate_index_degraded:<code>: <message>`）解析出三段中文成品。
+///
+/// 码取封套里的稳定内层码，文案查 `failure_copy` 唯一码表；封套缺失
+/// （软告警不是失败封套）或解析不出稳定码时返回 `None`。
+fn failure_copy_from_warning(warning: Option<&str>) -> Option<FailureCopyDto> {
+    use crate::product::logical_codebase::failure_copy::{
+        FailureInput, describe, subject_from_message,
+    };
+
+    let warning = warning?;
+    let payload = warning
+        .strip_prefix("aggregate_index_failed:")
+        .or_else(|| warning.strip_prefix("aggregate_index_degraded:"))?;
+    let (code, message) = payload.split_once(": ")?;
+    if code.is_empty() || code.chars().any(char::is_whitespace) {
+        return None;
+    }
+    // 先把点到的对象抬到函数级作用域：input 借用它，describe 消费 input
+    // 必须发生在 subject 仍然存活期间。
+    let subject = subject_from_message(code, message);
+    let mut input = FailureInput::new(code).with_detail(message);
+    if let Some(subject) = subject.as_deref() {
+        input = input.with_subject(subject);
+    }
+    let copy = describe(input);
+    Some(FailureCopyDto::from(&copy))
+}
+
 fn projection(
     state: &'static str,
     record: &AggregateIndexRecord,
     warning: Option<String>,
 ) -> AggregateIndexActiveResponse {
+    let warning = warning.or_else(|| record.warning.clone());
+    let failure_copy = failure_copy_from_warning(warning.as_deref());
     AggregateIndexActiveResponse {
         state,
         revision: Some(record.membership_revision),
         indexed_at: Some(record.updated_at.clone()),
-        warning: warning.or_else(|| record.warning.clone()),
+        warning,
         evidence_copy: None,
+        failure_copy,
     }
 }
 
@@ -252,6 +291,7 @@ fn missing_response(warning: Option<String>) -> AggregateIndexActiveResponse {
         state: "missing",
         revision: None,
         indexed_at: None,
+        failure_copy: failure_copy_from_warning(warning.as_deref()),
         warning,
         evidence_copy: None,
     }
@@ -271,12 +311,21 @@ fn validate_project_id(project_id: &str) -> ApiResult<()> {
 /// 的三段成品（问题/原因/怎么做/机器码），原始错误脱敏后另存
 /// `details.detail`，不冒充中文原因。
 fn aggregate_index_api_error(error: AggregateIndexError) -> ApiError {
-    use crate::product::logical_codebase::failure_copy::{FailureInput, describe, render_detail};
+    use crate::product::logical_codebase::failure_copy::{
+        FailureInput, describe, render_detail, subject_from_message,
+    };
     let (code, message) = match &error {
         AggregateIndexError::Failed { code, message }
         | AggregateIndexError::Degraded { code, message } => (*code, message.as_str()),
     };
-    let copy = describe(FailureInput::new(code).with_detail(message));
+    // 已知句式能点名的对象（如覆盖失败里的成员名清单）要进原因段，
+    // 原始英文串仍整句留在脱敏诊断里；subject 抬到函数级作用域供 input 借用。
+    let subject = subject_from_message(code, message);
+    let mut input = FailureInput::new(code).with_detail(message);
+    if let Some(subject) = subject.as_deref() {
+        input = input.with_subject(subject);
+    }
+    let copy = describe(input);
     let diagnostic = crate::cross_cutting::diagnostic_redaction::sanitize_diagnostic(
         message,
         &crate::cross_cutting::diagnostic_redaction::RedactionContext::default(),
