@@ -402,7 +402,7 @@ mod aggregate_index_tests {
         assert!(!copy.title_zh.trim().is_empty());
         assert!(!copy.reason_zh.trim().is_empty());
         assert!(!copy.action_zh.trim().is_empty());
-        // 点名：封套事实里的成员名必须进原因段。
+        // 点名：封套事实里的成员名必须进原因段（该码模板的原因段带成员位）。
         assert!(
             copy.reason_zh.contains("api"),
             "成员名必须进原因段：{}",
@@ -436,10 +436,11 @@ mod aggregate_index_tests {
         assert!(!copy.title_zh.trim().is_empty());
         assert!(!copy.reason_zh.trim().is_empty());
         assert!(!copy.action_zh.trim().is_empty());
+        // 该码模板的点名位在问题段（标题），不在原因段。
         assert!(
-            copy.reason_zh.contains("api"),
-            "成员名必须进原因段：{}",
-            copy.reason_zh
+            copy.title_zh.contains("api"),
+            "成员名必须进成品：{}",
+            copy.title_zh
         );
     }
 
@@ -469,11 +470,17 @@ mod aggregate_index_tests {
         assert!(!copy.title_zh.trim().is_empty());
         assert!(!copy.reason_zh.trim().is_empty());
         assert!(!copy.action_zh.trim().is_empty());
-        assert!(
-            copy.reason_zh.contains("api"),
-            "成员名必须进原因段：{}",
-            copy.reason_zh
-        );
+        // 该码模板无成员位 ⇒ 点名不可断言；改为断言与共享入口逐字一致。
+        let envelope = "aggregate_index_failed:aggregate_index_all_members_source_less: no Aria \
+                        source under any included member; included members [api, web]";
+        let (shared_code, shared_copy) =
+            crate::product::logical_codebase::failure_copy::describe_envelope(envelope)
+                .expect("共享入口必须能解析该封套");
+        assert_eq!(shared_code, "aggregate_index_all_members_source_less");
+        assert_eq!(copy.title_zh, shared_copy.title_zh);
+        assert_eq!(copy.reason_zh, shared_copy.reason_zh);
+        assert_eq!(copy.action_zh, shared_copy.action_zh);
+        assert_eq!(copy.machine_line, shared_copy.machine_line);
     }
 
     /// 红测试 #4（片4B · F2 点名守卫）：同一封套下，冷启动投影的成品与
