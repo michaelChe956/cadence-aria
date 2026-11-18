@@ -356,6 +356,16 @@ const TABLE: &[Entry] = &[
         "刷新成员登记事实后点「重试」；仍失败时附机器码与诊断提交问题。",
         FailureTriage::ProductDefect,
     ),
+    // durable warning 内层码（snapshot 固定成员快照的前置闸）：主检出不可用。
+    // 它会经 fail_building 落进 record.warning，但不属于七个对外布局码
+    // （REQ-LAYOUT-02），因此不进 LAYOUT_RULES。
+    (
+        "aggregate_index_checkout_unavailable",
+        "某个成员的主检出不可用",
+        "聚合索引要读取成员的主检出目录，但它当前不是可用的主检出（该检出的路径见下方诊断）；重试解决不了这个问题。",
+        "修复该成员的检出（重新 clone，或在逻辑代码库里把它重新登记为可用的主检出）后点「重试」。",
+        FailureTriage::Environment,
+    ),
     (
         "aggregate_index_invalid_revision",
         "成员仓的 revision 不可用",
