@@ -2,6 +2,7 @@ import { LoaderCircle, TriangleAlert } from "lucide-react";
 import type {
   AggregateIndexActiveResponse,
   AggregateIndexState,
+  FailureCopyDto,
 } from "../../api/types";
 
 const STATE_LABELS: Record<AggregateIndexState, string> = {
@@ -30,6 +31,43 @@ export type AggregateIndexCardProps = {
   rebuilding: boolean;
   onRebuild: () => void;
 };
+
+/**
+ * 失败面正文（问题标题 + 原因/怎么做/机器码 + 可选诊断行）只有这一处渲染，
+ * `failure_copy` 面与 `evidence_copy` 面共用，避免两份标签各写各的、逐字漂移。
+ * 前缀标签的措辞与后端 `render_detail` 逐字一致；中文正文全部取自后端 copy 字段，
+ * 前端不另写中文。
+ */
+function FailureFaceDetail({
+  copy,
+  titleTestId,
+  diagnostic,
+}: {
+  copy: FailureCopyDto;
+  titleTestId: string;
+  diagnostic?: string | null;
+}) {
+  return (
+    <>
+      <p data-testid={titleTestId} className="font-semibold">
+        {copy.title_zh}
+      </p>
+      <p className="mt-1">原因：{copy.reason_zh}</p>
+      <p className="mt-1">怎么做：{copy.action_zh}</p>
+      <p className="mt-1 font-mono opacity-80">
+        机器码：{copy.machine_line}
+      </p>
+      {diagnostic ? (
+        <p
+          data-testid="aggregate-index-warning"
+          className="mt-1 break-words font-mono opacity-80"
+        >
+          诊断：{diagnostic}
+        </p>
+      ) : null}
+    </>
+  );
+}
 
 export function AggregateIndexCard({
   index,
@@ -91,22 +129,11 @@ export function AggregateIndexCard({
           data-testid="aggregate-index-failure"
           className="mt-2 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-xs text-[var(--aria-danger)]"
         >
-          <p data-testid="aggregate-index-failure-title" className="font-semibold">
-            {failureCopy.title_zh}
-          </p>
-          <p className="mt-1">原因：{failureCopy.reason_zh}</p>
-          <p className="mt-1">怎么做：{failureCopy.action_zh}</p>
-          <p className="mt-1 font-mono opacity-80">
-            机器码：{failureCopy.machine_line}
-          </p>
-          {index.warning ? (
-            <p
-              data-testid="aggregate-index-warning"
-              className="mt-1 break-words font-mono opacity-80"
-            >
-              诊断：{index.warning}
-            </p>
-          ) : null}
+          <FailureFaceDetail
+            copy={failureCopy}
+            titleTestId="aggregate-index-failure-title"
+            diagnostic={index.warning}
+          />
           <div className="mt-2">{rebuildButton}</div>
         </div>
       ) : null}
@@ -116,14 +143,10 @@ export function AggregateIndexCard({
           data-testid="aggregate-index-evidence-unavailable"
           className="mt-2 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-xs text-[var(--aria-danger)]"
         >
-          <p data-testid="aggregate-index-evidence-title" className="font-semibold">
-            {evidenceCopy.title_zh}
-          </p>
-          <p className="mt-1">原因：{evidenceCopy.reason_zh}</p>
-          <p className="mt-1">怎么做：{evidenceCopy.action_zh}</p>
-          <p className="mt-1 font-mono opacity-80">
-            机器码：{evidenceCopy.machine_line}
-          </p>
+          <FailureFaceDetail
+            copy={evidenceCopy}
+            titleTestId="aggregate-index-evidence-title"
+          />
           <div className="mt-2">{rebuildButton}</div>
         </div>
       ) : null}
@@ -135,7 +158,9 @@ export function AggregateIndexCard({
         </p>
       ) : null}
 
-      {index.state === "stale" ? (
+      {/* 陈旧提示与失败面互斥：重建失败且无可用索引时（state=stale 且带
+          failure_copy）只保留失败面，避免同时出现两套「重建」动作面。 */}
+      {index.state === "stale" && !failureCopy ? (
         <div
           data-testid="aggregate-index-stale-notice"
           className="mt-2 flex items-center gap-2 rounded-md border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-xs text-[var(--aria-warning)]"
