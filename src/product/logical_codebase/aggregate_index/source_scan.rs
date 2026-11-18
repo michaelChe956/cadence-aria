@@ -509,8 +509,12 @@ fn scan_visible_range(
             return StageOutcome::Incomplete;
         }
         let joined = root.join(relative);
-        let Ok(metadata) = fs::symlink_metadata(&joined) else {
-            continue;
+        let metadata = match fs::symlink_metadata(&joined) {
+            Ok(metadata) => metadata,
+            // 已跟踪但已从工作区删除（或稀疏检出）：正常，跳过。
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            // 权限 / IO 失败 ⇒ 证据不足，不得当作「无源码」。
+            Err(_) => return StageOutcome::Incomplete,
         };
         // 符号链接一律跳过（不跟随、也不算源码）。
         if metadata.file_type().is_symlink() || !metadata.is_file() {
