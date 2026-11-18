@@ -60,11 +60,12 @@
         }
     }
 
-    /// SDK 成员覆盖验收（2026-11-13 切片）：探针返回的 hasFilesUnder 判定
-    /// 直接决定覆盖结论；未覆盖成员被点名，错误码沿用既有
-    /// `aggregate_index_member_coverage_failed`（不新造码）。
+    /// 片3R ①跳过路径：SDK 探针报 web 未覆盖、盘检确认 web 目录确无
+    /// 源码 ⇒ 不再当覆盖失败——世代照常 Active，web 快照落
+    /// `skip_reason=Some(NoSource)` 且 `included` 语义不动；api 无跳过
+    /// 事实。跳过成员被记下、无任何失败。
     #[test]
-    fn sdk_member_coverage_names_uncovered_members() {
+    fn sdk_member_coverage_skips_member_confirmed_source_less() {
         let fixture = aggregate_index_fixture();
         // CLI 侧文件齐全——若实现错误地走 CLI 路径，本测试将误绿；
         // 断言以 SDK 探针（web 未覆盖）为准。
@@ -76,15 +77,68 @@
             StubCoverageProbe::with_members(&[("api", true), ("web", false)]),
         ));
 
+        let record = operation.build("project_0001", 3).unwrap();
+        assert_eq!(record.status, AggregateIndexStatus::Active);
+        // web 成员修订为 b*40（api 为 a*40），按修订定位避免依赖快照顺序。
+        let web = record
+            .member_snapshots
+            .iter()
+            .find(|snapshot| snapshot.revision == "b".repeat(40))
+            .expect("web member snapshot must exist");
+        assert_eq!(
+            web.skip_reason,
+            Some(super::super::types::AggregateIndexMemberSkipReason::NoSource)
+        );
+        assert!(web.included);
+        let api = record
+            .member_snapshots
+            .iter()
+            .find(|snapshot| snapshot.revision == "a".repeat(40))
+            .expect("api member snapshot must exist");
+        assert_eq!(api.skip_reason, None);
+    }
+
+    /// 片3R ②失败路径（磁盘事实变体）：web 目录确有真实源码、SDK 探针
+    /// 仍报未覆盖 ⇒ 漏收失败。错误码沿用既有
+    /// `aggregate_index_member_coverage_failed`（不新造码），文案必须带
+    /// 磁盘事实前缀并点名 web，且不得说成用户没放源码。
+    #[test]
+    fn sdk_member_coverage_fails_when_disk_has_source_but_probe_uncovered() {
+        let fixture = aggregate_index_fixture();
+        fixture.cli.files_return(["api/src/A.java", "web/src/B.ts"]);
+        for query in EXCLUDED_QUERIES {
+            fixture.cli.query_returns(query, serde_json::json!([]));
+        }
+        // 夹具根在 /tmp；给 web 写入真实源码文件，盘检口径下属源码。
+        let root = fixture
+            .logical
+            .load_manifest("project_0001")
+            .unwrap()
+            .unwrap()
+            .provider_context_root;
+        std::fs::write(root.join("web/src/B.ts"), "export const b = 1;\n").unwrap();
+        let operation = fixture.operation().with_coverage_probe(Arc::new(
+            StubCoverageProbe::with_members(&[("api", true), ("web", false)]),
+        ));
+
         let error = operation.build("project_0001", 3).unwrap_err();
         assert!(
             matches!(&error, AggregateIndexError::Failed { code, .. }
                 if *code == "aggregate_index_member_coverage_failed"),
             "unexpected error: {error}"
         );
+        let message = error.to_string();
         assert!(
-            error.to_string().contains("members [web]"),
-            "must name the SDK-uncovered member, got: {error}"
+            message.contains("source found on disk"),
+            "must carry the on-disk fact prefix, got: {message}"
+        );
+        assert!(
+            message.contains("members [web]"),
+            "must name the SDK-uncovered member, got: {message}"
+        );
+        assert!(
+            !message.contains("no source found") && !message.contains("add a member"),
+            "must not claim the member lacks source on disk, got: {message}"
         );
     }
 
