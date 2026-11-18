@@ -1094,15 +1094,13 @@ const COVERAGE_DISK_SOURCE_FACT_PREFIX: &str = "source found on disk;";
 ///
 /// 只改**模板**，不改归因、不改 `machine_line`；其余码一律原样返回。
 fn resolved_entry_key<'a>(key: &'a str, detail: Option<&str>) -> &'a str {
-    if key == "aggregate_index_member_coverage_failed" {
-        if let Some(detail) = detail {
-            if detail
-                .trim_start()
-                .starts_with(COVERAGE_DISK_SOURCE_FACT_PREFIX)
-            {
-                return COVERAGE_DISK_SOURCE_KEY;
-            }
-        }
+    if key == "aggregate_index_member_coverage_failed"
+        && let Some(detail) = detail
+        && detail
+            .trim_start()
+            .starts_with(COVERAGE_DISK_SOURCE_FACT_PREFIX)
+    {
+        return COVERAGE_DISK_SOURCE_KEY;
     }
     key
 }

@@ -539,8 +539,7 @@ mod tests {
             Err(failed_envelope("aggregate_index_active_missing")),
         );
         let error = refresh_for_story("project_story", &backend)
-            .err()
-            .expect("同步后仍非 Active ⇒ 停在 AI 启动前");
+            .expect_err("同步后仍非 Active ⇒ 停在 AI 启动前");
         let StoryIndexRefreshError::VerificationFailed { code, message } = error else {
             panic!("同步后仍非 Active 必须是 VerificationFailed");
         };
@@ -562,9 +561,7 @@ mod tests {
             Err(failed_envelope("aggregate_index_member_coverage_failed")),
             Err(failed_envelope("aggregate_index_active_missing")),
         );
-        let error = refresh_for_story("project_story", &backend)
-            .err()
-            .expect("同步失败 ⇒ 停机");
+        let error = refresh_for_story("project_story", &backend).expect_err("同步失败 ⇒ 停机");
         assert_eq!(
             error,
             StoryIndexRefreshError::VerificationFailed {
