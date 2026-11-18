@@ -245,7 +245,11 @@ async fn bootstrap_advance_drives_the_field_state_and_stops_at_a_failed_step() {
     assert_eq!(status, StatusCode::OK, "{halted}");
     assert_eq!(halted["stopped_reason"], "failed", "{halted}");
     assert_eq!(halted["stopped_step"], "aggregate_index_active", "{halted}");
-    assert_eq!(halted["stopped_reason_code"], "aggregate_index_failed", "{halted}");
+    // 契约驱动的期望更新（不是放宽断言）：现场是 codegraph 二进制缺失 ⇒
+    // 失败封套内层码 `codegraph_missing`（已在唯一码表登记）。旧期望
+    // 「aggregate_index_failed」编码的是**两出口不一致**的旧行为——冷启动把
+    // 已登记码压成通用码，而 HTTP 出口早已外露内层码。
+    assert_eq!(halted["stopped_reason_code"], "codegraph_missing", "{halted}");
     assert!(
         advanced_step_names(&halted).is_empty(),
         "a failed step may never be retried automatically: {halted}"
