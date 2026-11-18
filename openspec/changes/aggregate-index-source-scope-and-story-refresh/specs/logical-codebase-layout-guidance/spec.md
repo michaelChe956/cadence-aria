@@ -29,6 +29,11 @@
 - **WHEN** 某成员仓是嵌套 worktree
 - **THEN** 系统 SHALL 返回 `nested_worktree`，动作说明为「成员要用正常检出，不要塞嵌套 worktree」
 
+#### Scenario: 成员无可索引代码文件
+
+- **WHEN** 某成员仓只含 `.md`/`.json`/`.html` 之类文件，或代码只在 `.worktrees/` 下
+- **THEN** 未收录且普通路径与 `.worktrees/` 两段都确认无源码时 SHALL 按第六条跳过并告警（不移除成员、不阻断激活）；源码只在 `.worktrees/` 时 SHALL 返回 `aggregate_index_member_source_excluded`；仍须有至少一个已覆盖成员，否则按 `aggregate_index_all_members_source_less` 失败
+
 #### Scenario: 混合 LC 跳过无源码成员
 
 - **WHEN** 部分成员被覆盖，其余成员经盘检确认无源码，且其余验收通过
@@ -71,11 +76,42 @@
 - **WHEN** 用户分别打开创建入口、登记入口与聚合初始化卡片
 - **THEN** 三处 SHALL 渲染同一个共用组件产出的同一份范围说明；MUST NOT 出现分叉文案或按入口重复实现
 
+### Requirement: 失败面三段式渲染（问题 / 原因 / 怎么做）（REQ-LAYOUT-04）
+
+失败面 SHALL 按错误码呈现「问题 / 原因 / 怎么做」三段，中文主文案在前、机器码降级到次要行。文案 MUST **取自** `non-interrupt-repository-bootstrap` 的 `REQ-BOOT-10` 登记的规则表，MUST NOT 另抄一份。三段分别由必填非空的 `title_zh: String`、`reason_zh: String`、`action_zh: String` 承载，并一并消费同源 `triage` 与 `machine_line`；布局引导侧只渲染成品，MUST NOT 自补问题、原因或动作的中文模板。布局失败面必须完整三段的码集合 SHALL 是**十个失败码**：既有七码 `aggregate_root_is_git` / `aggregate_root_member_outside_root` / `aggregate_root_member_symlink_escape` / `aggregate_root_nested_worktree` / `aggregate_root_overlap` / `aggregate_index_layout_unsupported` / `aggregate_index_member_coverage_failed`，加第六条的三个补充失败码 `aggregate_index_member_source_excluded` / `aggregate_index_source_scan_incomplete` / `aggregate_index_all_members_source_less`。该集合 MUST 与 `REQ-BOOT-10` 登记的失败码集合严格相等（增删码必须两处同改）；告警码 `aggregate_index_member_source_less` MUST NOT 进入失败码集合，也 MUST NOT 以失败三段渲染。十个码即使无 `action` 字段，仍 MUST 呈现完整三段；缺 `reason_zh` 或缺 copy MUST NOT 作为正常缺省降级验收通过。
+
+第六条规则的文案 SHALL 与新规则措辞一致：布局规则表（`src/product/logical_codebase/failure_copy_table.inc.rs` 的 `LAYOUT_RULES`）第六条 `rule_zh` SHALL 为「聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过」，MUST NOT 继续沿用「每个成员至少要有一个可索引的源码文件」这种把配置仓判成违规的措辞。覆盖失败码的两个成品变体、以及第六条的三个补充失败码，其 `reason_zh` SHALL 都包含该规则依据句；既有「逐码 `reason_zh` 必须包含所属 `rule_zh`」的断言（`src/product/logical_codebase/failure_copy.rs` 的 `layout_rules_cover_seven_external_codes`）SHALL 更新为十个失败码的集合断言并保留逐码断言强度，MUST NOT 放宽、删除或改成只比对码名；`LAYOUT_RULES` 第六条 `codes` SHALL 列出上述四个与第六条相关的失败码（覆盖失败码 + 三个补充失败码），告警码 MUST NOT 混入。旧记录变体（`no indexable code file under included members [...]`）的**事实句与动作句** SHALL 逐字保留（只说覆盖不足、不编造磁盘证据、不责怪用户没放源码、不把用户往忽略规则上引），只把其规则依据句替换为第六条新措辞；新事实变体（`source found on disk; no indexed files under included members [...]`）SHALL 同时给出规则依据与「磁盘上有源码但索引未收录」的事实。
+
+#### Scenario: 失败面给出具体动作
+
+- **WHEN** 成员仓 `frontend` 不在 LC 根目录下
+- **THEN** 失败面 SHALL 给出：问题（`frontend` 不在 LC 根目录下）、原因（成员仓必须是 LC 根目录的直接子目录，一层）、怎么做（把 `frontend` 移到 `<LC根>/frontend/`，不要多套一层目录，然后重试）
+
+#### Scenario: 十个失败码都有完整三段
+
+- **WHEN** 任一条布局失败面呈现（既有七码或第六条的三个补充失败码）
+- **THEN** 三段中文成品均非空、`triage` 与 `machine_line` 同源存在；MUST NOT 出现只有机器码或缺少原因段的呈现
+
+#### Scenario: 码集与登记处一致
+
+- **WHEN** 校验布局规则表的码集合与 `REQ-BOOT-10` 的登记集合
+- **THEN** 两者 SHALL 严格相等（十个失败码）；告警码 `aggregate_index_member_source_less` SHALL 只出现在告警成品登记处，MUST NOT 出现在失败码集合或 `LAYOUT_RULES` 的 `codes` 里
+
+#### Scenario: 第六条规则依据跟随新措辞
+
+- **WHEN** 读取覆盖失败（任一变体）、源码仅在工作树、盘检无法确认或全员无源码的成品
+- **THEN** 四条失败码的 `reason_zh` SHALL 都包含「聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过」这一规则依据；旧记录变体 MUST NOT 因此新增磁盘证据或把用户说成没放源码
+
+#### Scenario: 断言集合随码集更新而不放宽
+
+- **WHEN** 码表新增第六条的三个补充失败码后运行布局码断言
+- **THEN** 断言 SHALL 期待十个失败码的完整集合，并继续逐码校验 `reason_zh` 含所属规则依据；MUST NOT 通过删除断言、放宽为子集比较或跳过新码来迁就实现
+
 ### Requirement: 布局规则表是唯一映射来源（REQ-LAYOUT-05）
 
 六条布局规则及稳定错误码到「用户该怎么摆」的映射 MUST 登记在 `non-interrupt-repository-bootstrap` 的 `REQ-BOOT-08` / `REQ-BOOT-10` / `REQ-BOOT-11` / `REQ-BOOT-12` 共同定义的唯一文案来源中；本能力 MUST NOT 自建第二份规则表或文案表。每条规则 MUST 绑定稳定错误码；既有内部码 SHALL 反查到对应对外稳定码，任一布局错误码 MUST 能映射到六条规则中的一行；系统 MUST NOT 呈现只有错误码、没有动作说明，或缺少原因段的布局失败。
 
-第六条的新增稳定码（`aggregate_index_member_source_excluded` / `aggregate_index_all_members_source_less` / `aggregate_index_source_scan_incomplete`）与第六条的非阻断告警码（`aggregate_index_member_source_less`）SHALL 一并登记在 `REQ-BOOT-10` 指明的同一来源中：三个失败码 SHALL 给出非空的 `title_zh`（问题）、`reason_zh`（原因）、`action_zh`（怎么做）以及 `triage`、`machine_line` 五字段合同（见 `REQ-BOOT-11`）；告警码 SHALL 以独立的轻量成品登记（稳定码 + 非空中文说明），MUST NOT 以失败五字段传输或渲染。MUST NOT 在布局引导侧、投影层或前端维护同义中文文案。
+第六条的新增稳定码（`aggregate_index_member_source_excluded` / `aggregate_index_all_members_source_less` / `aggregate_index_source_scan_incomplete`）与第六条的非阻断告警码（`aggregate_index_member_source_less`）SHALL 一并登记在 `REQ-BOOT-10` 指明的同一来源中：三个失败码 SHALL 给出非空的 `title_zh`（问题）、`reason_zh`（原因）、`action_zh`（怎么做）以及 `triage`、`machine_line` 五字段合同（见 `REQ-BOOT-11`），且 `reason_zh` 含第六条规则依据（见 `REQ-LAYOUT-04`）；告警码 SHALL 以独立的轻量成品登记（稳定码 + 非空中文说明），MUST NOT 以失败五字段传输或渲染。本能力登记的失败码集合 MUST 与 `REQ-BOOT-10` 严格相等（十个失败码，见 `REQ-LAYOUT-04`）。MUST NOT 在布局引导侧、投影层或前端维护同义中文文案。
 
 #### Scenario: 文案单一来源
 

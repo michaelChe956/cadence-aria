@@ -8,9 +8,9 @@
 
 仅在 SDK 未安装或与受支持版本不兼容时 MAY 回退既有 CLI 文件清单路径，且 SHALL 留审计痕迹。识别到的 `codegraph_files_empty_index` 通知或合法空清单 SHALL 在聚合验收层视为所有成员未覆盖；工具执行失败、SDK 协议错误/缺成员、非法 JSON 或截断 MUST NOT 被视为空索引。
 
-**磁盘交叉验收（成员未收录时才做）**：对每个**未被索引收录**的成员，平台 SHALL 在该成员的**主工作目录**内做一次**有界盘检**，用 Aria 自有的源码类型清单判定该成员是否真的没有源码。盘检 SHALL 只按后缀做元数据判定，MUST NOT 读文件内容、推断语言或符号、按仓名/标签/角色判断，也不 MUST 跟随符号链接（符号链接与非普通文件都不算源码）。Aria 源码类型清单 SHALL 由 Aria 自有且 MUST 是 CodeGraph 支持后缀的**真子集**；清单的具体后缀集合 SHALL 在实施时用真实 CodeGraph 逐后缀验证后确定，MUST NOT 依赖上游内部表或内部 API 取得该清单。`.yaml/.yml/.xml/.properties/.tf/.tfvars/.tofu` 一类配置格式与 `.json/.md/.toml/.txt/.csv/.html/.htm` 一类文档格式 SHALL NOT 计入 Aria 源码；是否产出符号 MUST NOT 作为判据。
+**磁盘交叉验收（成员未收录时才做）**：对每个**未被索引收录**的成员，平台 SHALL 在该成员的**主工作目录**内做一次**有界盘检**，用 Aria 自有的源码类型清单判定该成员是否真的没有源码。盘检 SHALL 只按后缀做元数据判定，MUST NOT 读文件内容、推断语言或符号、按仓名/标签/角色判断，也不 MUST 跟随符号链接（符号链接与非普通文件都不算源码）。Aria 源码类型清单 SHALL 由 Aria 自有且 MUST 是 CodeGraph 支持后缀的**真子集**；清单的具体后缀集合 SHALL 在实施时用真实 CodeGraph 逐后缀验证后确定，MUST NOT 依赖上游内部表或内部 API 取得该清单。清单与探针的关系 SHALL 是「保守清单先开工、探针结论回来再增补」：实施 SHALL 先以保守集合（只含确定被 CodeGraph 收录的常见源码后缀）落地盘检，逐后缀探针 MUST NOT 作为开工门禁；探针结论 SHALL 以「增补已登记后缀」的方式落地，MUST NOT 借此放宽「无法确认不等于无源码」的判定口径。`.yaml/.yml/.xml/.properties/.tf/.tfvars/.tofu` 一类配置格式与 `.json/.md/.toml/.txt/.csv/.html/.htm` 一类文档格式 SHALL NOT 计入 Aria 源码；是否产出符号 MUST NOT 作为判据。
 
-盘检 SHALL 复用聚合索引既有的内建排除口径，MUST NOT 另写一份排除表；普通遍历 SHALL 剪枝 `.git/.aria/node_modules/target/build/dist/.worktrees`，且 MUST NOT 模拟 `.gitignore`（普通路径有源码但被忽略仍是真漏收）。`.worktrees/` SHALL 作为独立的第二段诊断：仅当普通路径查完且无源码时才检查 `.worktrees/` 子树。
+盘检 SHALL 复用聚合索引既有的内建排除口径，MUST NOT 另写一份排除表；普通遍历 SHALL 剪枝 `.git/.aria/node_modules/target/build/dist/.worktrees`，且 MUST NOT 模拟 `.gitignore`（普通路径有源码但被忽略仍是真漏收）。11 条内建规则里的 4 条非目录固定名模式（`**/.env`、`**/.env.*`、`**/*credential*`、`**/*secret*`）SHALL 按目录名匹配参与剪枝（例如 `credentials/`、`secret-notes/` 这类目录不进入扫描），MUST NOT 被忽略、被改写成文件级规则或另行放宽。`.worktrees/` SHALL 作为独立的第二段诊断：仅当普通路径查完且无源码时才检查 `.worktrees/` 子树；该入口本身是符号链接时 SHALL 视为「该段无候选」而不跟随，入口不存在时同样 SHALL 视为「该段已完成且无候选」，两种情形都 MUST NOT 被记成盘检失败。
 
 盘检 SHALL 是有界的：根深度 0、上限深度 32；每成员最多访问 20,000 个目录条目，单次验收整批最多 100,000 个条目、整批 2 秒（含 `.worktrees/` 诊断，共享同一计数与同一 deadline）；命中普通路径源码即停止扩散。上限 SHALL 固化为常量并可注入时钟/取消信号以便测试，MUST NOT 依赖真实 sleep。MUST NOT 展开全量路径、读文件内容或为盘检启动 git/CodeGraph 进程。
 
@@ -18,7 +18,7 @@
 
 普通路径有源码 SHALL 报 `aggregate_index_member_coverage_failed`（点名漏收成员，说明磁盘上有源码但索引未收录，并指引检查成员路径与忽略规则后重建；MUST NOT 责怪用户没有放源码）；只在 `.worktrees/` 有源码 SHALL 报 `aggregate_index_member_source_excluded`；盘检无法确认 SHALL 报 `aggregate_index_source_scan_incomplete`（点名无法确认的成员，MUST NOT 宣称该成员没有源码）。多类同时出现时 SHALL 依此顺序选择主码并保留已观察的阻断事实。仅正常路径与 `.worktrees/` 范围均确认无源码的未覆盖成员 MAY 跳过。
 
-**跳过与激活**：有至少一个成员被覆盖、其余未覆盖成员全部确认无源码、且其它验收（排除负查询、代表性检索）成功时，SHALL 激活并在该世代记录被跳过成员；被跳过的成员 SHALL 保留在成员快照里，SHALL NOT 被移出项目成员集合，SHALL 仍可作为 Issue 目标仓。各成员均确认无源码且无任何被覆盖成员时 SHALL 报 `aggregate_index_all_members_source_less`，MUST NOT 发布新 active，MUST NOT 把空索引报成成功。
+**跳过与激活**：有至少一个成员被覆盖、其余未覆盖成员全部确认无源码、且其它验收（排除负查询、代表性检索）成功时，SHALL 激活并在该世代记录被跳过成员；被跳过的成员 SHALL 保留在成员快照里，SHALL NOT 被移出项目成员集合，SHALL 仍可作为 Issue 目标仓。各成员均确认无源码且无任何被覆盖成员时 SHALL 报 `aggregate_index_all_members_source_less`，MUST NOT 发布新 active，MUST NOT 把空索引报成成功。成员**未出现在覆盖判定结果里**（缺该成员的覆盖键）MUST NOT 被当作「已确认无源码」：结论只允许来自逐成员覆盖判定与盘检正证据齐全的成员，缺证据的成员 SHALL 按「无法确认」处理。
 
 索引健康（索引状态不完整、仍有待处理变更、需要重建、文件计数为零）SHALL 以告警留存，MUST NOT 单独阻断激活或代替覆盖证据。
 
@@ -54,7 +54,7 @@
 - **WHEN** 平台执行 `codegraph files --json`
 - **THEN** 只有 `--json` 旗标；MUST NOT 附加未经实测证明可降低载荷的旗标，也不得靠去旗标重试掩盖上游不支持错误
 
-#### Scenario: 真非法 JSON 和已识别空索引不混淆
+#### Scenario: 真非法 JSON 与空索引不改码
 
 - **WHEN** stdout 未截断但确实非法，或上游输出已知空索引提示
 - **THEN** CLI 层 SHALL 分别沿用 `codegraph_files_invalid_json` 和 `codegraph_files_empty_index`；仅后者进入聚合层全员未覆盖的交叉验收，MUST NOT 归为截断
@@ -89,7 +89,7 @@
 - **WHEN** 索引状态异常、仍有待处理变更、需要重建或文件计数为零
 - **THEN** SHALL 留存健康告警，MUST NOT 仅因健康异常阻断激活；若逐成员覆盖也未通过，仍按覆盖规则判定失败
 
-#### Scenario: 回退仍受专用配额与截断码约束
+#### Scenario: 回退路径仍受专用配额与专用截断码约束
 
 - **WHEN** CLI 文件清单回退路径 stdout 被截断
 - **THEN** SHALL 报 `codegraph_files_output_truncated`，MUST NOT 误报非法 JSON 或擅自判为协议不符
@@ -124,6 +124,27 @@
 - **WHEN** 平台为判定成员是否有源码做盘检
 - **THEN** MUST NOT 修改 `codegraph.json` 的 `exclude`、生成 `extensions` 配置、改变 CodeGraph 支持版本或索引范围；MUST NOT 为配置/文档类文件要求被索引
 
+### Requirement: 索引快照与 freshness（REQ-IND-03）
+
+系统 SHALL 在每次 init/sync 前后由 Cadence 采集各成员仓 `git rev-parse HEAD` 与 dirty 状态填充 `AggregateIndexMemberSnapshot`（CodeGraph 不提供 per-member revision API）；按需 sync（AI 用前检查）+ 定时兜底刷新；stale/degraded 状态由 Cadence 对比快照 revision 推断并显式呈现。
+
+**本变更不改变全局漂移判据。** 既有成员漂移判定（成员集合长度、逐成员 revision 与 dirty 布尔；`src/product/logical_codebase/aggregate_index/freshness.rs` 的 `member_evidence_drifted`）SHALL 保持原义：MUST NOT 为 Story 前刷新把它全局改成「任何 dirty 都判 stale」，也 MUST NOT 在这条判据里加入磁盘或源码扫描。Story 生成前的「能确认没变 / 不能确认没变」是**该路径自有**的分支决策，归 `REQ-PLN-18` 拥有；Design、WorkItemPlan 等其它只读规划仍按既有 drift 判据与 last-known-good 语义工作。freshness 评估 MUST NOT 执行源码盘检，MUST NOT 为「跳过成员后来出现源码」做后台轮询。
+
+#### Scenario: 成员主 checkout 被外部更新
+
+- **WHEN** 成员主 checkout 在索引后发生外部提交/切换
+- **THEN** 系统 SHALL 标记索引为 stale（对比快照 revision），规划时明确提示「索引可能过时」；按需 sync 或定时兜底触发刷新
+
+#### Scenario: 快照不可变证据
+
+- **WHEN** 索引建立或刷新
+- **THEN** 系统 SHALL 记录 AggregateIndexMemberSnapshot（member/checkout/revision/included/indexed_at）作为不可变证据，供规划与审计引用
+
+#### Scenario: 全局漂移判据不被 Story 路径改写
+
+- **WHEN** 某成员工作区存在未提交修改，而本次不是 Story 生成（例如打开 Design 或 WorkItemPlan 视图）
+- **THEN** 漂移判定 SHALL 按既有 revision/dirty 口径执行、degraded 仍以 last-known-good 加告警支撑该次规划；MUST NOT 因 Story 路径的「不能确认没变」规则而让这条全局判据新增磁盘扫描或强制停机
+
 ### Requirement: 索引生命周期与故障恢复（REQ-IND-04）
 
 系统 SHALL 提供聚合索引 single-writer 锁、last-known-good 保留、重建失败恢复与 stale/degraded/superseded 状态转换；规划使用冻结快照，不承诺实时。
@@ -132,10 +153,24 @@
 
 REQ-IND-01 的真实漏收、源码仅在被排除的工作树目录、盘检无法确认、全员均确认无源码均属**构建失败**路径：SHALL 记录对应原因与成员，MUST NOT 发布新 active；无 last-known-good 的冷启动不 planning-ready，刷新失败时 SHALL 保留有用的 last-known-good 作只读降级。混合 LC 中确认无源码的成员跳过事实、SDK 不可用的回退痕迹及健康异常 SHALL 作为可审计告警随成功世代留存，MUST NOT 单独阻断激活，MUST NOT 以 `FailureCopy` 传输或渲染，MUST NOT 触发失败通知。
 
+**degraded 的分界（与 `REQ-PLN-18` 一致）**：除 Story 生成之外的**只读规划**（Design、WorkItemPlan、工作区上下文读取等）SHALL 继续以 last-known-good 加可审计告警支撑，MUST NOT 因 degraded 停机，也 MUST NOT 因读取触发自动重建。「必须是最新索引」这条更严的要求**只属于** `REQ-PLN-18` 的 Story 生成前刷新：存在可恢复的 last-known-good 但刷新后仍非 Active 时，Story 生成 SHALL 停在 AI 启动之前（失败原因与恢复动作按 `REQ-PLN-18`）。本变更 MUST NOT 把这条停机语义扩散到其它只读规划路径。
+
+**失败封套的解析唯一出口**：持久化失败封套（`aggregate_index_failed:<code>: <message>` / `aggregate_index_degraded:<code>: <message>`）到稳定码与中文成品的解析 SHALL 只有一个共用入口，HTTP 投影与冷启动 Bootstrap 投影 SHALL 都经它取「内层稳定码 + 原始事实」，MUST NOT 各自用裸消息前缀（如 `warning.contains("<code>")`）判断，MUST NOT 把已登记的失败码（含第六条的三个补充失败码）落成通用 `aggregate_index_failed`。同一封套在两出口 SHALL 得到同一稳定码与同一份三段成品。
+
 #### Scenario: 索引重建失败
 
 - **WHEN** 聚合索引重建或刷新失败
 - **THEN** SHALL 保留 last-known-good 索引并标记 degraded，规划返回可审计告警，不阻塞只读规划
+
+#### Scenario: 只读规划不因 degraded 停机而 Story 生成停机
+
+- **WHEN** 同一逻辑代码库存在 degraded 的 last-known-good，一次请求打开 Design / WorkItemPlan 视图，另一次请求生成 Story
+- **THEN** 前者 SHALL 用 last-known-good 加告警继续；后者 SHALL 按 `REQ-PLN-18` 先尝试恢复并验收，仍非 Active 就停在 AI 启动之前；两处 MUST NOT 混用对方的停机/放行口径
+
+#### Scenario: 冷启动与 HTTP 出口同码同文案
+
+- **WHEN** 一次失败世代的封套内层码是 `aggregate_index_member_source_excluded`、`aggregate_index_source_scan_incomplete` 或 `aggregate_index_all_members_source_less`
+- **THEN** 冷启动 Bootstrap 步骤的失败面 SHALL 给出该内层码与同源三段成品；HTTP 投影对同一封套 SHALL 给出同一码与同一文案；两处 MUST NOT 借裸消息前缀判断，MUST NOT 把该码改写成 `aggregate_index_failed`
 
 #### Scenario: 并发写保护
 
@@ -157,15 +192,71 @@ REQ-IND-01 的真实漏收、源码仅在被排除的工作树目录、盘检无
 - **WHEN** 成员普通路径有源码却漏收、只在工作树有源码、盘检未完成或全员确认无源码
 - **THEN** SHALL 按 REQ-IND-01 的稳定码报告且点名成员；如有 last-known-good 则保留并将其标记 degraded，MUST NOT 伪造 active 或把相应失败事实记成跳过
 
-#### Scenario: 回退痕迹、健康告警与有覆盖的混合 LC 跳过事实不阻断激活
+#### Scenario: 库 API 覆盖不足按构建失败处理
 
-- **WHEN** 通过所有激活验收，且触发了合法 CLI 回退、健康告警或确认跳过无源码成员
+- **WHEN** 库 API 判定某成员目录下没有被索引的文件
+- **THEN** 该成员 SHALL 进入 REQ-IND-01 的磁盘交叉验收：确认无源码则按跳过处理并告警；普通路径有源码/仅工作树有源码/无法确认则按对应稳定码失败；MUST NOT 把「未收录」直接当成功，也 MUST NOT 跳过盘检就判「没有源码」
+
+#### Scenario: 回退痕迹与健康告警不阻断激活
+
+- **WHEN** 通过所有激活验收，且触发了合法 CLI 回退、健康告警，或存在确认跳过的无源码成员
 - **THEN** SHALL 留存告警事实，MUST NOT 因这些事实阻断激活或静默丢弃
 
 #### Scenario: 跳过事实不冒充失败面
 
 - **WHEN** 某可读世代含被跳过的无源码成员
 - **THEN** 该事实 SHALL 以独立告警呈现，MUST NOT 生成对应的 `failure_copy`、MUST NOT 把初始化步骤标为失败、MUST NOT 改变其它代码路径的失败投影
+
+### Requirement: 聚合索引生产触发
+
+逻辑代码库聚合初始化 SHALL 在缺少 active aggregate index 时按冷启动依赖顺序推进：先完成可用的 identity、manifest/checkout、rules/policy 与成员 index 材料，再触发首次 aggregate index 构建。首建准入 MUST NOT 要求一个尚不存在的 active index，也 MUST NOT 通过 GET/规划只读请求隐式启动 provider 或索引。每个步骤的状态、checkpoint、失败原因和合法准备/继续/重试操作 SHALL 可查询；步骤成功后自动推进到下一步骤，最终将可验证的聚合索引置为 active/PlanningReady。
+
+**degraded carve-out**：degraded（有可恢复的 last-known-good）SHALL NOT 被任何只读请求自动重建，只读规划继续以该代加可审计告警支撑。唯一例外是 `REQ-PLN-18` 的 Story 生成前刷新：它 SHALL 先尝试恢复并验收该版本，仍非 Active 就停在 AI 启动之前，不得以「只读投影不阻塞」为由放行 Story 生成。
+
+#### Scenario: 初始化后自动首建
+
+- **WHEN** 聚合初始化成功完成
+- **THEN** 自动触发首次索引构建；首建失败不回滚初始化，索引状态为 missing 附失败原因，可手动重建
+
+#### Scenario: 首建期间漂移
+
+- **WHEN** 首次构建期间成员 HEAD 或 dirty 状态变化
+- **THEN** 该索引记录标记 Failed（而非 stale），避免出现无可读 active 索引
+
+#### Scenario: 规划读时 stale 同步
+
+- **WHEN** 规划上下文解析读取到 stale 索引
+- **THEN** 执行按需同步后继续；degraded 索引不自动重建，仅向规划上下文注入可审计告警；degraded 记录不会被新鲜度评估误报为 active。该条只覆盖只读规划：Story 生成前的刷新按 `REQ-PLN-18` 另行处理，恢复验收后仍非 Active 时停机
+
+#### Scenario: Story 前刷新不改写只读触发边界
+
+- **WHEN** 某 LC 的索引处于 degraded，其它只读规划路径与 Story 生成先后请求
+- **THEN** 只读路径 SHALL 不触发重建、不停机；Story 路径 SHALL 走 `REQ-PLN-18` 的恢复/验收/停机语义；MUST NOT 因 Story 路径的存在让只读路径也被迫重建或停摆
+
+#### Scenario: 手动重建
+
+- **WHEN** 调用 POST /api/projects/{pid}/logical-codebase/aggregate-indexes/rebuild
+- **THEN** 同步执行重建并返回最终记录（前端展示 loading）；同 project 已有重建进行中时返回 409 aggregate_index_rebuild_in_progress
+
+#### Scenario: 构建状态可见
+
+- **WHEN** 构建进行中查询 GET /api/projects/{pid}/logical-codebase/aggregate-indexes/active
+- **THEN** 返回 state=rebuilding（Building 记录先于索引命令持久化）；状态映射覆盖 active/stale/degraded/rebuilding/missing（Failed 有 last-known-good 时呈现 degraded，否则 missing）
+
+#### Scenario: 缺少 active index 的 LC 首建
+
+- **WHEN** 新逻辑代码库已完成身份与成员材料但没有 active aggregate index
+- **THEN** 系统 SHALL 接受首建并按缺失步骤生成成员 index 与 aggregate index，不因 active index 缺失拒绝成员准入，也不要求用户手工 seed
+
+#### Scenario: 首建步骤中断后继续
+
+- **WHEN** 首次 aggregate index 构建或其前置步骤失败
+- **THEN** 系统 SHALL 保留已完成 checkpoint、失败状态及原因；用户从产品操作面点击允许的继续/重试后 SHALL 只执行未完成或安全可重做步骤，完成后自动推进，不重复已完成 provider turn
+
+#### Scenario: GET 仅投影 index 状态
+
+- **WHEN** 客户端查询 active aggregate index、成员 index 或 LC 初始化状态
+- **THEN** 系统 SHALL 返回 missing/rebuilding/failed/degraded/active 等 durable 投影和允许动作，MUST NOT 因查询触发索引命令、provider、checkout 或状态突变
 
 ## ADDED Requirements
 
@@ -175,9 +266,13 @@ REQ-IND-01 的真实漏收、源码仅在被排除的工作树目录、盘检无
 
 被跳过的成员 SHALL 仍参与成员集合、身份、主工作目录、Git revision 与 dirty 的漂移判据，SHALL 仍参与规划指纹与引用巡检；跳过标记 MUST NOT 充当 checkout 可用性或授权判据，MUST NOT 让被跳过的成员变成不可用目标仓。索引纳入状态 MUST NOT 成为 Issue 创建、选仓或目标仓准入的门槛。
 
-对曾被跳过的成员后来出现源码（含只出现在 `.worktrees/` 的源码），非降级世代的 freshness 评估 SHALL 发现需要重新验收并按既有同步机制重跑交叉验收；只有新验收成功后才改变该成员的覆盖事实与新世代告警。
+对曾被跳过的成员后来出现源码（含只出现在 `.worktrees/` 的源码），本能力 **MUST NOT 提供自动发现**：重新判断只发生在**下一次验收/重建**时，SHALL NOT 引入后台扫描、SHALL NOT 在 freshness 评估里盘检、SHALL NOT 轮询磁盘。跳过事实只属于它所在的那一代；下一次验收 SHALL 对每个未覆盖成员重新判定结论，MUST NOT 沿用上一代的跳过事实当作本次结论。触发重新验收的既有通路只有：成员集合或 `membership_revision` 变化、成员 revision/dirty 漂移、手动重建、以及 `REQ-PLN-18` 的 Story 前刷新落到「有变化或不能确认没变」分支（其中「当前世代存在跳过事实」SHALL 归入该分支的保守处理，见 `REQ-PLN-18`）。两次验收之间新增的源码要等下一次触发才被发现，这是本能力已知并接受的时间窗。
 
 只读投影 SHALL 使用同一逻辑代码库的已验收世代事实，MUST NOT 扫磁盘、启动 CodeGraph 或 provider 来补标注。
+
+**提示的来源与匹配口径**：卡片与成员行的跳过提示 SHALL 只从**本次实际被投影的那一份记录**派生（与该响应的 `state` 同源；例如响应投影 degraded 世代，就必须用这个被投影的世代取跳过事实，MUST NOT 另外再选一遍记录）。成员与提示的关联 SHALL 按 **(成员 ID, 当前 Main checkout ID)** 匹配：成员 ID 取快照的 `logical_repository_id`，主 checkout ID 取该成员当前可用 `CheckoutKind::Main` 检出记录的 `checkout_id`（`src/product/logical_codebase/aggregate_index/types.rs` 的 `AggregateIndexMemberSnapshot` 与 `RepositoryCheckoutRecord`）。MUST NOT 按显示名、别名或裸成员 ID 单独匹配。主 checkout 已更换、世代不同、记录缺失或对不上 ⇒ 该成员 SHALL 不出提示，MUST NOT 用旧记录或其它逻辑代码库的记录顶替。
+
+**告警的形状**：卡片与成员列表的跳过提示 SHALL 是结构化对象 `{code, message_zh}`——`code` 为已登记的告警码 `aggregate_index_member_source_less`，`message_zh` 为同源成品文本（卡片按成员列表渲染，成员行按单个成员渲染）。MUST NOT 返回裸中文字符串或只返回成员名。无跳过事实时该字段 SHALL 省略，旧响应（无该字段）MUST NOT 产生提示。
 
 #### Scenario: 历史世代与混合世代可读
 
@@ -194,10 +289,30 @@ REQ-IND-01 的真实漏收、源码仅在被排除的工作树目录、盘检无
 - **WHEN** 选取已跳过但具有有效主检出的成员作为配置变更目标
 - **THEN** 规划 SHALL 保留该成员的成员 ID、checkout、revision 与 dirty 指纹并保持其可用；巡检仍验证成员引用与 checkout 引用，MUST NOT 因跳过隐藏悬挂引用或把跳过本身当悬挂
 
-#### Scenario: 检测已跳过成员新增源码
+#### Scenario: 下次验收重新判断而不是自动发现
 
-- **WHEN** 曾跳过的成员后来在普通路径增加源码，即使 revision 与 dirty 布尔值未变，或出现只在 `.worktrees/` 的源码
-- **THEN** 下次非降级 freshness 评估 SHALL 发现需要重新验收并按既有同步策略重跑交叉验收；只有新验收成功后才改变该成员的覆盖事实与新世代告警
+- **WHEN** 曾跳过的成员后来在普通路径增加源码，即使 revision 与 dirty 布尔值未变；或出现只在 `.worktrees/` 的源码
+- **THEN** 下一次验收/重建（含 Story 前刷新落到同步分支）SHALL 对该成员重新盘检并给出新结论（普通路径源码 ⇒ 覆盖失败码；仅 `.worktrees/` ⇒ 源码被排除码）；只有新验收成功后才改变覆盖事实与告警；本能力 MUST NOT 声称已通过后台扫描或 freshness 盘检即时发现
+
+#### Scenario: 跳过事实不被下一代继承
+
+- **WHEN** 一次新的验收运行，且上一代把某成员记为跳过
+- **THEN** 本次结论 SHALL 来自本次逐成员覆盖判定与本次盘检；MUST NOT 直接沿用上一代的跳过事实作为本次结果
+
+#### Scenario: 提示取自被投影的那一代
+
+- **WHEN** 同一 LC 同时存在 degraded 的 last-known-good 与更新的失败世代，响应因此投影 degraded
+- **THEN** 跳过提示 SHALL 来自那个被投影的 degraded 世代；MUST NOT 来自失败世代、其它世代或另选一遍记录
+
+#### Scenario: 主 checkout 已更换时不沿用旧提示
+
+- **WHEN** 某成员当前可用的 Main checkout 与快照记录的 `checkout_id` 不同，或当前没有可用 Main checkout
+- **THEN** 该成员 SHALL 不出跳过提示；MUST NOT 按显示名、别名或裸成员 ID 把旧世代的提示贴到新 checkout 上
+
+#### Scenario: 提示是结构化告警对象
+
+- **WHEN** 卡片或成员列表返回跳过提示
+- **THEN** 该字段 SHALL 是 `{code, message_zh}` 结构化对象（`code` 为 `aggregate_index_member_source_less`，`message_zh` 非空）；MUST NOT 只返回裸中文串；无跳过事实时字段 SHALL 省略
 
 #### Scenario: 跳过不成为准入门槛
 
