@@ -233,6 +233,9 @@ struct SourceScopeState {
     /// 以 exit 0 输出人读提示而非 JSON 数组。
     files_empty_index_notice: bool,
     queries: BTreeMap<String, serde_json::Value>,
+    /// `codegraph --version` 的实测输出（空串＝源码后缀清单的校准基线
+    /// 1.6.3；单测可改写以模拟版本漂移）。
+    version: String,
 }
 
 impl SourceScopeRunner {
@@ -259,6 +262,11 @@ impl SourceScopeRunner {
 
     fn query_returns(&self, query: &str, value: serde_json::Value) {
         self.state.lock().queries.insert(query.to_string(), value);
+    }
+
+    /// 改写 `codegraph --version` 的实测输出（模拟版本漂移）。
+    fn set_version(&self, version: &str) {
+        self.state.lock().version = version.to_string();
     }
 }
 
@@ -288,7 +296,14 @@ impl BoundedCommandRunner for SourceScopeRunner {
             request.argv.as_slice()
         };
         let stdout = match argv {
-            [version] if version == "--version" => "1.6.2\n".to_string(),
+            [version_arg] if version_arg == "--version" => {
+                // 未显式改写时＝源码后缀清单的校准基线版本（无漂移）。
+                let reported = match state.version.as_str() {
+                    "" => "1.6.3",
+                    other => other,
+                };
+                format!("{reported}\n")
+            }
             [rev_parse, head] if rev_parse == "rev-parse" && head == "HEAD" => match request
                 .working_dir
                 .file_name()
@@ -735,5 +750,62 @@ fn mixed_activation_uses_non_empty_coverage_case() {
     assert_eq!(
         member_snapshot(&record, &fixture.web_checkout).skip_reason,
         Some(AggregateIndexMemberSkipReason::NoSource)
+    );
+}
+
+/// 版本漂移软告警（校准基线一致）：实测 codegraph 版本 == 源码后缀清单的
+/// 校准基线 1.6.3 ⇒ 不记漂移告警，世代照常 Active。
+#[test]
+fn calibrated_codegraph_version_records_no_drift_warning() {
+    let fixture = SourceScopeFixture::new();
+    std::fs::write(fixture.root.join("api/src/A.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(fixture.root.join("web/src/B.rs"), "fn b() {}\n").unwrap();
+    fixture.cli.files_return(["api/src/A.rs", "web/src/B.rs"]);
+    fixture.allow_all_exclusion_queries();
+    fixture.cli.set_version("1.6.3");
+
+    let record = fixture.operation().build("project_0001", 3).unwrap();
+    assert_eq!(record.status, AggregateIndexStatus::Active);
+    let warning = record.warning.clone().unwrap_or_default();
+    assert!(
+        !warning.contains("版本漂移"),
+        "校准基线版本不得触发漂移告警, got: {warning}"
+    );
+}
+
+/// 版本漂移软告警（漂移）：实测 codegraph 版本 ≠ 校准基线 ⇒ 记一条可审计
+/// warning（含实测版本、校准基线版本与复校准指引），**不阻断索引构建**
+/// （世代仍 Active）。
+#[test]
+fn codegraph_version_drift_records_auditable_warning_without_blocking() {
+    let fixture = SourceScopeFixture::new();
+    std::fs::write(fixture.root.join("api/src/A.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(fixture.root.join("web/src/B.rs"), "fn b() {}\n").unwrap();
+    fixture.cli.files_return(["api/src/A.rs", "web/src/B.rs"]);
+    fixture.allow_all_exclusion_queries();
+    fixture.cli.set_version("1.7.0");
+
+    let record = fixture.operation().build("project_0001", 3).unwrap();
+    assert_eq!(
+        record.status,
+        AggregateIndexStatus::Active,
+        "版本漂移只记软告警，不得阻断索引构建"
+    );
+    let warning = record.warning.clone().unwrap_or_default();
+    assert!(
+        warning.contains("版本漂移"),
+        "必须留下可审计的版本漂移告警, got: {warning}"
+    );
+    assert!(
+        warning.contains("1.7.0"),
+        "告警须含实测 codegraph 版本, got: {warning}"
+    );
+    assert!(
+        warning.contains("1.6.3"),
+        "告警须含源码后缀清单的校准基线版本, got: {warning}"
+    );
+    assert!(
+        warning.contains("复校准"),
+        "告警须含复校准指引, got: {warning}"
     );
 }
