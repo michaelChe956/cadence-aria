@@ -326,6 +326,279 @@ mod aggregate_index_tests {
         );
     }
 
+    /// 片4B（REQ-BOOT-10 / REQ-IND-04）：冷启动投影的失败面必须经**产品层
+    /// 唯一封套解析入口**取「内层稳定码 + 带点名的三段成品」，与 HTTP 出口
+    /// 同码同文案。旧实现用 `warning.contains("<code>")` 裸前缀判断，三个
+    /// 补充失败码会被压成通用 `aggregate_index_failed`。
+    fn seed_failed_index_with_warning(
+        paths: &ProductAppPaths,
+        lc_id: &str,
+        record_id: &str,
+        warning: &str,
+    ) {
+        let store = AggregateIndexStore::for_lc(paths.clone(), lc_id);
+        store
+            .create(
+                "project_0001",
+                AggregateIndexRecord::building(
+                    record_id.to_string(),
+                    "project_0001".to_string(),
+                    2,
+                    Vec::new(),
+                    chrono::Utc::now().to_rfc3339(),
+                ),
+            )
+            .unwrap();
+        store
+            .mark_status(
+                "project_0001",
+                record_id,
+                AggregateIndexStatus::Failed,
+                Some(warning.to_string()),
+            )
+            .unwrap();
+    }
+
+    /// 投影 `aggregate_index_active` 步并取它的失败载体（失败步必有 failure）。
+    fn projected_aggregate_failure(
+        paths: &ProductAppPaths,
+        lc_id: &str,
+    ) -> (LogicalCodebaseBootstrapStepStatus, BootstrapFailure) {
+        let projection = LogicalCodebaseBootstrapProjector::new(paths.clone())
+            .project("project_0001", lc_id)
+            .unwrap();
+        let step = projection
+            .steps
+            .iter()
+            .find(|step| step.step == LogicalCodebaseBootstrapStep::AggregateIndexActive)
+            .unwrap();
+        let failure = step.failure.clone().expect("aggregate index failure detail");
+        (step.status, failure)
+    }
+
+    /// 红测试 #1（片4B）：源码只在被排除的工作树目录里（第六条补充失败码）
+    /// ⇒ 冷启动必须外露**自己的**稳定码，不得落通用 `aggregate_index_failed`。
+    #[test]
+    fn aggregate_source_excluded_projects_dedicated_reason_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        seed_failed_index_with_warning(
+            &paths,
+            &lc_id,
+            "aggregate_index_source_excluded_0001",
+            "aggregate_index_failed:aggregate_index_member_source_excluded: member api has Aria \
+             sources only under .worktrees/; included members [api]",
+        );
+
+        let (status, failure) = projected_aggregate_failure(&paths, &lc_id);
+        assert_eq!(status, LogicalCodebaseBootstrapStepStatus::Failed);
+        assert_eq!(
+            failure.reason_code, "aggregate_index_member_source_excluded",
+            "补充失败码必须原样外露，不得落成 aggregate_index_failed"
+        );
+        let copy = failure.copy.as_ref().expect("失败面必须带同源成品文案");
+        assert_eq!(copy.machine_line, "aggregate_index_member_source_excluded");
+        assert!(!copy.title_zh.trim().is_empty());
+        assert!(!copy.reason_zh.trim().is_empty());
+        assert!(!copy.action_zh.trim().is_empty());
+        // 点名：封套事实里的成员名必须进原因段。
+        assert!(
+            copy.reason_zh.contains("api"),
+            "成员名必须进原因段：{}",
+            copy.reason_zh
+        );
+    }
+
+    /// 红测试 #2（片4B）：盘检无法确认（第六条补充失败码）⇒ 冷启动外露
+    /// 自己的稳定码，且**不得**宣称该成员没有源码（文案取自同一张码表）。
+    #[test]
+    fn aggregate_scan_incomplete_projects_dedicated_reason_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        seed_failed_index_with_warning(
+            &paths,
+            &lc_id,
+            "aggregate_index_scan_incomplete_0001",
+            "aggregate_index_failed:aggregate_index_source_scan_incomplete: scan budget \
+             exhausted for member api; included members [api]",
+        );
+
+        let (status, failure) = projected_aggregate_failure(&paths, &lc_id);
+        assert_eq!(status, LogicalCodebaseBootstrapStepStatus::Failed);
+        assert_eq!(
+            failure.reason_code, "aggregate_index_source_scan_incomplete",
+            "补充失败码必须原样外露，不得落成 aggregate_index_failed"
+        );
+        let copy = failure.copy.as_ref().expect("失败面必须带同源成品文案");
+        assert_eq!(copy.machine_line, "aggregate_index_source_scan_incomplete");
+        assert!(!copy.title_zh.trim().is_empty());
+        assert!(!copy.reason_zh.trim().is_empty());
+        assert!(!copy.action_zh.trim().is_empty());
+        assert!(
+            copy.reason_zh.contains("api"),
+            "成员名必须进原因段：{}",
+            copy.reason_zh
+        );
+    }
+
+    /// 红测试 #3（片4B）：全员确认无源码（第六条补充失败码）⇒ 冷启动外露
+    /// 自己的稳定码。
+    #[test]
+    fn aggregate_all_members_source_less_projects_dedicated_reason_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        seed_failed_index_with_warning(
+            &paths,
+            &lc_id,
+            "aggregate_index_all_source_less_0001",
+            "aggregate_index_failed:aggregate_index_all_members_source_less: no Aria source \
+             under any included member; included members [api, web]",
+        );
+
+        let (status, failure) = projected_aggregate_failure(&paths, &lc_id);
+        assert_eq!(status, LogicalCodebaseBootstrapStepStatus::Failed);
+        assert_eq!(
+            failure.reason_code, "aggregate_index_all_members_source_less",
+            "补充失败码必须原样外露，不得落成 aggregate_index_failed"
+        );
+        let copy = failure.copy.as_ref().expect("失败面必须带同源成品文案");
+        assert_eq!(copy.machine_line, "aggregate_index_all_members_source_less");
+        assert!(!copy.title_zh.trim().is_empty());
+        assert!(!copy.reason_zh.trim().is_empty());
+        assert!(!copy.action_zh.trim().is_empty());
+        assert!(
+            copy.reason_zh.contains("api"),
+            "成员名必须进原因段：{}",
+            copy.reason_zh
+        );
+    }
+
+    /// 红测试 #4（片4B · F2 点名守卫）：同一封套下，冷启动投影的成品与
+    /// **共享产品层入口**（`failure_copy::describe_envelope`）逐字一致，
+    /// 且成员名**没有**在冷启动出口丢掉。
+    #[test]
+    fn bootstrap_projection_matches_shared_envelope_entry() {
+        use crate::product::logical_codebase::failure_copy::{describe_code, describe_envelope};
+
+        let envelope = "aggregate_index_failed:aggregate_index_member_coverage_failed: \
+             no indexable code file under included members [gray-config, msha-sdk]; each included \
+             member needs at least 1 indexable code file";
+        let fact = "no indexable code file under included members [gray-config, msha-sdk]; \
+             each included member needs at least 1 indexable code file";
+
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        seed_failed_index_with_warning(
+            &paths,
+            &lc_id,
+            "aggregate_index_shared_entry_0001",
+            envelope,
+        );
+
+        let (status, failure) = projected_aggregate_failure(&paths, &lc_id);
+        assert_eq!(status, LogicalCodebaseBootstrapStepStatus::Failed);
+        let copy = failure.copy.as_ref().expect("失败面必须带同源成品文案");
+
+        let (shared_code, shared_copy) =
+            describe_envelope(envelope).expect("共享入口必须能解析该封套");
+        assert_eq!(shared_code, "aggregate_index_member_coverage_failed");
+        assert_eq!(failure.reason_code, shared_code);
+        assert_eq!(copy.title_zh, shared_copy.title_zh);
+        assert_eq!(copy.reason_zh, shared_copy.reason_zh);
+        assert_eq!(copy.action_zh, shared_copy.action_zh);
+        assert_eq!(copy.machine_line, shared_copy.machine_line);
+
+        // 点名守卫：成员名必须在冷启动出口的成品里。
+        assert!(
+            copy.reason_zh.contains("gray-config"),
+            "冷启动出口不得丢掉成员点名：{}",
+            copy.reason_zh
+        );
+        assert!(
+            copy.reason_zh.contains("msha-sdk"),
+            "冷启动出口不得丢掉成员点名：{}",
+            copy.reason_zh
+        );
+        // 对照：不经封套入口（无 subject）的查表丢点名 ⇒ 本用例不是靠
+        // 「两边都丢点名」通过的。
+        let control = describe_code("aggregate_index_member_coverage_failed", Some(fact));
+        assert!(
+            !control.reason_zh.contains("gray-config")
+                && !control.reason_zh.contains("msha-sdk"),
+            "对照入口不应带点名：{}",
+            control.reason_zh
+        );
+    }
+
+    /// 红测试 #5（片4B）：裸前缀判断已删除——正文里偶然出现某个失败码的
+    /// 历史告警**不得**被当成该失败码（旧实现按 `contains` 猜码）。
+    #[test]
+    fn bootstrap_does_not_match_failure_codes_by_bare_prefix() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        seed_failed_index_with_warning(
+            &paths,
+            &lc_id,
+            "aggregate_index_bare_prefix_0001",
+            "aggregate_index_failed: abort before member scan: \
+             aggregate_index_member_coverage_failed phase never started",
+        );
+
+        let (status, failure) = projected_aggregate_failure(&paths, &lc_id);
+        assert_eq!(status, LogicalCodebaseBootstrapStepStatus::Failed);
+        assert_eq!(
+            failure.reason_code, "aggregate_index_failed",
+            "正文里出现的失败码不得被裸前缀匹配成专用码"
+        );
+    }
+
+    /// 红测试 #6（片4B）：历史记录（非封套形态的旧告警）仍渲染旧文案——
+    /// 通用码 + 同一张码表里的成品，不因改用封套入口而变样。
+    #[test]
+    fn bootstrap_legacy_warning_keeps_generic_code_and_copy() {
+        use crate::product::logical_codebase::failure_copy::describe_code;
+
+        let warning = "codegraph_version_mismatch: expected 1.6.0, got 1.6.1";
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let lc_id = create_project_and_lc(&paths, &temp.path().join("aggregate-root"));
+        seed_failed_index_with_warning(
+            &paths,
+            &lc_id,
+            "aggregate_index_legacy_warning_0001",
+            warning,
+        );
+
+        let (status, failure) = projected_aggregate_failure(&paths, &lc_id);
+        assert_eq!(status, LogicalCodebaseBootstrapStepStatus::Failed);
+        assert_eq!(failure.reason_code, "aggregate_index_failed");
+        let expected = describe_code("aggregate_index_failed", Some(warning));
+        let copy = failure.copy.as_ref().expect("失败面必须带同源成品文案");
+        assert_eq!(copy.title_zh, expected.title_zh);
+        assert_eq!(copy.reason_zh, expected.reason_zh);
+        assert_eq!(copy.action_zh, expected.action_zh);
+        assert_eq!(copy.machine_line, expected.machine_line);
+    }
+
+    /// 红测试 #7（片4B）：冷启动投影源码里不得再有裸前缀失败码判断
+    /// （`warning.contains("<code>")`）——契约要求两出口都经唯一解析入口。
+    #[test]
+    fn bootstrap_projector_source_has_no_bare_prefix_failure_matching() {
+        let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/product/logical_codebase/bootstrap_projector.inc.rs");
+        let source = std::fs::read_to_string(&source_path)
+            .expect("冷启动投影源码必须可读（源码守卫用）");
+        assert!(
+            !source.contains(".contains(\"aggregate_index_"),
+            "冷启动投影不得用裸前缀 contains 猜失败码"
+        );
+    }
+
     // Task 2（aggregate-policy-root-publication）：桩等待谓词专用测试。
     // 按既有 .inc 拆分先例（tests_parts）把本主题测试拆入独立 part,
     /// 政策漂移只允许一个可执行动作：重发生成新 revision。
