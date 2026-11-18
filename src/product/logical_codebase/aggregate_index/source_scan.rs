@@ -1123,4 +1123,37 @@ mod tests {
             MemberSourceVerdict::Unknown
         );
     }
+
+    /// 24：被跟踪源码文件所在目录不可读 ⇒ 无法确认，不得判「无源码」。
+    /// `git ls-files --cached` 直读 index（不需要目录可读）仍会列出该文件，
+    /// 但进程 stat 得到 EACCES——证据不足必须落 `Unknown`（契约：无法确认
+    /// MUST NOT 等同于无源码）。
+    #[cfg(unix)]
+    #[test]
+    fn scan_reports_unknown_when_tracked_source_dir_is_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        init_git_repo(root);
+        write_file(root, "src/lib.rs");
+        git_add(root, &["src/lib.rs"]);
+        let visibility = GitVisibleFiles::production();
+        let src_dir = root.join("src");
+        // 目录 0o000：git 仍从 index 列出被跟踪文件；stat 因 EACCES 失败。
+        fs::set_permissions(&src_dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let visible = visibility.visible_files(root).unwrap();
+        let mut budget = SourceScanBudget::new_batch();
+        let verdict = scan_member_source(root, &visibility, &mut budget);
+        // 无论结论如何都先恢复目录权限，保证 TempDir 清理能删除目录内文件。
+        fs::set_permissions(&src_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            visible.contains(&PathBuf::from("src/lib.rs")),
+            "fixture premise broken: git must still list the tracked file, got {visible:?}"
+        );
+        assert_eq!(
+            verdict, MemberSourceVerdict::Unknown,
+            "unreadable directory is insufficient evidence, not NoSource"
+        );
+    }
 }
