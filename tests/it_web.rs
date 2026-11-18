@@ -119,6 +119,8 @@ pub(crate) async fn create_repository_and_wait(
 
 #[path = "support/aggregate_index_fixture.rs"]
 mod aggregate_index_fixture;
+#[path = "it_web/aggregate_index_source_scope.rs"]
+mod aggregate_index_source_scope;
 #[path = "it_web/candidate_attempt_metrics_api.rs"]
 mod candidate_attempt_metrics_api;
 #[path = "it_web/evidence_query.rs"]
