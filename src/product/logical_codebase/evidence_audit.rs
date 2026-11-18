@@ -324,4 +324,44 @@ mod tests {
         sequences.sort_unstable();
         assert_eq!(sequences, vec![1, 2, 3, 4, 5]);
     }
+
+    // ---- 片8A：not_searched_reason 可选字段（纯加法）的向后兼容断言 ----
+
+    /// 既有审计 JSON（无 `not_searched_reason` 字段）必须仍可反序列化——
+    /// 新字段缺省 None，形状向后兼容。
+    #[test]
+    fn audit_record_without_not_searched_reason_still_deserializes() {
+        let legacy = serde_json::json!({
+            "attempt_id": ATTEMPT_ID,
+            "role": "coder(role_self_reported)",
+            "query": "usedByWeb",
+            "hit_count": 1,
+            "result_chars": 120,
+            "snapshot_refs": ["web/src/app.ts"],
+            "budget_remaining": 119_880,
+            "timestamp": "2026-08-14T00:00:00Z",
+        });
+        let parsed: EvidenceAuditRecord = serde_json::from_value(legacy)
+            .expect("legacy audit JSON without not_searched_reason must deserialize");
+        assert_eq!(parsed.attempt_id, ATTEMPT_ID);
+        assert_eq!(parsed.not_searched_reason, None);
+    }
+
+    /// 带 `not_searched_reason` 的记录可序列化往返（Some 语义保留）。
+    #[test]
+    fn audit_record_with_not_searched_reason_round_trips() {
+        let mut with_reason = record("usedByWeb", "2026-08-14T00:00:00Z");
+        with_reason.not_searched_reason = Some("aggregate_index_target_scope_skipped".to_string());
+        let serialized = serde_json::to_value(&with_reason).expect("serialize");
+        assert_eq!(
+            serialized["not_searched_reason"],
+            "aggregate_index_target_scope_skipped"
+        );
+        let parsed: EvidenceAuditRecord =
+            serde_json::from_value(serialized).expect("round trip deserializes");
+        assert_eq!(
+            parsed.not_searched_reason.as_deref(),
+            Some("aggregate_index_target_scope_skipped")
+        );
+    }
 }
