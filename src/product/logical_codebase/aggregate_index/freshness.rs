@@ -197,11 +197,10 @@ impl StoryIndexFreshness for AggregateIndexFreshnessService {
         // 「没有任何可读世代」映射为分支 1 的入口条件，读坏/歧义原样上抛。
         match self.store.active_required(project_id) {
             Ok(record) => Ok(Some(record)),
-            Err(AggregateIndexError::Failed { code, .. })
-                if code == "aggregate_index_active_missing" =>
-            {
-                Ok(None)
-            }
+            Err(AggregateIndexError::Failed {
+                code: "aggregate_index_active_missing",
+                ..
+            }) => Ok(None),
             Err(error) => Err(error),
         }
     }

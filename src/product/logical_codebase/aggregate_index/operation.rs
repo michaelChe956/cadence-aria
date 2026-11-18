@@ -617,7 +617,7 @@ impl AggregateIndexOperation {
             .iter()
             .zip(member_names.iter())
             .filter(|(_, name)| acceptance.skipped_members.contains(name))
-            .map(|((_, checkout), _)| checkout.checkout_id.clone())
+            .map(|((_, checkout), _)| checkout.checkout_id)
             .collect();
         for snapshot in record.member_snapshots.iter_mut() {
             if skipped_checkout_ids.contains(&snapshot.checkout_id) {
@@ -1032,7 +1032,6 @@ fn codegraph_version_drift_warning(observed: &str) -> Option<String> {
 /// 五个失败构造函数（design D3）：message 必须含 `included members [`，
 /// 供 `failure_copy.rs` 的 `subject_from_message` 抽成员名；中文成品只在
 /// 码表（`failure_copy_table.inc.rs`），这里只写机器事实。
-
 /// 漏收：普通路径 git 可见范围内有 Aria 源码，索引却未收录。复用覆盖
 /// 失败码；`source found on disk;` 事实前缀选择码表的磁盘事实成品变体
 /// （MUST NOT 说用户没放源码）。
