@@ -3,7 +3,7 @@ use axum::extract::{Path, State};
 use serde::Serialize;
 use std::collections::HashMap;
 
-use super::aggregate_index::projected_record;
+use super::aggregate_index::{is_current_main_checkout, projected_record, skipped_member_names};
 use super::support::{
     default_logical_codebase_id, product_app_paths, product_store_api_error, resolve_lc_authority,
 };
@@ -15,12 +15,8 @@ use crate::product::logical_codebase::aggregate_index::{
 use crate::product::logical_codebase::failure_copy::{
     MEMBER_SOURCE_LESS_CODE, SourceLessAlert, member_source_less_member_copy,
 };
-use crate::product::logical_codebase::types::{
-    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
-};
-use crate::product::logical_codebase::{
-    LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
-};
+use crate::product::logical_codebase::types::CodebaseMemberRecord;
+use crate::product::logical_codebase::{LogicalCodebaseStore, LogicalRepositoryId, MemberStatus};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::state::WebAppState;
 
@@ -106,17 +102,14 @@ fn list_logical_codebase_members_for_lc(
     Ok(Json(LogicalCodebaseMembersResponse { members }))
 }
 
-/// 该 LC 当前被投影的那一代聚合索引记录（durable 记录，无则 `None`）。
+/// 该 LC 的 durable 世代记录（按 `updated_at` / `aggregate_index_id` 降序）。
 ///
-/// 与卡片投影共用唯一世代选择规则（片5 `projected_record`）：本函数只负责
-/// 读记录 + 排序（`updated_at` / `aggregate_index_id` 降序），**选择**一律
-/// 交给 `projected_record`，不得自写「Active 优先」等第二套规则（P8/R4）。
-/// 读记录失败 ⇒ `None`（降级为空，不报错、不猜）。
-fn projected_generation(
+/// 只读盘上已有记录：读不到 ⇒ 空集（降级为空，不报错、不猜）。
+fn generations(
     paths: &ProductAppPaths,
     project_id: &str,
     logical_codebase_id: &str,
-) -> Option<AggregateIndexRecord> {
+) -> Vec<AggregateIndexRecord> {
     let mut records = AggregateIndexStore::for_lc(paths.clone(), logical_codebase_id)
         .records(project_id)
         .unwrap_or_default();
@@ -127,12 +120,15 @@ fn projected_generation(
             .cmp(&left.updated_at)
             .then_with(|| right.aggregate_index_id.cmp(&left.aggregate_index_id))
     });
-    projected_record(&records).cloned()
+    records
 }
 
 /// 逐仓结构化标注（REQ-MRE-01）：被投影世代里「经盘检确认无源码」的成员，
-/// 按（成员 ID，**当前**可用的 Main checkout ID）双键匹配快照才贴标
-/// （口径与卡片投影一致：不按显示名/别名/裸成员 ID 推断）。
+/// 按（成员 ID，**当前**可用的 Main checkout ID）双键匹配快照才贴标。
+///
+/// 口径**全部复用卡片投影的共享实现**（片5 `projected_record` /
+/// `skipped_member_names` / `is_current_main_checkout`）：不得在本文件另写
+/// 一套「谁算被跳过」的判定，避免两处漂移。
 ///
 /// 只读既有 durable 记录与成员/检出记录：不盘检、不启动 CodeGraph、不写状态。
 /// 世代缺失 / 无跳过事实 / 快照 checkout 已更换 / 记录读不到 ⇒ 不标注。
@@ -143,55 +139,40 @@ fn source_less_alerts(
     members: &[CodebaseMemberRecord],
 ) -> HashMap<LogicalRepositoryId, SourceLessAlert> {
     let mut alerts = HashMap::new();
-    let Some(record) = projected_generation(paths, project_id, logical_codebase_id) else {
+    let records = generations(paths, project_id, logical_codebase_id);
+    // 世代选择与卡片投影同一规则（`projected_record`）：不得自写「Active 优先」。
+    let Some(projected) = projected_record(&records) else {
         return alerts;
     };
+    // 共享口径：被跳过的成员名单（成员/检出读不到 ⇒ 空集，不报错）。
+    let skipped = skipped_member_names(paths, project_id, logical_codebase_id, Some(projected))
+        .unwrap_or_default();
+    if skipped.is_empty() {
+        return alerts;
+    }
+    // 精确到成员行：快照上的跳过事实 + 该成员当前可用的 Main 检出（共享判定）。
     let store = LogicalCodebaseStore::for_lc(paths.clone(), logical_codebase_id);
-    for snapshot in record
-        .member_snapshots
-        .iter()
-        .filter(|snapshot| snapshot.skip_reason.is_some())
-    {
-        let Some(member) = members
-            .iter()
-            .find(|member| member.logical_repository_id == snapshot.logical_repository_id)
-        else {
-            continue;
-        };
-        if !is_current_main_checkout(&store, project_id, member, snapshot.checkout_id) {
+    for member in members {
+        if !skipped.iter().any(|alias| alias == &member.alias) {
             continue;
         }
-        alerts
-            .entry(member.logical_repository_id)
-            .or_insert_with(|| SourceLessAlert {
+        let skipped_by_snapshot = projected.member_snapshots.iter().any(|snapshot| {
+            snapshot.logical_repository_id == member.logical_repository_id
+                && snapshot.skip_reason.is_some()
+                && is_current_main_checkout(&store, project_id, member, snapshot.checkout_id)
+        });
+        if !skipped_by_snapshot {
+            continue;
+        }
+        alerts.insert(
+            member.logical_repository_id,
+            SourceLessAlert {
                 code: MEMBER_SOURCE_LESS_CODE.to_string(),
                 message_zh: member_source_less_member_copy(&member.alias),
-            });
+            },
+        );
     }
     alerts
-}
-
-/// 快照的 checkout 是否仍是该成员「当前可用的 Main 检出」（双键匹配口径）。
-///
-/// 与卡片投影同一口径：快照 checkout 仍挂在成员 `checkout_ids` 上，且检出
-/// 记录本身是 Main + Available 且属于该成员。检出记录读不到 ⇒ 不算
-/// （不得给换过检出的成员贴旧标）。
-fn is_current_main_checkout(
-    store: &LogicalCodebaseStore,
-    project_id: &str,
-    member: &CodebaseMemberRecord,
-    checkout_id: RepositoryCheckoutId,
-) -> bool {
-    member.checkout_ids.contains(&checkout_id)
-        && store
-            .load_checkout(project_id, checkout_id)
-            .ok()
-            .flatten()
-            .is_some_and(|checkout| {
-                checkout.kind == CheckoutKind::Main
-                    && checkout.availability == CheckoutAvailability::Available
-                    && checkout.logical_repository_id == member.logical_repository_id
-            })
 }
 
 fn validate_project_id(project_id: &str) -> ApiResult<()> {

@@ -316,7 +316,7 @@ fn failure_copy_from_warning(warning: Option<&str>) -> Option<FailureCopyDto> {
 /// 匹配口径（M4/C7）：按（成员 ID，**当前**可用的 Main checkout ID）双键
 /// 对上快照才贴标，不按显示名/别名/裸成员 ID；顺序按快照顺序
 /// （= manifest 成员顺序）。成员存储读不到 ⇒ 降级为空集（不猜、不报错）。
-fn skipped_member_names(
+pub(crate) fn skipped_member_names(
     paths: &crate::product::app_paths::ProductAppPaths,
     project_id: &str,
     logical_codebase_id: &str,
@@ -354,7 +354,7 @@ fn skipped_member_names(
 
 /// 快照的 checkout 是否仍是该成员「当前可用的 Main 检出」（双键匹配）；
 /// 检出记录读不到或已不可用 ⇒ 不算（不得给换过检出的成员贴旧标）。
-fn is_current_main_checkout(
+pub(crate) fn is_current_main_checkout(
     store: &LogicalCodebaseStore,
     project_id: &str,
     member: &CodebaseMemberRecord,
