@@ -210,7 +210,7 @@ impl Grants {
     fn lock_inner(&self) -> io::Result<MutexGuard<'_, GrantsInner>> {
         self.inner
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "授权登记簿已损坏"))
+            .map_err(|_| io::Error::other("授权登记簿已损坏"))
     }
 }
 
@@ -287,7 +287,7 @@ pub(crate) async fn approve_local(request_id: &str) -> io::Result<()> {
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "终端确认超时"))?
-    .map_err(|_| io::Error::new(io::ErrorKind::Other, "读取终端输入失败"))??;
+    .map_err(|_| io::Error::other("读取终端输入失败"))??;
     if answer.trim() != "y" {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,

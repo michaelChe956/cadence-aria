@@ -714,10 +714,10 @@ fn discover_kimi(discovery: &mut Discovery<'_>) -> Vec<Group> {
 
 /// Codex 原生会话 ID：只认 `session_meta` 记录的 `payload.id` / `payload.session_id`。
 fn codex_session_id(record: &Value) -> Option<String> {
-    if let Some(kind) = record.get("type").and_then(Value::as_str) {
-        if kind != "session_meta" {
-            return None;
-        }
+    if let Some(kind) = record.get("type").and_then(Value::as_str)
+        && kind != "session_meta"
+    {
+        return None;
     }
     let payload = record.get("payload")?;
     let id = payload

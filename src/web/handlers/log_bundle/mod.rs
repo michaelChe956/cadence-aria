@@ -110,7 +110,7 @@ async fn authorize(
 ) -> Response {
     let origin = match check_source(&state, &headers, &uri) {
         Ok(origin) => origin,
-        Err(response) => return response,
+        Err(rejection) => return source_rejection_response(rejection),
     };
     let ticket = match grants.issue(&origin) {
         Ok(ticket) => ticket,
@@ -137,7 +137,7 @@ async fn download(
 ) -> Response {
     let origin = match check_source(&state, &headers, &uri) {
         Ok(origin) => origin,
-        Err(response) => return response,
+        Err(rejection) => return source_rejection_response(rejection),
     };
     let Json(request) = match payload {
         Ok(payload) => payload,
@@ -258,42 +258,50 @@ fn authorize_failure_response(error: &std::io::Error) -> Response {
     )
 }
 
+/// 来源校验失败：只表达原因，响应体在边界处统一构造。
+#[derive(Debug, Clone, Copy)]
+enum SourceRejection {
+    Unavailable,
+    Untrusted,
+}
+
 /// 来源校验：精确受信 Origin + 外部必须 HTTPS + Host 与 Origin 同源。
 ///
-/// 返回归一化后的 Origin（`scheme://host:port`），失败时返回静态 403 响应。
-fn check_source(state: &WebAppState, headers: &HeaderMap, uri: &Uri) -> Result<String, Response> {
+/// 返回归一化后的 Origin（`scheme://host:port`），失败时返回拒绝原因，
+/// 响应体由 `source_rejection_response` 统一构造。
+fn check_source(
+    state: &WebAppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Result<String, SourceRejection> {
     let Some(auth) = state.api_auth.as_ref() else {
-        return Err(error_response(
-            StatusCode::FORBIDDEN,
-            "auth_unavailable",
-            "source validation is not configured",
-        ));
+        return Err(SourceRejection::Unavailable);
     };
     let raw_origin = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default();
     let Ok(origin) = parse_trusted_origin(raw_origin) else {
-        return Err(untrusted_origin_response());
+        return Err(SourceRejection::Untrusted);
     };
     if !auth.origin_allowed(&origin.origin) {
-        return Err(untrusted_origin_response());
+        return Err(SourceRejection::Untrusted);
     }
     // 拒绝外部明文 HTTP：只放行明确的回环主机（本地开发/本机使用）。
     if !origin.https && !is_loopback_host(&authority_host(&origin.authority)) {
-        return Err(untrusted_origin_response());
+        return Err(SourceRejection::Untrusted);
     }
     // Host 与 Origin 同源（不采信 X-Forwarded-*）。
     let Some(host) = request_host(headers, uri) else {
-        return Err(untrusted_origin_response());
+        return Err(SourceRejection::Untrusted);
     };
     if !auth.host_allowed(&host) {
-        return Err(untrusted_origin_response());
+        return Err(SourceRejection::Untrusted);
     }
     let host_host = authority_host(&host);
     let origin_host = authority_host(&origin.authority);
     if host_host != origin_host && !is_loopback_host(&host_host) {
-        return Err(untrusted_origin_response());
+        return Err(SourceRejection::Untrusted);
     }
     Ok(origin.origin)
 }
@@ -313,10 +321,10 @@ fn request_host(headers: &HeaderMap, uri: &Uri) -> Option<String> {
 
 /// 从 authority（`host:port`）取主机部分（IPv6 保留方括号形式）。
 fn authority_host(authority: &str) -> String {
-    if let Some(stripped) = authority.strip_prefix('[') {
-        if let Some((host, _tail)) = stripped.split_once(']') {
-            return format!("[{host}]");
-        }
+    if let Some(stripped) = authority.strip_prefix('[')
+        && let Some((host, _tail)) = stripped.split_once(']')
+    {
+        return format!("[{host}]");
     }
     match authority.rsplit_once(':') {
         Some((host, _port)) => host.to_string(),
@@ -353,6 +361,18 @@ fn untrusted_origin_response() -> Response {
         "untrusted_origin",
         "request origin not allowed",
     )
+}
+
+/// 来源校验失败到静态 403 响应的映射（错误码与文案与既往完全一致）。
+fn source_rejection_response(rejection: SourceRejection) -> Response {
+    match rejection {
+        SourceRejection::Unavailable => error_response(
+            StatusCode::FORBIDDEN,
+            "auth_unavailable",
+            "source validation is not configured",
+        ),
+        SourceRejection::Untrusted => untrusted_origin_response(),
+    }
 }
 
 /// JSON 响应（禁止缓存）。

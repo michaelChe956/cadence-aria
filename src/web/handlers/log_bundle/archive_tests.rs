@@ -314,11 +314,11 @@ fn provider_traces_use_tail_window_and_never_leak_raw_lines() {
     };
     let mut wire_a: Vec<u8> = Vec::new();
     // 窗口外巨行（超过 8 MiB 尾窗，也超过单行上限）：不得以任何形式进入包内。
-    wire_a.extend(std::iter::repeat(b'J').take(8 * 1024 * 1024 + 100));
+    wire_a.extend(vec![b'J'; 8 * 1024 * 1024 + 100]);
     wire_a.push(b'\n');
     wire_a.extend_from_slice(valid("2026-11-18T01:00:00Z", "CANARY-IN-WINDOW-A").as_bytes());
     wire_a.extend_from_slice(b"{oops\n");
-    wire_a.extend(std::iter::repeat(b'B').take(archive::MAX_LINE_BYTES + 64));
+    wire_a.extend(vec![b'B'; archive::MAX_LINE_BYTES + 64]);
     wire_a.push(b'\n');
     wire_a.extend_from_slice(valid("2026-11-18T02:00:00Z", "CANARY-IN-WINDOW-B").as_bytes());
     // 尾行无换行：仍是一条完整记录，应被投影。
@@ -387,9 +387,9 @@ fn provider_traces_use_tail_window_and_never_leak_raw_lines() {
     ] {
         assert!(!text.contains(canary), "包内不得出现原文/canary: {canary}");
     }
-    let j_probe: String = std::iter::repeat('J').take(4096).collect();
+    let j_probe: String = "J".repeat(4096);
     assert!(!text.contains(&j_probe), "窗口外巨行不得进入包内");
-    let b_probe: String = std::iter::repeat('B').take(4096).collect();
+    let b_probe: String = "B".repeat(4096);
     assert!(!text.contains(&b_probe), "超限巨行不得进入包内");
 
     let manifest = manifest_of(&members);
