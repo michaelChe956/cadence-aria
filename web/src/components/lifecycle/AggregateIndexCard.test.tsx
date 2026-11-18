@@ -252,6 +252,60 @@ describe("AggregateIndexCard", () => {
     expect(screen.getAllByRole("button", { name: "重建索引" })).toHaveLength(1);
   });
 
+  it("renders the source-less alert line below the index summary", () => {
+    renderCard({
+      state: "active",
+      revision: 7,
+      indexed_at: "2026-08-18T00:00:00Z",
+      source_less_alert: {
+        code: "aggregate_index_member_source_less",
+        message_zh: "已跳过无源码成员：gray-config、msha-sdk。",
+      },
+    });
+
+    const alert = screen.getAllByTestId("aggregate-index-source-less-alert");
+    expect(alert).toHaveLength(1);
+    expect(alert[0]).toHaveTextContent("已跳过无源码成员：gray-config、msha-sdk。");
+  });
+
+  it("renders no alert line when the response carries no source-less alert", () => {
+    renderCard({
+      state: "active",
+      revision: 7,
+      indexed_at: "2026-08-18T00:00:00Z",
+    });
+
+    expect(screen.queryByTestId("aggregate-index-source-less-alert")).toBeNull();
+  });
+
+  it("keeps the source-less alert and the failure face side by side", () => {
+    renderCard({
+      state: "active",
+      revision: 7,
+      indexed_at: "2026-08-18T00:00:00Z",
+      source_less_alert: {
+        code: "aggregate_index_member_source_less",
+        message_zh: "已跳过无源码成员：gray-config、msha-sdk。",
+      },
+      failure_copy: {
+        title_zh: "成员仓里没有可索引的代码文件",
+        reason_zh: "被纳入的成员 gray-config 下找不到可索引的源码文件。",
+        action_zh: "把真实源码放进成员仓。",
+        triage: "environment",
+        machine_line: "aggregate_index_member_coverage_failed",
+      },
+    });
+
+    expect(screen.getAllByTestId("aggregate-index-source-less-alert")).toHaveLength(
+      1,
+    );
+    expect(screen.getAllByTestId("aggregate-index-failure")).toHaveLength(1);
+    expect(
+      screen.queryByTestId("aggregate-index-evidence-unavailable"),
+    ).toBeNull();
+    expect(screen.getAllByRole("button", { name: "重建索引" })).toHaveLength(1);
+  });
+
   it("renders the failure face for a degraded index", () => {
     render(
       <AggregateIndexCard
