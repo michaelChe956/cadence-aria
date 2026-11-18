@@ -150,6 +150,7 @@ pub(crate) use coding::build_plan_final_confirm;
 #[cfg(test)]
 pub(crate) use coding::scope::CodingAttemptRoutePath;
 pub use evidence_query::evidence_query;
+pub(crate) mod log_bundle;
 pub use health::{health, runtime_info};
 pub use identity_repair::{get_lc_identity_repair, post_lc_identity_repair_action};
 pub use image_create::{

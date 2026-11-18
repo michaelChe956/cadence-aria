@@ -39,6 +39,7 @@ pub fn build_web_router_with_evidence(state: WebAppState, evidence_enabled: bool
             "/api/providers/{target}/expose",
             post(handlers::post_provider_expose),
         )
+        .merge(handlers::log_bundle::routes())
         .route("/api/runtime-info", get(handlers::runtime_info))
         .route(
             "/api/providers/diagnostics",

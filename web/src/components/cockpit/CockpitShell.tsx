@@ -12,6 +12,7 @@ import type { JSX } from "react";
 import { createPortal } from "react-dom";
 import { useLocation, useRouter } from "@tanstack/react-router";
 import { Settings } from "lucide-react";
+import { CockpitLogBundleButton } from "./CockpitLogBundleButton";
 import {
   useWorkspaceSessionObservers,
   type WorkspaceSessionObserverResult,
@@ -565,15 +566,18 @@ function CockpitShellContent({
   // 入口默认由 shell 兜底浮层渲染；页面登记顶栏宿主后改由 portal 注入宿主，
   // 避免 fixed 浮层压住 spec 抽屉（Artifact 审核/计划审批面板）。
   const settingsTrigger = (
-    <button
-      type="button"
-      data-testid="cockpit-settings-trigger"
-      aria-label="驾驶舱设置"
-      onClick={() => setSettingsOpen(true)}
-      className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] shadow-md transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
-    >
-      <Settings aria-hidden="true" className="h-4 w-4" />
-    </button>
+    <div className="inline-flex items-center gap-2">
+      <button
+        type="button"
+        data-testid="cockpit-settings-trigger"
+        aria-label="驾驶舱设置"
+        onClick={() => setSettingsOpen(true)}
+        className="inline-flex h-11 w-11 cursor-pointer items-center justify-center rounded-xl border border-[var(--aria-line-strong)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] shadow-md transition-colors duration-200 hover:bg-[var(--aria-panel-muted)] hover:text-[var(--aria-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)] focus-visible:ring-offset-2"
+      >
+        <Settings aria-hidden="true" className="h-4 w-4" />
+      </button>
+      <CockpitLogBundleButton />
+    </div>
   );
 
   // 沉浸模式（知识库详情页路由）：只渲染页面自身——全局浮动件一律不渲染

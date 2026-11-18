@@ -28,6 +28,7 @@ base64 = "0.22"
 axum = { version = "0.8", features = ["ws", "multipart"] }
 chrono = { version = "0.4.44", features = ["clock", "serde"] }
 command-group = { version = "5.0", features = ["with-tokio"] }
+flate2 = "1.1.9"
 futures-util = "0.3"
 hex = "0.4.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
@@ -37,14 +38,17 @@ pulldown-cmark = "0.13.3"
 png = "0.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 rust-embed = { version = "8", features = ["debug-embed"] }
+rustix = { version = "1.1.4", features = ["fs", "process"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
+tar = { version = "0.4.46", default-features = false }
+tempfile = "3.27.0"
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
@@ -58,7 +62,6 @@ unicode-normalization = "0.1.25"
 [dev-dependencies]
 mockito = "1"
 parking_lot = "0.12"
-tempfile = "3.27.0"
 tokio-tungstenite = "0.29"
 
 # 开发/测试构建：用更轻的调试信息以控制 target 体积
