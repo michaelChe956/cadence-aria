@@ -60,6 +60,12 @@ struct Group {
     members: Vec<PathBuf>,
 }
 
+/// 一次探头的结果：文件头若干行与同一文件句柄上的修改时间。
+struct ProbeResult {
+    values: Vec<Value>,
+    modified: Option<SystemTime>,
+}
+
 /// 各 provider 的静态 warning 文本（同一 provider 内去重，不含路径或原始内容）。
 #[derive(Clone, Copy)]
 struct ProviderWarnings {
@@ -180,14 +186,20 @@ impl<'a> Discovery<'a> {
     }
 
     /// 读取文件开头的若干行并解析为 JSON（只取头部，不搬运全文）。
-    fn probe(&mut self, relative: &Path, max_lines: usize) -> Vec<Value> {
+    ///
+    /// 文件打不开时返回 `None`（调用方记“不可读”）；头部解析不出内容时返回空 `values`。
+    fn probe(&mut self, relative: &Path, max_lines: usize) -> Option<ProbeResult> {
         if self.probed_files >= MAX_PROBED_FILES || self.probed_bytes >= MAX_TOTAL_PROBE_BYTES {
             self.truncated = true;
-            return Vec::new();
+            return None;
         }
         let Ok(mut file) = self.root.file(relative) else {
-            return Vec::new();
+            return None;
         };
+        let modified = file
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok());
         let allowance = MAX_PROBE_BYTES_PER_FILE.min(MAX_TOTAL_PROBE_BYTES - self.probed_bytes);
         self.probed_files += 1;
         let mut buffer = vec![0u8; allowance];
@@ -216,7 +228,7 @@ impl<'a> Discovery<'a> {
                 Err(_) => break,
             }
         }
-        values
+        Some(ProbeResult { values, modified })
     }
 
     fn warn(&mut self, message: &'static str) {
@@ -447,12 +459,15 @@ fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
                         continue;
                     }
                     let path = day_path.join(name);
-                    let header = discovery.probe(&path, MAX_HEADER_LINES);
-                    let Some(id) = header.iter().find_map(codex_session_id) else {
+                    let Some(probe) = discovery.probe(&path, MAX_HEADER_LINES) else {
+                        discovery.warn(spec.unreadable_file);
+                        continue;
+                    };
+                    let Some(id) = probe.values.iter().find_map(codex_session_id) else {
                         discovery.warn(spec.header_missing);
                         continue;
                     };
-                    let Some(modified) = discovery.modified(&path) else {
+                    let Some(modified) = probe.modified else {
                         discovery.warn(spec.unreadable_file);
                         continue;
                     };
@@ -491,12 +506,15 @@ fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
                 continue;
             }
             let path = cwd_path.join(name);
-            let header = discovery.probe(&path, 1);
-            let Some(id) = header.first().and_then(pi_session_id) else {
+            let Some(probe) = discovery.probe(&path, 1) else {
+                discovery.warn(spec.unreadable_file);
+                continue;
+            };
+            let Some(id) = probe.values.first().and_then(pi_session_id) else {
                 discovery.warn(spec.header_missing);
                 continue;
             };
-            let Some(modified) = discovery.modified(&path) else {
+            let Some(modified) = probe.modified else {
                 discovery.warn(spec.unreadable_file);
                 continue;
             };
