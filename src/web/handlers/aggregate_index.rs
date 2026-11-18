@@ -231,10 +231,7 @@ fn read_active_projection(
     // 「重建中」是用户正在行动，不判索引不可用（重建成功后会重建库目录）。
     // 失败面优先于证据面：failure_copy 已给出可操作的重建动作时不再补
     // evidence_copy，同屏只出现一个动作面（前端按同一优先级渲染）。
-    if evidence_unavailable
-        && response.state != "rebuilding"
-        && response.failure_copy.is_none()
-    {
+    if evidence_unavailable && response.state != "rebuilding" && response.failure_copy.is_none() {
         response.evidence_copy = Some(FailureCopyDto::from(
             &crate::product::logical_codebase::failure_copy::describe_code(
                 "evidence_index_unavailable",
