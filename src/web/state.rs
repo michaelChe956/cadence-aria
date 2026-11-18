@@ -160,6 +160,8 @@ pub struct WebAppState {
     pub capability_revalidate_service: Option<
         Arc<crate::product::logical_codebase::provider_capability_revalidate::ProviderCapabilityRevalidateService>,
     >,
+    /// 跨仓证据检索的 CLI runner 覆盖点（测试注入）；None ⇒ 生产默认。
+    pub evidence_command_runner: Option<Arc<dyn BoundedCommandRunner>>,
 }
 
 impl WebAppState {
@@ -237,6 +239,7 @@ impl WebAppState {
             logical_gateway_factory: Some(logical_gateway_factory),
             api_auth: None,
             capability_revalidate_service: None,
+            evidence_command_runner: None,
         };
         state.aggregate_initialization_dependencies = Some(
             crate::web::handlers::AggregateInitializationDependencies::production(&state)
@@ -254,6 +257,13 @@ impl WebAppState {
         >,
     ) -> Self {
         self.capability_revalidate_service = Some(service);
+        self
+    }
+
+    /// 注入跨仓证据检索的 CLI runner（it_web 用计数 runner 断言「未检索」
+    /// 路径零调用）；未注入时证据 handler 走生产默认 runner。
+    pub fn with_evidence_command_runner(mut self, runner: Arc<dyn BoundedCommandRunner>) -> Self {
+        self.evidence_command_runner = Some(runner);
         self
     }
 

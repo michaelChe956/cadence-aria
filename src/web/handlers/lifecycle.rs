@@ -570,10 +570,17 @@ pub async fn generate_story_specs(
             // Omission remains the existing AI-undetermined draft behavior. When
             // a fake/gateway test supplies targets, validate them against the
             // fresh authoritative selection before persisting the spec.
-            let resolved = PlanningContextResolver::new(app_paths.clone())
-                .build_with_fresh_index(&project_id, &issue_id, &[])
-                .await
-                .map_err(product_store_api_error)?;
+            // Story 专用刷新：复用聚合初始化依赖里的同一个 Arc<AggregateIndexOperation>，
+            // 不另建 operation（AggregateIndexOperation 无 Clone）。
+            let index = state.aggregate_initialization_dependencies().index.clone();
+            let service = std::sync::Arc::new(
+                crate::product::logical_codebase::aggregate_index::AggregateIndexFreshnessService::from_shared(index),
+            );
+            let resolved =
+                PlanningContextResolver::with_story_freshness_service(app_paths.clone(), service)
+                    .build_with_fresh_index_for_story(&project_id, &issue_id, &[])
+                    .await
+                    .map_err(story_planning_api_error)?;
             let involved_repository_ids = request.involved_repository_ids.unwrap_or_default();
             validate_requested_aggregate_scope(
                 &resolved.snapshot.effective_member_ids,
@@ -637,6 +644,36 @@ pub async fn generate_story_specs(
         story_specs: vec![story_dto],
         workspace_session: workspace_session_dto(session, automation),
     }))
+}
+
+/// Story 刷新失败的专用映射（REQ-PLN-18）：外层码固定 `aggregate_index_unavailable`
+/// （⇒ HTTP 422），内层稳定码进 `details.reason_code`；中文成品只来自失败码表。
+/// 仅 `Store`（非刷新失败）沿用既有产品映射，刷新失败绝不落入其 catch-all 500。
+fn story_planning_api_error(
+    error: crate::product::logical_codebase::planning_context_resolver::StoryPlanningError,
+) -> ApiError {
+    use crate::product::logical_codebase::failure_copy::{describe_fact, render_detail};
+    use crate::product::logical_codebase::planning_context_resolver::StoryPlanningError;
+    match error {
+        StoryPlanningError::Store(error) => product_store_api_error(error),
+        StoryPlanningError::Refresh { code, detail } => {
+            let copy = describe_fact(&code, &detail);
+            // 原始事实脱敏后才进诊断（与 aggregate_index_api_error 同口径）。
+            let diagnostic = crate::cross_cutting::diagnostic_redaction::sanitize_diagnostic(
+                &detail,
+                &crate::cross_cutting::diagnostic_redaction::RedactionContext::default(),
+            );
+            ApiError::runtime(
+                "aggregate_index_unavailable",
+                render_detail(&copy, None),
+                serde_json::json!({
+                    "reason_code": code,
+                    "detail": diagnostic,
+                    "copy": copy,
+                }),
+            )
+        }
+    }
 }
 
 pub async fn generate_design_specs(
