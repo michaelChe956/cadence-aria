@@ -2,7 +2,7 @@
 
 ### Requirement: 聚合索引建立（REQ-IND-01）
 
-系统 SHALL 在非 git 聚合根建立一份统一 CodeGraph 索引（exact version 钉定 v1.5.0；本变更不调整既有版本准入）。CodeGraph 按目录递归扫描而非按 git 边界识别成员（spike 2 实测非 git 目录 `not-a-repo` 同被纳入），主路径不依赖 `includeIgnored`（D3 非 git 父目录）。索引验收 SHALL 包含成员覆盖交叉验收及非成员/`.worktrees`/`.aria`/构建产物负查询不命中，而非仅 DB 文件存在。代表性查询 SHALL 验证覆盖范围的实际可用性；覆盖多个源码仓时验证代表性跨子仓查询。不以硬编码的代表符号或至少两个被覆盖成员作为运行时激活前置。
+系统 SHALL 在非 git 聚合根建立一份统一 CodeGraph 索引；既有版本准入不变（现行为 `>=1.6.0,<2.0.0`）。CodeGraph 按目录递归扫描而非按 git 边界识别成员（spike 2 实测非 git 目录 `not-a-repo` 同被纳入），主路径不依赖 `includeIgnored`（D3 非 git 父目录）。索引验收 SHALL 包含成员覆盖交叉验收及非成员/`.worktrees`/`.aria`/构建产物负查询不命中，而非仅 DB 文件存在。代表性查询 SHALL 验证覆盖范围的实际可用性；覆盖多个源码仓时验证代表性跨子仓查询。不以硬编码的代表符号或至少两个被覆盖成员作为运行时激活前置。
 
 **成员覆盖判定 SHALL 走逐成员目录级查询**：平台 SHALL 经 CodeGraph 库 API（`CodeGraph.open(root)` + 逐成员 `hasFilesUnder(member)`）判定每个成员是否被覆盖，MUST NOT 使用 `codegraph files --json` 全量清单作为常规路径（载荷随规模线性增长；用户现场 3.1 GB 索引对应约 230 MB 清单）。目录边界 MUST 按组件而非裸字符串前缀匹配：`member-al` MUST NOT 命中 `member-alpha`。排除性查询 SHALL 保持既有 CLI 机制与判定口径。
 
@@ -293,7 +293,7 @@ REQ-IND-01 的真实漏收、源码仅在被排除的工作树目录、盘检无
 
 被跳过的成员 SHALL 仍参与成员集合、身份、主工作目录、Git revision 与 dirty 的漂移判据，SHALL 仍参与规划指纹与引用巡检；跳过标记 MUST NOT 充当 checkout 可用性或授权判据，MUST NOT 让被跳过的成员变成不可用目标仓。索引纳入状态 MUST NOT 成为 Issue 创建、选仓或目标仓准入的门槛。
 
-对曾被跳过的成员后来出现源码（含只出现在 `.worktrees/` 的源码），本能力 **MUST NOT 提供自动发现**：重新判断只发生在**下一次验收/重建**时，SHALL NOT 引入后台扫描、SHALL NOT 在 freshness 评估里盘检、SHALL NOT 轮询磁盘。跳过事实只属于它所在的那一代；下一次验收 SHALL 对每个未覆盖成员重新判定结论，MUST NOT 沿用上一代的跳过事实当作本次结论。触发重新验收的既有通路只有：成员集合或 `membership_revision` 变化、成员 revision/dirty 漂移、手动重建、以及 `REQ-PLN-18` 的 Story 前刷新落到「有变化或不能确认没变」分支（该分支由「成员/主工作目录/提交变化」或「上次或本次有未提交修改」触发，**不含**「当前世代存在跳过事实」这一条件，见 `REQ-PLN-18`）。两次验收之间新增的源码要等下一次触发才被发现，这是本能力已知并接受的时间窗。
+对曾被跳过的成员后来出现源码（含只出现在 `.worktrees/` 的源码），本能力 **MUST NOT 提供自动发现**：重新判断只发生在**下一次验收/重建**时，SHALL NOT 引入后台扫描、SHALL NOT 在 freshness 评估里盘检、SHALL NOT 轮询磁盘。跳过事实只属于它所在的那一代；下一次验收 SHALL 对每个未覆盖成员重新判定结论，MUST NOT 沿用上一代的跳过事实当作本次结论。触发重新验收的既有通路只有：成员集合或 `membership_revision` 变化、成员 revision/dirty 漂移、手动重建、以及 `REQ-PLN-18` 的 Story 前刷新落到「有变化或不能确认没变」分支（触发条件以 `REQ-PLN-18` 为准，**不含**「当前世代存在跳过事实」）。两次验收之间新增的源码要等下一次触发才被发现，这是本能力已知并接受的时间窗。
 
 只读投影 SHALL 使用同一逻辑代码库的已验收世代事实，MUST NOT 扫磁盘、启动 CodeGraph 或 provider 来补标注。
 

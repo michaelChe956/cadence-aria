@@ -9,14 +9,14 @@
 刷新 SHALL 走三个分支，且 SHALL 依据可核验的证据选择分支：
 
 1. **无可用索引** ⇒ 走既有的**首次建库**流程（前提是成员登记与主工作目录已就绪），而不是每次新建 Issue 都从头建库。此分支只适用于「该逻辑代码库没有任何可读世代」；若世代记录存在但读不出来、归属不明或彼此矛盾，SHALL 走既有失败规则报错，MUST NOT 当作「没有索引」静默触发首建。
-2. **能确认没变** ⇒ 复用当前这一版索引。判定 SHALL 同时满足：成员集合未变、主工作目录身份未变、Git 提交未变、**上次与本次都没有未提交修改**。「没有未提交修改」SHALL 以该成员主工作目录的 `git status --porcelain` 为准（**被 `.gitignore` 忽略的文件不参与判定**）。判定 SHALL NOT 附加「当前世代不含跳过成员」这类条件。
-3. **有变化或不能确认没变** ⇒ 实际执行增量同步并**重新验收**。成员集合、主工作目录身份或 Git 提交变了、上次或本次显示有未提交修改，SHALL 归入本分支——revision 相同不能证明工作区文件未变，所以「上次与本次都显示有未提交修改」MUST NOT 跳过同步（两次都脏时即使提交号相同也必须同步，否则同一个 dirty 布尔会掩盖两次检查之间的改动）。上次更新失败留下的旧版本 MUST NOT 直接当作最新版，SHALL 先尝试恢复并验收。归入本分支 SHALL NOT 以「当前世代含跳过成员」为条件：被 `.gitignore` 忽略的文件对 CodeGraph 与 git **同时不可见**（增量同步也收录不到），不构成可见范围内的变化；git 可见范围内的任何变化已由「成员/主工作目录/提交变化」与「脏 ⇒ 同步」两条覆盖。
+2. **能确认没变** ⇒ **仅当 published 世代的 `status` 为 `Active`**，且以下比对全部通过，才复用该世代：成员集合未变、主工作目录身份未变、Git 提交未变、**上次与本次都没有未提交修改**。「没有未提交修改」SHALL 以该成员主工作目录的 `git status --porcelain` 为准（**被 `.gitignore` 忽略的文件不参与判定**）。判定 SHALL NOT 附加「当前世代不含跳过成员」这类条件。
+3. **有变化或不能确认没变** ⇒ 实际执行增量同步并**重新验收**。成员集合、主工作目录身份或 Git 提交变了、上次或本次显示有未提交修改，SHALL 归入本分支——revision 相同不能证明工作区文件未变，所以「上次与本次都显示有未提交修改」MUST NOT 跳过同步（两次都脏时即使提交号相同也必须同步，否则同一个 dirty 布尔会掩盖两次检查之间的改动）。published 世代的 `status` 为 **`Degraded` 或 `Stale`**，或 **`current_snapshots` 采集失败**，也一律走分支 3：SHALL 尝试恢复/同步并重新验收，仍非 `Active` 就停在 AI 启动前。上次更新失败留下的旧版本 MUST NOT 直接当作最新版。归入本分支 SHALL NOT 以「当前世代含跳过成员」为条件：被 `.gitignore` 忽略的文件对 CodeGraph 与 git **同时不可见**（增量同步也收录不到），不构成可见范围内的变化；git 可见范围内的变化仍按前述比对判定。
 
-若初始化或另一次重建正在更新同一份索引，系统 SHALL 等待并复核其结果，MUST NOT 并行写两份；拿到锁并不意味着要跳过复核——锁只串行化写入，调用方 SHALL 在拿到结果后按本次实际发布的记录判断成功与否，MUST NOT 用仍带 dirty 的重新评估结果否定刚刚成功的验收。
+若初始化或另一次重建正在更新同一份索引，系统 SHALL 等待并复核其结果，MUST NOT 并行写两份；拿到锁并不意味着要跳过复核——锁只串行化写入，调用方 SHALL 以本次实际验收并发布的记录是否为 `Active` 判断成功与否，MUST NOT 用仍带 dirty 的重新评估结果否定刚刚成功的验收。
 
-刷新或验收失败时，系统 SHALL **停在本次生成之前**（AI 不启动），说明原因并允许重试；SHALL 保留已有 Issue、Story 与上次成功的索引，MUST NOT 拿旧索引冒充最新继续生成。「最新」指本次检查或同步时**本地成员主工作目录**里的代码，系统 MUST NOT 主动拉取远端，MUST NOT 承诺生成过程中后来保存的改动已经收录。
+刷新或验收失败、或恢复/同步并重新验收后仍非 `Active` 时，系统 SHALL **停在本次生成之前**（AI 不启动），说明原因并允许重试；SHALL 保留已有 Issue、Story 与上次成功的索引，MUST NOT 拿旧索引冒充最新继续生成。「最新」指本次检查或同步时**本地成员主工作目录**里的代码，系统 MUST NOT 主动拉取远端，MUST NOT 承诺生成过程中后来保存的改动已经收录。
 
-**失败面要求**：刷新或验收失败 SHALL 以**稳定码 + 同源中文成品**呈现，MUST NOT 只抛通用存储错误。稳定码 SHALL 优先沿用失败封套的内层码（`aggregate_index_member_coverage_failed`、`aggregate_index_member_source_excluded`、`aggregate_index_source_scan_incomplete`、`aggregate_index_all_members_source_less` 或其它已登记码）；封套解析不出稳定码时 SHALL 用已登记的 `aggregate_index_unavailable`。中文成品 SHALL 取自 `non-interrupt-repository-bootstrap` 的 `REQ-BOOT-10` 登记的同一张码表。生成入口 SHALL 把该失败映射为带稳定码与成品文本的运行时错误（HTTP `details.copy` 同构），MUST NOT 落成通用 500 的 `product_store_error`（`src/web/handlers/support_parts/product_store_error.inc.rs` 的兜底分支会把 `ProductStoreError::Io` 映射成「product store operation failed」）。
+**失败面要求**：刷新未通过 SHALL 以**稳定码 + 同源中文成品**呈现，MUST NOT 只抛通用存储错误。稳定码 SHALL 优先沿用失败封套的内层码（`aggregate_index_member_coverage_failed`、`aggregate_index_member_source_excluded`、`aggregate_index_source_scan_incomplete`、`aggregate_index_all_members_source_less` 或其它已登记码）；封套解析不出稳定码时 SHALL 用已登记的 `aggregate_index_unavailable`。中文成品 SHALL 取自 `non-interrupt-repository-bootstrap` 的 `REQ-BOOT-10` 登记的同一张码表。生成入口 SHALL 把该失败映射为带稳定码与成品文本的运行时错误（HTTP `details.copy` 同构），MUST NOT 落成通用 500 的 `product_store_error`（`src/web/handlers/support_parts/product_store_error.inc.rs` 的兜底分支会把 `ProductStoreError::Io` 映射成「product store operation failed」）。
 
 刷新通过后，本次 Story SHALL 记录其参考的索引版本，沿用规划上下文的既有索引标识字段。
 
@@ -32,7 +32,7 @@
 
 #### Scenario: 代码干净且未变时复用
 
-- **WHEN** 用户请求生成 Story，成员集合、主工作目录与 Git 提交均未变，上次与本次都没有未提交修改（`git status --porcelain` 为空）
+- **WHEN** 用户请求生成 Story，published 世代的 `status` 为 `Active`，成员集合、主工作目录与 Git 提交均未变，上次与本次都没有未提交修改（`git status --porcelain` 为空）
 - **THEN** 系统 SHALL 复用当前这一版索引，MUST NOT 触发一次增量同步；即使当前世代含跳过成员，判定结果也 SHALL 相同（不得以「含跳过成员」为由强制同步）
 
 #### Scenario: 两次都显示有未提交修改时必须同步
@@ -42,7 +42,7 @@
 
 #### Scenario: 被忽略的文件不参与变更检测
 
-- **WHEN** 成员工作区只有被 `.gitignore` 忽略的文件发生变化（`git status --porcelain` 为空），成员集合与 Git 提交未变
+- **WHEN** published 世代的 `status` 为 `Active`，成员集合、主工作目录身份与 Git 提交均未变，上次与本次 `git status --porcelain` 均为空，成员工作区只有被 `.gitignore` 忽略的文件发生变化
 - **THEN** 系统 SHALL 判定为「能确认没变」并复用当前这一版索引，MUST NOT 因忽略文件触发增量同步；被忽略的文件同样 MUST NOT 被算作漏收（见 `REQ-IND-01`）
 
 #### Scenario: 成员或提交变化时同步并重新验收
@@ -64,6 +64,11 @@
 
 - **WHEN** 该 LC 只有 degraded 的 last-known-good，本次请求是生成 Story
 - **THEN** 系统 SHALL 先尝试恢复并验收；仍非 Active 就停在 AI 启动之前并给出稳定码与成品；同一时刻的 Design / WorkItemPlan 读取 SHALL 仍以 last-known-good 加告警继续
+
+#### Scenario: 非 Active 或当前快照采集失败时不复用
+
+- **WHEN** 用户请求生成 Story，published 世代的 `status` 为 `Degraded` 或 `Stale`（即使成员证据看起来未变），或者 `current_snapshots` 采集失败（即使 published 世代为 `Active`）
+- **THEN** 系统 SHALL 走分支 3，尝试恢复/同步并重新验收，MUST NOT 直接复用；验收结果仍非 `Active` 时 SHALL 停在 AI 启动前，给出稳定码与同源三段成品。
 
 #### Scenario: 并发刷新不并行写两份
 
