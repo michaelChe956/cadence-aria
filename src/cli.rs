@@ -104,6 +104,15 @@ where
 {
     let args: Vec<String> = args.into_iter().map(Into::into).collect();
     match args.as_slice() {
+        [command, subcommand, id] if command == "diagnostics" && subcommand == "approve" => {
+            crate::web::handlers::log_bundle::permit::approve_local(id)
+                .await
+                .map(|()| CliOutput::Text("已批准本次日志下载".to_string()))
+                .map_err(|error| CliError {
+                    code: "diagnostics_approve_failed".to_string(),
+                    message: format!("诊断日志下载批准失败：{error}"),
+                })
+        }
         [command, subcommand, rest @ ..] if command == "task" && subcommand == "run" => {
             let options = parse_task_run_args(rest).map_err(task_run_error)?;
             let change_id = options
