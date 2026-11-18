@@ -39,6 +39,8 @@ export function AggregateIndexCard({
   const isRebuilding = rebuilding || index.state === "rebuilding";
   // 索引不可用时的成品（问题/原因/怎么做/机器码）由后端渲染，前端不另写中文。
   const evidenceCopy = index.evidence_copy ?? null;
+  // 最新一代聚合索引失败时的成品同样由后端渲染，前端不另写中文。
+  const failureCopy = index.failure_copy ?? null;
 
   // 「重建索引」按钮只有一处：索引不可用时随失败面一起给（失败面自带上动作，
   // 用户不必回到面板顶部找入口），其余状态留在标题行。
@@ -81,10 +83,35 @@ export function AggregateIndexCard({
             {STATE_LABELS[index.state]}
           </span>
         </div>
-        {evidenceCopy ? null : rebuildButton}
+        {evidenceCopy || failureCopy ? null : rebuildButton}
       </div>
 
-      {evidenceCopy ? (
+      {failureCopy ? (
+        <div
+          data-testid="aggregate-index-failure"
+          className="mt-2 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-xs text-[var(--aria-danger)]"
+        >
+          <p data-testid="aggregate-index-failure-title" className="font-semibold">
+            {failureCopy.title_zh}
+          </p>
+          <p className="mt-1">原因：{failureCopy.reason_zh}</p>
+          <p className="mt-1">怎么做：{failureCopy.action_zh}</p>
+          <p className="mt-1 font-mono opacity-80">
+            机器码：{failureCopy.machine_line}
+          </p>
+          {index.warning ? (
+            <p
+              data-testid="aggregate-index-warning"
+              className="mt-1 break-words font-mono opacity-80"
+            >
+              诊断：{index.warning}
+            </p>
+          ) : null}
+          <div className="mt-2">{rebuildButton}</div>
+        </div>
+      ) : null}
+
+      {evidenceCopy && !failureCopy ? (
         <div
           data-testid="aggregate-index-evidence-unavailable"
           className="mt-2 rounded-md border border-[var(--aria-danger)] bg-[var(--aria-danger-soft)] px-3 py-2 text-xs text-[var(--aria-danger)]"
@@ -118,8 +145,11 @@ export function AggregateIndexCard({
         </div>
       ) : null}
 
-      {index.warning ? (
-        <div className="mt-2 rounded-md border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-xs text-[var(--aria-warning)]">
+      {index.warning && !failureCopy ? (
+        <div
+          data-testid="aggregate-index-warning"
+          className="mt-2 rounded-md border border-[var(--aria-warning)] bg-[var(--aria-warning-soft)] px-3 py-2 text-xs text-[var(--aria-warning)]"
+        >
           {index.warning}
         </div>
       ) : null}
