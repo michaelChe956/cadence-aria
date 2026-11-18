@@ -671,6 +671,174 @@ mod projection_tests {
         assert_eq!(response.state, "rebuilding");
     }
 
+    /// （修1·a）Rebuild/Sync 失败且无 LKG：新世代以 Stale + 失败封套落盘
+    /// ⇒ 投影仍是 `stale` 且带三段中文成品；主检出不可用码必须命中
+    /// 具体文案（点名成员主检出与修复动作），不能落到通用重试兜底。
+    #[test]
+    fn read_active_projection_keeps_stale_state_and_failure_copy_without_lkg() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        store
+            .create(
+                "project_0001",
+                record(
+                    "aggregate_index_refresh_gen",
+                    AggregateIndexStatus::Stale,
+                    "2026-09-28T02:00:00Z",
+                ),
+            )
+            .unwrap();
+        // 生产形态（snapshot.rs）：message 只是该成员主检出的 canonical path。
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_refresh_gen",
+                AggregateIndexStatus::Stale,
+                Some(
+                    "aggregate_index_failed:aggregate_index_checkout_unavailable: \
+                     /workspace/members/gray-config"
+                        .to_string(),
+                ),
+            )
+            .unwrap();
+
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
+        assert_eq!(response.state, "stale");
+        let copy = response
+            .failure_copy
+            .expect("失败封套在册 ⇒ Stale 世代也必须带三段中文成品");
+        assert_eq!(copy.machine_line, "aggregate_index_checkout_unavailable");
+        assert!(
+            copy.reason_zh.contains("主检出"),
+            "原因段必须点名成员主检出不可用：{}",
+            copy.reason_zh
+        );
+        assert!(
+            copy.action_zh.contains("重新 clone") || copy.action_zh.contains("重新登记"),
+            "怎么做必须给出修复检出的具体动作：{}",
+            copy.action_zh
+        );
+    }
+
+    /// （修1·b）Degraded LKG 的 warning 封套前缀是 `aggregate_index_degraded:`
+    /// ⇒ 两种封套前缀都解析，机器码仍是封套里的稳定内层码。
+    #[test]
+    fn read_active_projection_renders_degraded_envelope_with_inner_machine_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        store
+            .create(
+                "project_0001",
+                record(
+                    "aggregate_index_lkg",
+                    AggregateIndexStatus::Active,
+                    "2026-09-28T01:00:00Z",
+                ),
+            )
+            .unwrap();
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_lkg",
+                AggregateIndexStatus::Degraded,
+                Some("aggregate_index_degraded:codegraph_init_failed: cli exploded".to_string()),
+            )
+            .unwrap();
+
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
+        assert_eq!(response.state, "degraded");
+        let copy = response
+            .failure_copy
+            .expect("degraded 封套同样要出三段中文成品");
+        assert_eq!(copy.machine_line, "codegraph_init_failed");
+    }
+
+    /// （修1·c）码表外 code 的封套 ⇒ 中性兜底：机器码仍是封套里的内层码，
+    /// 不吞码、不拿英文原文当中文主标题。
+    #[test]
+    fn read_active_projection_neutral_fallback_keeps_inner_machine_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        store
+            .create(
+                "project_0001",
+                record(
+                    "aggregate_index_failed_gen",
+                    AggregateIndexStatus::Failed,
+                    "2026-09-28T01:00:00Z",
+                ),
+            )
+            .unwrap();
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_failed_gen",
+                AggregateIndexStatus::Failed,
+                Some(
+                    "aggregate_index_failed:aggregate_index_member_checkout_retired: /gone"
+                        .to_string(),
+                ),
+            )
+            .unwrap();
+
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
+        assert_eq!(response.state, "missing");
+        let copy = response
+            .failure_copy
+            .expect("封套可解析 ⇒ 必须出中性三段成品，而不是吞掉失败面");
+        assert_eq!(copy.machine_line, "aggregate_index_member_checkout_retired");
+        assert!(
+            copy.reason_zh.contains("无法确定具体原因"),
+            "码表外码必须走中性兜底：{}",
+            copy.reason_zh
+        );
+    }
+
+    /// （修2·d）首建失败（无 LKG）时失败面优先：`failure_copy` 存在 ⇒
+    /// 不再补 `evidence_copy`，同屏只有一个动作面（前端按同一优先级渲染）。
+    #[test]
+    fn read_active_projection_suppresses_evidence_copy_when_failure_copy_present() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        store
+            .create(
+                "project_0001",
+                record(
+                    "aggregate_index_failed_gen",
+                    AggregateIndexStatus::Failed,
+                    "2026-09-28T01:00:00Z",
+                ),
+            )
+            .unwrap();
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_failed_gen",
+                AggregateIndexStatus::Failed,
+                Some("aggregate_index_failed:codegraph_init_failed: cli exploded".to_string()),
+            )
+            .unwrap();
+
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
+        assert_eq!(response.state, "missing");
+        assert!(
+            response.failure_copy.is_some(),
+            "失败封套在册 ⇒ 必须带三段中文成品"
+        );
+        assert!(
+            response.evidence_copy.is_none(),
+            "failure_copy 优先：证据面不得与失败面同屏"
+        );
+    }
+
     // ---- C4 Task 2：旧 project 级布局不得战胜显式 LC 解析 ----
 
     #[test]
