@@ -101,15 +101,33 @@ fn record_rejected_evidence_query(paths: &ProductAppPaths, input: &EvidenceQuery
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     use super::*;
+    use crate::cross_cutting::bounded_command_runner::{
+        BoundedCommandError, BoundedCommandRequest, BoundedCommandResult, BoundedCommandRunner,
+    };
     use crate::product::coding_models::{
-        CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
+        AttemptTargetSnapshot, CodingAttemptScope, CodingAttemptStatus, CodingExecutionStage,
     };
     use crate::product::json_store::write_json;
+    use crate::product::logical_codebase::aggregate_index::{
+        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
+        AggregateIndexStore,
+    };
+    use crate::product::logical_codebase::store::{
+        LogicalCodebaseManifest, LogicalCodebaseStore,
+    };
+    use crate::product::logical_codebase::{
+        CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalCodebaseLayout,
+        LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
+        RepositorySourceIdentity, RepositoryType,
+    };
     use crate::product::logical_codebase::evidence_audit::EvidenceAuditRecord;
     use crate::product::logical_codebase::evidence_budget::EVIDENCE_ATTEMPT_CHAR_QUOTA;
     use crate::product::logical_codebase::evidence_index::EvidenceError;
@@ -324,5 +342,321 @@ mod tests {
         .await
         .expect_err("non-policy query without target snapshot fails on the evidence chain");
         assert_eq!(response.code, "evidence_not_available");
+    }
+
+    // ---- 片8A：state.evidence_command_runner（片7W 覆盖点）接线断言 ----
+
+    /// 与 mediator 全链夹具（evidence_mediator_tests.inc.rs）同构：issue
+    /// authority + manifest + 两成员 checkout + active 聚合索引 + `.codegraph`
+    /// 库目录 + Running attempt（含 target_snapshot）+ 令牌——查询可达第⑤步
+    ///（CodeGraph 派发），注入 runner 才会被调用。
+    fn seed_issue_authority(paths: &ProductAppPaths) {
+        crate::product::project_store::ProjectStore::new(paths.clone())
+            .create(crate::product::project_store::CreateProjectInput {
+                name: "evidence-query-handler".to_string(),
+                description: None,
+            })
+            .expect("create project");
+        crate::product::issue_store::IssueStore::new(paths.clone())
+            .create(crate::product::issue_store::CreateProductIssueInput {
+                project_id: PROJECT_ID.to_string(),
+                repo_id: Some("repository_0001".to_string()),
+                logical_codebase_id:
+                    crate::product::logical_codebase::legacy_logical_codebase_id(PROJECT_ID),
+                title: "evidence query handler issue".to_string(),
+                description: None,
+                change_id: None,
+                base_branch: None,
+            })
+            .expect("create issue");
+    }
+
+    fn full_chain_attempt(
+        target_snapshot: AttemptTargetSnapshot,
+    ) -> crate::product::coding_models::CodingExecutionAttempt {
+        crate::product::coding_models::CodingExecutionAttempt {
+            target_snapshot: Some(target_snapshot),
+            ..attempt_fixture()
+        }
+    }
+
+    fn target_snapshot(
+        logical_id: LogicalRepositoryId,
+        checkout_id: RepositoryCheckoutId,
+        canonical_path: &Path,
+        revision: &str,
+        membership_revision: u64,
+    ) -> AttemptTargetSnapshot {
+        AttemptTargetSnapshot {
+            logical_repository_id: logical_id,
+            checkout_id,
+            physical_repository_id: format!("repo_{}", logical_id.0),
+            canonical_path: canonical_path.to_path_buf(),
+            git_dir_identity: "git-dir-id".to_string(),
+            revision: Some(revision.to_string()),
+            policy_digest: "policy-digest".to_string(),
+            membership_revision,
+            captured_at: "2026-08-14T00:00:00Z".to_string(),
+            capture_source: "test".to_string(),
+        }
+    }
+
+    fn member_record(
+        id: LogicalRepositoryId,
+        alias: &str,
+        checkout_id: RepositoryCheckoutId,
+        physical_id: &str,
+    ) -> CodebaseMemberRecord {
+        CodebaseMemberRecord {
+            logical_repository_id: id,
+            physical_repository_id: physical_id.to_string(),
+            alias: alias.to_string(),
+            role: "backend".to_string(),
+            ordinal: 0,
+            source_identity: RepositorySourceIdentity {
+                scheme: "git_dir_only_v1".to_string(),
+                key_digest: format!("sha256:{alias}"),
+                canonical_git_dir: PathBuf::from(format!("/workspace/{alias}/.git")),
+                canonical_origin: None,
+                first_seen_path_hash: format!("hash:{alias}"),
+            },
+            repo_type: RepositoryType::Unknown,
+            tech_stack: Vec::new(),
+            owner: None,
+            tags: Vec::new(),
+            default_ref: None,
+            checkout_ids: vec![checkout_id],
+            status: MemberStatus::Active,
+            created_at: "2026-08-14T00:00:00Z".to_string(),
+            updated_at: "2026-08-14T00:00:00Z".to_string(),
+        }
+    }
+
+    fn checkout_record(
+        logical_id: LogicalRepositoryId,
+        checkout_id: RepositoryCheckoutId,
+        canonical_path: PathBuf,
+    ) -> RepositoryCheckoutRecord {
+        RepositoryCheckoutRecord {
+            checkout_id,
+            logical_repository_id: logical_id,
+            physical_repository_id: format!("repo_{}", logical_id.0),
+            kind: CheckoutKind::Main,
+            canonical_path,
+            checkout_path_hash: "checkout-hash".to_string(),
+            git_dir_identity: "git-dir-id".to_string(),
+            revision: None,
+            availability: CheckoutAvailability::Available,
+            observed_at: "2026-08-14T00:00:00Z".to_string(),
+            created_at: "2026-08-14T00:00:00Z".to_string(),
+            updated_at: "2026-08-14T00:00:00Z".to_string(),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn index_record(
+        id: &str,
+        api_id: LogicalRepositoryId,
+        web_id: LogicalRepositoryId,
+        api_checkout_id: RepositoryCheckoutId,
+        web_checkout_id: RepositoryCheckoutId,
+        api_revision: &str,
+        web_revision: &str,
+        codegraph_root: &Path,
+    ) -> AggregateIndexRecord {
+        AggregateIndexRecord {
+            aggregate_index_id: id.to_string(),
+            project_id: PROJECT_ID.to_string(),
+            membership_revision: 1,
+            status: AggregateIndexStatus::Active,
+            command_id: None,
+            member_snapshots: vec![
+                AggregateIndexMemberSnapshot::indexed(
+                    api_id,
+                    api_checkout_id,
+                    api_revision.to_string(),
+                    false,
+                    "2026-08-14T00:00:00Z".to_string(),
+                ),
+                AggregateIndexMemberSnapshot::indexed(
+                    web_id,
+                    web_checkout_id,
+                    web_revision.to_string(),
+                    false,
+                    "2026-08-14T00:00:00Z".to_string(),
+                ),
+            ],
+            observed_after_member_snapshots: Vec::new(),
+            codegraph_version: "1.6.0".to_string(),
+            codegraph_root: codegraph_root.to_path_buf(),
+            config_digest: String::new(),
+            created_at: "2026-08-14T00:00:00Z".to_string(),
+            updated_at: "2026-08-14T00:00:00Z".to_string(),
+            supersedes_aggregate_index_id: None,
+            warning: None,
+        }
+    }
+
+    fn full_chain_fixture() -> (TempDir, ProductAppPaths, PathBuf, String) {
+        let tmp = TempDir::new().expect("tempdir");
+        let paths = ProductAppPaths::new(tmp.path().join(".aria"));
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        // fake-runner 夹具不跑真实 CLI，显式物化 `.codegraph` 对齐已建索引
+        // 形态（mediator ④b 库目录守卫按此判「索引不可用」）。
+        fs::create_dir_all(repo.join(".codegraph")).expect("create codegraph library dir");
+        seed_issue_authority(&paths);
+
+        let api_id = LogicalRepositoryId(Uuid::new_v4());
+        let web_id = LogicalRepositoryId(Uuid::new_v4());
+        let api_checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+        let web_checkout_id = RepositoryCheckoutId(Uuid::new_v4());
+        let aggregate_index_id = format!("aggregate_index_{}", Uuid::new_v4().simple());
+
+        let logical = LogicalCodebaseStore::new(paths.clone());
+        let manifest = LogicalCodebaseManifest {
+            schema_version: 1,
+            project_id: PROJECT_ID.to_string(),
+            logical_codebase_id: Uuid::new_v4(),
+            provider_context_root: repo.clone(),
+            layout: LogicalCodebaseLayout::CommonNonGitParent,
+            membership_revision: 1,
+            member_ids: vec![api_id, web_id],
+            active_aggregate_index_id: Some(aggregate_index_id.clone()),
+            context_policy_digest: String::new(),
+            created_at: "2026-08-14T00:00:00Z".to_string(),
+            updated_at: "2026-08-14T00:00:00Z".to_string(),
+        };
+        logical
+            .save_manifest(PROJECT_ID, &manifest)
+            .expect("save manifest");
+        logical
+            .save_member(
+                PROJECT_ID,
+                &member_record(api_id, "api", api_checkout_id, "repo_api"),
+            )
+            .expect("save api member");
+        logical
+            .save_member(
+                PROJECT_ID,
+                &member_record(web_id, "web", web_checkout_id, "repo_web"),
+            )
+            .expect("save web member");
+        logical
+            .save_checkout(
+                PROJECT_ID,
+                &checkout_record(api_id, api_checkout_id, repo.join("api")),
+            )
+            .expect("save api checkout");
+        logical
+            .save_checkout(
+                PROJECT_ID,
+                &checkout_record(web_id, web_checkout_id, repo.join("web")),
+            )
+            .expect("save web checkout");
+
+        AggregateIndexStore::new(paths.clone())
+            .create(
+                PROJECT_ID,
+                index_record(
+                    &aggregate_index_id,
+                    api_id,
+                    web_id,
+                    api_checkout_id,
+                    web_checkout_id,
+                    "rev-api",
+                    "rev-web",
+                    &repo,
+                ),
+            )
+            .expect("create aggregate index record");
+
+        let snapshot = target_snapshot(api_id, api_checkout_id, &repo.join("api"), "rev-api", 1);
+        let attempt = full_chain_attempt(snapshot);
+        write_json(&attempt_record_path(&paths), &attempt).expect("write attempt record");
+
+        let token = issue_evidence_token(&paths, &repo, &attempt).expect("issue token");
+
+        (tmp, paths, repo, token)
+    }
+
+    /// 计数 runner：每次调用 +1 并返回固定 stdout（与 mediator 测试的
+    /// FakeCodeGraphRunner 同协议，另加调用计数供注入断言）。
+    struct CountingCodeGraphRunner {
+        calls: AtomicUsize,
+        stdout: String,
+    }
+
+    impl CountingCodeGraphRunner {
+        fn new(stdout: &str) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                stdout: stdout.to_string(),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BoundedCommandRunner for CountingCodeGraphRunner {
+        async fn run(
+            &self,
+            _request: BoundedCommandRequest,
+        ) -> Result<BoundedCommandResult, BoundedCommandError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(BoundedCommandResult {
+                exit_code: Some(0),
+                stdout: self.stdout.clone(),
+                stderr: String::new(),
+                timed_out: false,
+                cancelled: false,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                duration_ms: 1,
+            })
+        }
+    }
+
+    /// 片8A：片7W 的 `state.evidence_command_runner` 覆盖点必须被真实接到证据
+    /// 查询路径——注入计数 runner 后，一次全链查询必须经它派发 CodeGraph 调用。
+    #[tokio::test]
+    async fn web_evidence_injected_runner_is_used_for_query() {
+        let (tmp, paths, _repo, token) = full_chain_fixture();
+        let hits_json = serde_json::json!([
+            {"node": {"name": "usedByWeb", "filePath": "web/src/app.ts", "startLine": 10}},
+        ]);
+        let runner = Arc::new(CountingCodeGraphRunner::new(&hits_json.to_string()));
+        let state = crate::web::state::WebAppState::new(
+            tmp.path().to_path_buf(),
+            crate::web::runtime::WebRuntime::new_fake(tmp.path().to_path_buf()),
+        )
+        .with_evidence_command_runner(runner.clone());
+
+        let _response = evidence_query(
+            axum::extract::State(state),
+            axum::Json(EvidenceQueryInput {
+                token,
+                role: EvidenceRole::Coder,
+                query: "usedByWeb".to_string(),
+            }),
+        )
+        .await
+        .expect("full chain query via injected runner succeeds");
+
+        // 注入的 runner 被真实用于证据查询（≥1 次 CodeGraph 派发）。
+        assert!(
+            runner.calls() > 0,
+            "injected runner must be dispatched for the codegraph query"
+        );
+        // 全链成功佐证：审计落盘 1 条命中（结果确经注入 runner 返回）。
+        let content = fs::read_to_string(audit_file_path(&paths)).expect("read audit file");
+        let record: EvidenceAuditRecord = serde_json::from_str(
+            content.lines().next().expect("audit line"),
+        )
+        .expect("audit record deserializes");
+        assert_eq!(record.hit_count, 1);
     }
 }
