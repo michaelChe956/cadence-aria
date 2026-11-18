@@ -304,6 +304,10 @@ fn describe_envelope_keeps_member_naming_from_the_envelope_fact() {
              each included member needs at least 1 indexable code file",
         ),
     );
-    assert!(!plain.reason_zh.contains("gray-config"), "{}", plain.reason_zh);
+    assert!(
+        !plain.reason_zh.contains("gray-config"),
+        "{}",
+        plain.reason_zh
+    );
     assert!(!plain.reason_zh.contains("msha-sdk"), "{}", plain.reason_zh);
 }
