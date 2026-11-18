@@ -18,6 +18,8 @@
 //! 句柄不进日志、不进 URL、不进归档。
 
 mod archive;
+#[cfg(test)]
+mod archive_tests;
 mod fs;
 mod sessions;
 mod trace;
@@ -31,7 +33,8 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Extension, JsonRejection, State};
+use axum::extract::rejection::JsonRejection;
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -39,7 +42,7 @@ use futures_util::Stream;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio_util::io::{ReaderStream, SyncIoBridge};
+use tokio_util::io::ReaderStream;
 
 use crate::web::api_auth::parse_trusted_origin;
 use crate::web::state::WebAppState;
@@ -64,7 +67,7 @@ struct DownloadRequest {
 /// 下发流：持有读取器与采集门 permit——流结束或连接中断时才释放门，
 /// 保证同一时刻只有一条采集/下发在跑。
 struct BundleStream {
-    reader: ReaderStream<SyncIoBridge<std::fs::File>>,
+    reader: ReaderStream<tokio::fs::File>,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -89,10 +92,7 @@ pub(crate) fn routes() -> Router<WebAppState> {
     let grants = Arc::new(Grants::default());
     let collection_gate = Arc::new(Semaphore::new(1));
     Router::new()
-        .route(
-            "/api/diagnostics/log-bundle/authorize",
-            post(authorize),
-        )
+        .route("/api/diagnostics/log-bundle/authorize", post(authorize))
         .route(
             "/api/diagnostics/log-bundle/download",
             post(download).layer(DefaultBodyLimit::max(DOWNLOAD_BODY_LIMIT_BYTES)),
@@ -114,13 +114,7 @@ async fn authorize(
     };
     let ticket = match grants.issue(&origin) {
         Ok(ticket) => ticket,
-        Err(_) => {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "failed to create authorization request",
-            );
-        }
+        Err(error) => return authorize_failure_response(&error),
     };
     json_response(
         StatusCode::OK,
@@ -222,7 +216,7 @@ async fn download(
     );
     // 流式下发，不复制整包；permit 随响应体存活到流结束/连接中断。
     let stream = BundleStream {
-        reader: ReaderStream::new(SyncIoBridge::new(file)),
+        reader: ReaderStream::new(tokio::fs::File::from_std(file)),
         _permit: permit,
     };
     let mut response = Response::new(Body::from_stream(stream));
@@ -247,14 +241,27 @@ async fn download(
     response
 }
 
+/// 申请失败时的静态错误映射：待批准条目达上限（`WouldBlock`）→ 429 busy；
+/// 其余 io 错误（建目录/绑 socket 失败等）→ 500。错误正文不含原因细节。
+fn authorize_failure_response(error: &std::io::Error) -> Response {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "busy",
+            "too many pending authorization requests",
+        );
+    }
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal_error",
+        "failed to create authorization request",
+    )
+}
+
 /// 来源校验：精确受信 Origin + 外部必须 HTTPS + Host 与 Origin 同源。
 ///
 /// 返回归一化后的 Origin（`scheme://host:port`），失败时返回静态 403 响应。
-fn check_source(
-    state: &WebAppState,
-    headers: &HeaderMap,
-    uri: &Uri,
-) -> Result<String, Response> {
+fn check_source(state: &WebAppState, headers: &HeaderMap, uri: &Uri) -> Result<String, Response> {
     let Some(auth) = state.api_auth.as_ref() else {
         return Err(error_response(
             StatusCode::FORBIDDEN,
@@ -298,7 +305,10 @@ fn request_host(headers: &HeaderMap, uri: &Uri) -> Option<String> {
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .or_else(|| uri.authority().map(|authority| authority.as_str().to_string()))
+        .or_else(|| {
+            uri.authority()
+                .map(|authority| authority.as_str().to_string())
+        })
 }
 
 /// 从 authority（`host:port`）取主机部分（IPv6 保留方括号形式）。
@@ -316,7 +326,9 @@ fn authority_host(authority: &str) -> String {
 
 /// 是否明确的回环主机（`localhost` 域、`127.0.0.0/8`、`::1`）。
 fn is_loopback_host(host: &str) -> bool {
-    let host = host.trim_matches(|ch| ch == '[' || ch == ']').to_ascii_lowercase();
+    let host = host
+        .trim_matches(|ch| ch == '[' || ch == ']')
+        .to_ascii_lowercase();
     if host == "localhost" || host.ends_with(".localhost") {
         return true;
     }
@@ -345,17 +357,15 @@ fn untrusted_origin_response() -> Response {
 
 /// JSON 响应（禁止缓存）。
 fn json_response(status: StatusCode, value: Value) -> Response {
-    (
-        status,
-        [(header::CACHE_CONTROL, "no-store")],
-        Json(value),
-    )
-        .into_response()
+    (status, [(header::CACHE_CONTROL, "no-store")], Json(value)).into_response()
 }
 
 /// 请求体不合规时的静态 JSON 错误（不泄露解析细节）。
 fn rejection_response(rejection: JsonRejection) -> Response {
-    let status = rejection.status();
+    let status = match rejection.status() {
+        StatusCode::UNPROCESSABLE_ENTITY => StatusCode::BAD_REQUEST,
+        status => status,
+    };
     let code = if status == StatusCode::PAYLOAD_TOO_LARGE {
         "request_too_large"
     } else {
@@ -400,9 +410,7 @@ mod tests {
         if let Some(host) = host {
             builder = builder.header(header::HOST, host);
         }
-        builder
-            .body(Body::from(body.to_string()))
-            .expect("request")
+        builder.body(Body::from(body.to_string())).expect("request")
     }
 
     async fn response_json(response: Response) -> (StatusCode, Value) {
@@ -473,9 +481,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authorize_pending_limit_is_rejected_as_busy() {
+        // 待批准条目达上限：permit 侧以 WouldBlock 表达 → 429 busy。
+        let error = std::io::Error::new(std::io::ErrorKind::WouldBlock, "pending");
+        let (status, body) = response_json(authorize_failure_response(&error)).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body["code"], "busy");
+    }
+
+    #[tokio::test]
+    async fn authorize_internal_failure_is_rejected_as_internal_error() {
+        let error = std::io::Error::other("boom");
+        let (status, body) = response_json(authorize_failure_response(&error)).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["code"], "internal_error");
+    }
+
+    #[tokio::test]
     async fn endpoints_are_rejected_without_source_validation() {
         let root = tempfile::tempdir().expect("root");
-        let state = WebAppState::new(root.to_path_buf(), WebRuntime::new_fake(root.to_path_buf()));
+        let state = WebAppState::new(
+            root.path().to_owned(),
+            WebRuntime::new_fake(root.path().to_owned()),
+        );
         for (uri, body) in [
             ("/api/diagnostics/log-bundle/authorize", "{}"),
             (
@@ -596,10 +624,7 @@ mod tests {
     #[test]
     fn source_check_rejects_host_from_another_trusted_origin() {
         let root = tempfile::tempdir().expect("root");
-        let state = state_with_origins(
-            root.path(),
-            &["https://a.example", "https://b.example"],
-        );
+        let state = state_with_origins(root.path(), &["https://a.example", "https://b.example"]);
         let headers = headers_with("https://a.example", "b.example");
         assert!(check_source(&state, &headers, &request_uri()).is_err());
     }

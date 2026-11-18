@@ -60,10 +60,7 @@ fn claude_ranks_by_newest_member_mtime_and_attaches_subagents() {
         .join("subagents")
         .join("agent-1.jsonl");
     let other_id = Uuid::new_v4().to_string();
-    let parent_b = dir
-        .path()
-        .join("proj-b")
-        .join(format!("{other_id}.jsonl"));
+    let parent_b = dir.path().join("proj-b").join(format!("{other_id}.jsonl"));
     write_file(&parent_a, "{}\n");
     write_file(&subagent_a, "{}\n");
     write_file(&parent_b, "{}\n");
@@ -188,13 +185,16 @@ fn codex_deduplicates_by_native_session_id_and_skips_missing_header() {
     assert_eq!(sessions.len(), 1);
     assert_eq!(
         sessions[0].members,
-        vec![PathBuf::from("2025/01/03").join(format!(
-            "rollout-2025-01-03T00-00-00-{session_id}.jsonl"
-        ))]
+        vec![
+            PathBuf::from("2025/01/03")
+                .join(format!("rollout-2025-01-03T00-00-00-{session_id}.jsonl"))
+        ]
     );
     assert_eq!(sessions[0].modified, epoch(600));
     assert!(
-        warnings.iter().any(|warning| warning.contains("session_meta")),
+        warnings
+            .iter()
+            .any(|warning| warning.contains("session_meta")),
         "缺头应有静态 warning：{warnings:?}"
     );
 }
@@ -310,11 +310,13 @@ fn kimi_groups_all_agent_streams_under_one_parent_session() {
     assert_eq!(sessions[0].modified, epoch(800));
     assert_eq!(
         sessions[1].members,
-        vec![PathBuf::from("wd-2")
-            .join(format!("session_{other_id}"))
-            .join("agents")
-            .join("main")
-            .join("wire.jsonl")]
+        vec![
+            PathBuf::from("wd-2")
+                .join(format!("session_{other_id}"))
+                .join("agents")
+                .join("main")
+                .join("wire.jsonl")
+        ]
     );
     assert_eq!(sessions[1].modified, epoch(200));
 }
@@ -345,9 +347,10 @@ fn each_provider_is_discovered_by_its_own_wire_name() {
     );
     let kimi_dir = TempDir::new_in("/tmp").expect("临时目录");
     write_file(
-        &kimi_dir
-            .path()
-            .join(format!("wd/session_{}/agents/main/wire.jsonl", Uuid::new_v4())),
+        &kimi_dir.path().join(format!(
+            "wd/session_{}/agents/main/wire.jsonl",
+            Uuid::new_v4()
+        )),
         "{}\n",
     );
 
@@ -360,10 +363,7 @@ fn each_provider_is_discovered_by_its_own_wire_name() {
         discover("codex", &open_root(&codex_dir), &mut warnings).len(),
         1
     );
-    assert_eq!(
-        discover("pi", &open_root(&pi_dir), &mut warnings).len(),
-        1
-    );
+    assert_eq!(discover("pi", &open_root(&pi_dir), &mut warnings).len(), 1);
     assert_eq!(
         discover("kimi_code", &open_root(&kimi_dir), &mut warnings).len(),
         1
@@ -419,4 +419,89 @@ fn unknown_provider_yields_no_sessions_and_a_warning() {
 
     assert!(sessions.is_empty());
     assert!(!warnings.is_empty(), "未知 provider 应有静态 warning");
+}
+
+#[test]
+fn pi_selects_three_newest_sessions_among_many_large_files() {
+    let dir = TempDir::new_in("/tmp").expect("临时目录");
+    // 70 个文件：文件名字典序 = 由旧到新，头部很短但正文都超过 64 KiB。
+    // 逐个读满 64 KiB 的旧做法会先耗尽探头预算，结果选中最早的三个。
+    let mut expected: Vec<PathBuf> = Vec::new();
+    for index in 0..70u32 {
+        let session_id = Uuid::new_v4().to_string();
+        let name = format!("sess-{index:03}-{session_id}.jsonl");
+        let path = dir.path().join("cwd-a").join(&name);
+        let mut content = pi_header(&session_id);
+        content.push_str(&"x".repeat(70 * 1024));
+        write_file(&path, &content);
+        set_mtime(&path, 1_000 + u64::from(index));
+        expected.push(PathBuf::from("cwd-a").join(name));
+    }
+    expected.reverse();
+
+    let root = open_root(&dir);
+    let mut warnings: Vec<&'static str> = Vec::new();
+    let sessions = discover("pi", &root, &mut warnings);
+
+    assert_eq!(sessions.len(), 3);
+    assert_eq!(sessions[0].members, vec![expected[0].clone()]);
+    assert_eq!(sessions[1].members, vec![expected[1].clone()]);
+    assert_eq!(sessions[2].members, vec![expected[2].clone()]);
+    assert_eq!(sessions[0].modified, epoch(1_069));
+    assert_eq!(sessions[2].modified, epoch(1_067));
+}
+
+#[test]
+fn codex_selects_three_newest_sessions_among_many_large_files() {
+    let dir = TempDir::new_in("/tmp").expect("临时目录");
+    let mut expected: Vec<PathBuf> = Vec::new();
+    for index in 0..70u32 {
+        let session_id = Uuid::new_v4().to_string();
+        let name = format!("rollout-2025-01-01T00-00-00-{session_id}.jsonl");
+        let path = dir.path().join("2025/01/01").join(&name);
+        let mut content = codex_header(&session_id);
+        content.push_str(&"x".repeat(70 * 1024));
+        write_file(&path, &content);
+        set_mtime(&path, 1_000 + u64::from(index));
+        expected.push(PathBuf::from("2025/01/01").join(name));
+    }
+    expected.reverse();
+
+    let root = open_root(&dir);
+    let mut warnings: Vec<&'static str> = Vec::new();
+    let sessions = discover("codex", &root, &mut warnings);
+
+    assert_eq!(sessions.len(), 3);
+    assert_eq!(sessions[0].members, vec![expected[0].clone()]);
+    assert_eq!(sessions[1].members, vec![expected[1].clone()]);
+    assert_eq!(sessions[2].members, vec![expected[2].clone()]);
+    assert_eq!(sessions[0].modified, epoch(1_069));
+}
+
+#[test]
+fn kimi_reports_member_truncation_when_agent_streams_exceed_limit() {
+    let dir = TempDir::new_in("/tmp").expect("临时目录");
+    let session_id = Uuid::new_v4().to_string();
+    for index in 0..70u32 {
+        write_file(
+            &dir.path()
+                .join("wd-1")
+                .join(format!("session_{session_id}"))
+                .join("agents")
+                .join(format!("agent-{index:03}"))
+                .join("wire.jsonl"),
+            "{}\n",
+        );
+    }
+
+    let root = open_root(&dir);
+    let mut warnings: Vec<&'static str> = Vec::new();
+    let sessions = discover("kimi_code", &root, &mut warnings);
+
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].members.len(), MAX_GROUP_MEMBERS);
+    assert!(
+        warnings.iter().any(|warning| warning.contains("成员过多")),
+        "裁剪应有静态 warning：{warnings:?}"
+    );
 }

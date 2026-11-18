@@ -75,6 +75,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+function deferredResponse() {
+  let resolve!: (response: Response) => void;
+  const promise = new Promise<Response>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
 describe("CockpitLogBundleButton", () => {
   it("首次打开仅展示告知内容，不发起授权或下载请求", async () => {
     const user = userEvent.setup();
@@ -265,7 +271,7 @@ describe("CockpitLogBundleButton", () => {
     render(<CockpitLogBundleButton />);
 
     await openDialog();
-    const authorizeDeferred = Promise.withResolvers<Response>();
+    const authorizeDeferred = deferredResponse();
     fetchMock.mockImplementationOnce(() => authorizeDeferred.promise);
     await user.click(screen.getByRole("button", { name: "申请授权" }));
 
@@ -288,7 +294,7 @@ describe("CockpitLogBundleButton", () => {
     await openDialog();
     await grantAuthorization();
 
-    const downloadDeferred = Promise.withResolvers<Response>();
+    const downloadDeferred = deferredResponse();
     fetchMock.mockImplementationOnce(() => downloadDeferred.promise);
     await user.click(screen.getByRole("button", { name: "确认并下载" }));
     await user.click(screen.getByRole("button", { name: "取消" }));

@@ -48,7 +48,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// 固定的批准提示正文。
 const SAFETY_NOTICE: &str = "Aria 正在请求导出本次诊断日志包。\n\
 内容可能包含工作区绝对路径与会话诊断轨迹（不含对话正文），请确认来源可信后再批准。\n\
-批准后本次下载只在当前实例、当前来源、5 分钟内有效，且只能使用一次。";
+本次授权自申请起 5 分钟内有效（仅当前实例、当前来源），且只能使用一次。";
 
 /// 内存中的授权登记簿（每个实例一份）。
 #[derive(Clone, Debug)]
@@ -139,11 +139,13 @@ impl Grants {
             let mut inner = self.lock_inner()?;
             inner.purge_expired(now);
             if inner.pending.len() >= MAX_PENDING_PER_INSTANCE {
+                // 上限只增不减：不驱逐操作中的有效申请（新申请不得挤掉已批准
+                // 待核销或正在等待确认的条目），交由 HTTP 层按 429 处理。
                 drop(inner);
                 remove_private_socket(&socket_path, &directory);
                 return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "待批准的请求过多，请先处理已有请求",
+                    io::ErrorKind::WouldBlock,
+                    "待批准的请求过多，请稍后重试",
                 ));
             }
             let instance_id = inner.instance_id.clone();
@@ -244,8 +246,11 @@ pub(crate) async fn approve_local(request_id: &str) -> io::Result<()> {
             )
         })?;
     {
-        let peer = peer_uid(stream.as_std()).map_err(|_| {
-            io::Error::new(io::ErrorKind::PermissionDenied, "无法核验批准通道的宿主身份")
+        let peer = peer_uid(&stream).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "无法核验批准通道的宿主身份",
+            )
         })?;
         if peer != current_euid() {
             return Err(io::Error::new(
@@ -276,9 +281,13 @@ pub(crate) async fn approve_local(request_id: &str) -> io::Result<()> {
     }
     print!("{prompt}\n输入 y 确认批准本次日志下载（其它输入取消）: ");
     let _ = io::stdout().flush();
-    let answer = tokio::task::spawn_blocking(read_terminal_answer)
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::Other, "读取终端输入失败"))??;
+    let answer = tokio::time::timeout(
+        HUMAN_RESPONSE_TIMEOUT,
+        tokio::task::spawn_blocking(read_terminal_answer),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "终端确认超时"))?
+    .map_err(|_| io::Error::new(io::ErrorKind::Other, "读取终端输入失败"))??;
     if answer.trim() != "y" {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
@@ -326,8 +335,9 @@ fn spawn_approval_listener(
         .name("aria-log-bundle-approve".to_string())
         .spawn(move || {
             let outcome = serve_approval(&listener, &inner, &request_id, &origin, expires_at);
-            if outcome == ApprovalOutcome::Expired {
-                // 到期：清掉未核销的申请状态（socket 与目录一并回收）。
+            if outcome != ApprovalOutcome::Approved {
+                // 取消、失败与到期都已无法再批准：立即回收申请条目，
+                // 免得占满待批准上限（socket 与目录一并清理）。
                 if let Ok(mut guard) = inner.lock() {
                     guard.pending.remove(&request_id);
                 }
@@ -400,6 +410,8 @@ fn handle_approval_client(
     if stream.write_all(prompt.as_bytes()).is_err() {
         return ApprovalOutcome::Failed;
     }
+    // 人的确认等待必须覆盖 accept 处设置的机器级读超时（SO_RCVTIMEO）。
+    let _ = stream.set_read_timeout(Some(HUMAN_RESPONSE_TIMEOUT));
     let answer = match read_line_bounded(
         &mut stream,
         MAX_REPLY_MESSAGE,
@@ -516,7 +528,10 @@ async fn read_with_deadline(
 }
 
 fn private_directory_path(request_id: &str) -> io::Result<PathBuf> {
-    let directory = std::env::temp_dir().join(format!("{PRIVATE_DIR_PREFIX}{request_id}"));
+    // 固定短基线 /tmp：与 daemon socket（/tmp/aria-daemon）同惯例。
+    // 不取进程级 TMPDIR —— 后台服务与宿主终端的 TMPDIR 可能不同，
+    // 也会撞上 macOS 的长 TMPDIR 与 sun_path 104 字节上限。
+    let directory = Path::new("/tmp").join(format!("{PRIVATE_DIR_PREFIX}{request_id}"));
     let socket_path = directory.join(SOCKET_FILE_NAME);
     if socket_path.as_os_str().len() > MAX_SOCKET_PATH_LEN {
         return Err(io::Error::new(
@@ -548,7 +563,9 @@ fn remove_private_socket(socket_path: &Path, directory: &Path) {
 
 fn is_valid_request_id(value: &str) -> bool {
     value.len() == REQUEST_ID_LEN
-        && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -590,7 +607,18 @@ fn peer_uid(stream: &impl AsRawFd) -> io::Result<u32> {
     Ok(credentials.uid)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn peer_uid(stream: &impl AsRawFd) -> io::Result<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    if result != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn peer_uid(_stream: &impl AsRawFd) -> io::Result<u32> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

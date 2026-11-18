@@ -112,7 +112,11 @@ fn pending_requests_are_capped_per_instance() {
     }
 
     let overflow = grants.issue(TEST_ORIGIN).expect_err("待批准请求必须有上限");
-    assert_eq!(overflow.kind(), io::ErrorKind::Other);
+    assert_eq!(
+        overflow.kind(),
+        io::ErrorKind::WouldBlock,
+        "上限触发必须回报 WouldBlock 供 HTTP 层显示 429"
+    );
     assert_eq!(tickets.len(), MAX_PENDING_PER_INSTANCE);
 
     for ticket in &tickets {
@@ -240,6 +244,63 @@ fn socket_refusal_does_not_approve_the_request() {
 }
 
 #[test]
+fn denied_approval_reclaims_the_pending_request_immediately() {
+    let grants = Grants::default();
+    let ticket = grants.issue(TEST_ORIGIN).expect("issue");
+    let socket_path = private_directory_path(&ticket.request_id)
+        .expect("private directory")
+        .join(SOCKET_FILE_NAME);
+    let mut stream = UnixStream::connect(&socket_path).expect("connect to approval socket");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+
+    stream
+        .write_all(format!("{}\n", ticket.request_id).as_bytes())
+        .expect("write request id");
+    let mut buffer = [0u8; MAX_PROMPT_MESSAGE];
+    let read = stream.read(&mut buffer).expect("read prompt");
+    assert!(read > 0);
+    stream.write_all(b"n\n").expect("write refusal");
+    let read = stream.read(&mut buffer).expect("read verdict");
+    assert_eq!(String::from_utf8_lossy(&buffer[..read]).trim(), "denied");
+
+    let mut pending = 1;
+    for _ in 0..100 {
+        pending = grants
+            .inner
+            .lock()
+            .map(|guard| guard.pending.len())
+            .unwrap_or(0);
+        if pending == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        pending, 0,
+        "被拒绝的申请必须立即回收，不得占满待批准上限"
+    );
+
+    cleanup(&ticket);
+}
+
+#[test]
+fn private_directory_uses_the_fixed_short_tmp_base() {
+    let grants = Grants::default();
+    let ticket = grants.issue(TEST_ORIGIN).expect("issue");
+    let directory = private_directory_path(&ticket.request_id).expect("private directory");
+
+    assert_eq!(
+        directory.parent(),
+        Some(Path::new("/tmp")),
+        "批准通道必须固定在 /tmp，不能随各进程 TMPDIR 漂移"
+    );
+
+    cleanup(&ticket);
+}
+
+#[test]
 fn private_directory_is_owner_only() {
     let grants = Grants::default();
     let ticket = grants.issue(TEST_ORIGIN).expect("issue");
@@ -274,11 +335,11 @@ async fn approve_local_fails_closed_without_a_pending_channel() {
     let error = approve_local("0123456789abcdef0123456789abcdef")
         .await
         .expect_err("没有待批准通道时必须失败");
-    assert!(
-        matches!(
-            error.kind(),
-            io::ErrorKind::InvalidInput | io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-        ),
-        "无待批准通道时必须失败关闭：{error}"
-    );
+    if std::io::stdin().is_terminal() {
+        // 交互终端：走到连接步骤，通道不存在即失败。
+        assert_eq!(error.kind(), io::ErrorKind::NotFound, "{error}");
+    } else {
+        // 无终端（CI）：必须先在终端要求处失败，不接受脚本化批准。
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+    }
 }

@@ -13,6 +13,10 @@
 //! - `pi` → `~/.pi/agent/sessions`：`<cwd>/<name>.jsonl`，按首个 `type=session` 记录的 `id` 去重；
 //! - `kimi_code` → `~/.kimi-code/sessions`：`<wd>/session_<id>/agents/<agent>/wire.jsonl`，
 //!   以父会话为一组，主流与子流不各占名额。
+//!
+//! 选取规则：先按安全 FD 的 mtime 给候选文件排名，再从最新起懒探头，凑够三组即止。
+//! 这样任何硬上限下被牺牲的都是最旧的会话，而不是“字典序最前的旧会话”。
+//! 扫描未覆盖全部候选时（预算耗尽或目录不可读）如实记不完整，不假装选的就是最近三个。
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::Read;
@@ -40,6 +44,10 @@ const MAX_PROBED_FILES: usize = 2_048;
 const MAX_PROBE_BYTES_PER_FILE: usize = 64 * 1024;
 /// 全部探头读取字节上限。
 const MAX_TOTAL_PROBE_BYTES: usize = 4 * 1024 * 1024;
+/// 探头单次读块大小：渐进读取，凑够所需换行即停。
+const PROBE_BLOCK_BYTES: usize = 512;
+/// 单行头部的字节上限：超过即判定不是合法头部，不再继续读。
+const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
 /// 单个逻辑会话的成员文件上限。
 const MAX_GROUP_MEMBERS: usize = 64;
 /// 探头最多解析的行数（Codex 的 `session_meta` 只在前几行）。
@@ -76,6 +84,7 @@ struct ProviderWarnings {
     orphan: &'static str,
     duplicate: &'static str,
     unreadable_file: &'static str,
+    too_many_members: &'static str,
 }
 
 impl ProviderWarnings {
@@ -83,11 +92,12 @@ impl ProviderWarnings {
         Self {
             no_session: "claude_code: 未发现可用会话",
             fewer_than_max: "claude_code: 可用会话少于 3 个",
-            scan_truncated: "claude_code: 会话目录不可读或超出扫描预算",
+            scan_truncated: "claude_code: 扫描预算耗尽或目录不可读，所选可能不是最近三个会话",
             header_missing: "claude_code: 会话文件缺少可识别内容，已跳过",
             orphan: "claude_code: 存在缺少父会话的子代理目录，已忽略",
-            duplicate: "claude_code: 重复会话 ID 已合并",
+            duplicate: "claude_code: 同一会话 ID 的多个文件只保留最新一份",
             unreadable_file: "claude_code: 会话文件不可读，已跳过",
+            too_many_members: "claude_code: 会话成员过多，已裁剪",
         }
     }
 
@@ -95,11 +105,12 @@ impl ProviderWarnings {
         Self {
             no_session: "codex: 未发现可用会话",
             fewer_than_max: "codex: 可用会话少于 3 个",
-            scan_truncated: "codex: 会话目录不可读或超出扫描预算",
+            scan_truncated: "codex: 扫描预算耗尽或目录不可读，所选可能不是最近三个会话",
             header_missing: "codex: rollout 文件缺少 session_meta 头，已跳过",
             orphan: "codex: 目录结构不符合 YYYY/MM/DD 布局，已忽略",
-            duplicate: "codex: 重复会话 ID 已合并",
+            duplicate: "codex: 同一会话 ID 的多个文件只保留最新一份",
             unreadable_file: "codex: 会话文件不可读，已跳过",
+            too_many_members: "codex: 会话成员过多，已裁剪",
         }
     }
 
@@ -107,11 +118,12 @@ impl ProviderWarnings {
         Self {
             no_session: "pi: 未发现可用会话",
             fewer_than_max: "pi: 可用会话少于 3 个",
-            scan_truncated: "pi: 会话目录不可读或超出扫描预算",
+            scan_truncated: "pi: 扫描预算耗尽或目录不可读，所选可能不是最近三个会话",
             header_missing: "pi: 会话文件缺少 session 头，已跳过",
             orphan: "pi: 目录结构不符合 <cwd> 布局，已忽略",
-            duplicate: "pi: 重复会话 ID 已合并",
+            duplicate: "pi: 同一会话 ID 的多个文件只保留最新一份",
             unreadable_file: "pi: 会话文件不可读，已跳过",
+            too_many_members: "pi: 会话成员过多，已裁剪",
         }
     }
 
@@ -119,11 +131,12 @@ impl ProviderWarnings {
         Self {
             no_session: "kimi_code: 未发现可用会话",
             fewer_than_max: "kimi_code: 可用会话少于 3 个",
-            scan_truncated: "kimi_code: 会话目录不可读或超出扫描预算",
+            scan_truncated: "kimi_code: 扫描预算耗尽或目录不可读，所选可能不是最近三个会话",
             header_missing: "kimi_code: 会话缺少 agents/*/wire.jsonl，已跳过",
             orphan: "kimi_code: 目录结构不符合 session_<id> 布局，已忽略",
-            duplicate: "kimi_code: 重复会话 ID 已合并",
+            duplicate: "kimi_code: 同一会话 ID 的多个文件只保留最新一份",
             unreadable_file: "kimi_code: 会话文件不可读，已跳过",
+            too_many_members: "kimi_code: 会话成员过多，已裁剪",
         }
     }
 }
@@ -137,6 +150,7 @@ struct Discovery<'a> {
     probed_files: usize,
     probed_bytes: usize,
     truncated: bool,
+    probe_buffer: Vec<u8>,
 }
 
 impl<'a> Discovery<'a> {
@@ -149,6 +163,7 @@ impl<'a> Discovery<'a> {
             probed_files: 0,
             probed_bytes: 0,
             truncated: false,
+            probe_buffer: Vec::new(),
         }
     }
 
@@ -165,7 +180,6 @@ impl<'a> Discovery<'a> {
         }
     }
 
-    /// 列举一次目录；相对路径为空即根目录本身。
     fn try_list(&mut self, relative: &Path) -> Result<Vec<Entry>, std::io::Error> {
         if self.dir_budget == 0 {
             self.truncated = true;
@@ -199,11 +213,16 @@ impl<'a> Discovery<'a> {
         metadata.modified().ok()
     }
 
-    /// 读取文件开头的若干行并解析为 JSON（只取头部，不搬运全文）。
+    /// 探头预算是否已耗尽（耗尽后不再读取任何文件头）。
+    fn probe_exhausted(&self) -> bool {
+        self.probed_files >= MAX_PROBED_FILES || self.probed_bytes >= MAX_TOTAL_PROBE_BYTES
+    }
+
+    /// 渐进读取文件头：按块读，凑够 `max_lines` 个换行或达到上限即停（不读满整块配额）。
     ///
     /// 文件打不开时返回 `None`（调用方记“不可读”）；头部解析不出内容时返回空 `values`。
     fn probe(&mut self, relative: &Path, max_lines: usize) -> Option<ProbeResult> {
-        if self.probed_files >= MAX_PROBED_FILES || self.probed_bytes >= MAX_TOTAL_PROBE_BYTES {
+        if self.probe_exhausted() {
             self.truncated = true;
             return None;
         }
@@ -216,18 +235,35 @@ impl<'a> Discovery<'a> {
             .and_then(|metadata| metadata.modified().ok());
         let allowance = MAX_PROBE_BYTES_PER_FILE.min(MAX_TOTAL_PROBE_BYTES - self.probed_bytes);
         self.probed_files += 1;
-        let mut buffer = vec![0u8; allowance];
-        let mut filled = 0usize;
-        while filled < buffer.len() {
-            match file.read(&mut buffer[filled..]) {
+
+        self.probe_buffer.clear();
+        let mut block = [0u8; PROBE_BLOCK_BYTES];
+        let mut newlines = 0usize;
+        let mut line_bytes = 0usize;
+        while self.probe_buffer.len() < allowance {
+            let want = block.len().min(allowance - self.probe_buffer.len());
+            let read = match file.read(&mut block[..want]) {
                 Ok(0) => break,
-                Ok(count) => filled += count,
+                Ok(count) => count,
                 Err(_) => break,
+            };
+            for byte in &block[..read] {
+                if *byte == b'\n' {
+                    newlines += 1;
+                    line_bytes = 0;
+                } else {
+                    line_bytes += 1;
+                }
+            }
+            self.probe_buffer.extend_from_slice(&block[..read]);
+            // 凑够所需行数，或当前行已长到不可能是合法头部：都不再往下读。
+            if newlines >= max_lines || line_bytes > MAX_HEADER_LINE_BYTES {
+                break;
             }
         }
-        self.probed_bytes += filled;
+        self.probed_bytes += self.probe_buffer.len();
 
-        let text = String::from_utf8_lossy(&buffer[..filled]);
+        let text = String::from_utf8_lossy(&self.probe_buffer);
         let mut values = Vec::new();
         for line in text.lines() {
             if values.len() >= max_lines {
@@ -243,6 +279,22 @@ impl<'a> Discovery<'a> {
             }
         }
         Some(ProbeResult { values, modified })
+    }
+
+    /// 给候选文件排名：按安全 FD 的 mtime 倒序（并列按路径升序）。
+    /// 打不开的文件记“不可读”并跳过，不参与排名。
+    fn rank_candidates(&mut self, paths: Vec<PathBuf>) -> Vec<(SystemTime, PathBuf)> {
+        let spec = self.spec;
+        let mut ranked: Vec<(SystemTime, PathBuf)> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let Some(modified) = self.modified(&path) else {
+                self.warn(spec.unreadable_file);
+                continue;
+            };
+            ranked.push((modified, path));
+        }
+        ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        ranked
     }
 
     fn warn(&mut self, message: &'static str) {
@@ -296,6 +348,7 @@ fn canonical_provider(provider: &str) -> Option<&'static str> {
 
 /// 去重（同一原生 ID 只留最新的一份）、排序（mtime 倒序，ID 稳定打破并列）并截断到三个。
 fn select_sessions(discovery: &mut Discovery<'_>, groups: Vec<Group>) -> Vec<Session> {
+    let spec = discovery.spec;
     let mut groups = groups;
     groups.sort_by(|left, right| {
         right
@@ -304,7 +357,6 @@ fn select_sessions(discovery: &mut Discovery<'_>, groups: Vec<Group>) -> Vec<Ses
             .then_with(|| left.id.cmp(&right.id))
     });
 
-    let spec = discovery.spec;
     let mut seen: HashSet<String> = HashSet::new();
     let mut unique: Vec<Group> = Vec::new();
     for group in groups {
@@ -377,9 +429,9 @@ fn discover_claude(discovery: &mut Discovery<'_>) -> Vec<Group> {
         let mut subagents: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
         for (id, directory) in &directories {
             let children = discovery.list(directory);
-            let has_subagents = children.iter().any(|entry| {
-                entry.kind == Kind::Dir && entry.name.to_str() == Some("subagents")
-            });
+            let has_subagents = children
+                .iter()
+                .any(|entry| entry.kind == Kind::Dir && entry.name.to_str() == Some("subagents"));
             if !has_subagents {
                 continue;
             }
@@ -413,14 +465,18 @@ fn discover_claude(discovery: &mut Discovery<'_>) -> Vec<Group> {
             if let Some(files) = subagents.get(id) {
                 for path in files {
                     if members.len() >= MAX_GROUP_MEMBERS {
+                        discovery.warn(spec.too_many_members);
                         break;
                     }
-                    if let Some(time) = discovery.modified(path) {
-                        modified = Some(match modified {
-                            Some(current) => current.max(time),
-                            None => time,
-                        });
-                        members.push(path.clone());
+                    match discovery.modified(path) {
+                        Some(time) => {
+                            modified = Some(match modified {
+                                Some(current) => current.max(time),
+                                None => time,
+                            });
+                            members.push(path.clone());
+                        }
+                        None => discovery.warn(spec.unreadable_file),
                     }
                 }
             }
@@ -439,10 +495,12 @@ fn discover_claude(discovery: &mut Discovery<'_>) -> Vec<Group> {
 }
 
 /// Codex：`YYYY/MM/DD/rollout-*.jsonl`，按头部 `session_meta` 的原生 ID 去重。
+///
+/// 目录按日期倒序遍历只是为了在预算截断时优先看到新的日期；真正的排序依据是文件 mtime。
 fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
-    let mut groups: Vec<Group> = Vec::new();
-    for year in discovery.list(Path::new("")) {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    for year in discovery.list(Path::new("")).into_iter().rev() {
         if year.kind != Kind::Dir {
             continue;
         }
@@ -453,7 +511,7 @@ fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
             continue;
         }
         let year_path = PathBuf::from(year_name);
-        for month in discovery.list(&year_path) {
+        for month in discovery.list(&year_path).into_iter().rev() {
             if month.kind != Kind::Dir {
                 continue;
             }
@@ -464,7 +522,7 @@ fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
                 continue;
             }
             let month_path = year_path.join(month_name);
-            for day in discovery.list(&month_path) {
+            for day in discovery.list(&month_path).into_iter().rev() {
                 if day.kind != Kind::Dir {
                     continue;
                 }
@@ -485,27 +543,40 @@ fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
                     if !name.starts_with("rollout-") || !name.ends_with(".jsonl") {
                         continue;
                     }
-                    let path = day_path.join(name);
-                    let Some(probe) = discovery.probe(&path, MAX_HEADER_LINES) else {
-                        discovery.warn(spec.unreadable_file);
-                        continue;
-                    };
-                    let Some(id) = probe.values.iter().find_map(codex_session_id) else {
-                        discovery.warn(spec.header_missing);
-                        continue;
-                    };
-                    let Some(modified) = probe.modified else {
-                        discovery.warn(spec.unreadable_file);
-                        continue;
-                    };
-                    groups.push(Group {
-                        id,
-                        modified,
-                        members: vec![path],
-                    });
+                    paths.push(day_path.join(name));
                 }
             }
         }
+    }
+
+    let ranked = discovery.rank_candidates(paths);
+    let mut groups: Vec<Group> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (modified, path) in ranked {
+        if groups.len() >= MAX_SESSIONS_PER_PROVIDER {
+            break;
+        }
+        let Some(probe) = discovery.probe(&path, MAX_HEADER_LINES) else {
+            if discovery.probe_exhausted() {
+                discovery.truncated = true;
+                break;
+            }
+            discovery.warn(spec.unreadable_file);
+            continue;
+        };
+        let Some(id) = probe.values.iter().find_map(codex_session_id) else {
+            discovery.warn(spec.header_missing);
+            continue;
+        };
+        if !seen.insert(id.clone()) {
+            discovery.warn(spec.duplicate);
+            continue;
+        }
+        groups.push(Group {
+            id,
+            modified: probe.modified.unwrap_or(modified),
+            members: vec![path],
+        });
     }
     groups
 }
@@ -513,7 +584,7 @@ fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
 /// Pi：`<cwd>/<name>.jsonl`，按首个 `type=session` 记录的 `id` 去重。
 fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
-    let mut groups: Vec<Group> = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
     for cwd in discovery.list(Path::new("")) {
         if cwd.kind != Kind::Dir {
             continue;
@@ -532,25 +603,38 @@ fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
             if !name.ends_with(".jsonl") {
                 continue;
             }
-            let path = cwd_path.join(name);
-            let Some(probe) = discovery.probe(&path, 1) else {
-                discovery.warn(spec.unreadable_file);
-                continue;
-            };
-            let Some(id) = probe.values.first().and_then(pi_session_id) else {
-                discovery.warn(spec.header_missing);
-                continue;
-            };
-            let Some(modified) = probe.modified else {
-                discovery.warn(spec.unreadable_file);
-                continue;
-            };
-            groups.push(Group {
-                id,
-                modified,
-                members: vec![path],
-            });
+            paths.push(cwd_path.join(name));
         }
+    }
+
+    let ranked = discovery.rank_candidates(paths);
+    let mut groups: Vec<Group> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (modified, path) in ranked {
+        if groups.len() >= MAX_SESSIONS_PER_PROVIDER {
+            break;
+        }
+        let Some(probe) = discovery.probe(&path, 1) else {
+            if discovery.probe_exhausted() {
+                discovery.truncated = true;
+                break;
+            }
+            discovery.warn(spec.unreadable_file);
+            continue;
+        };
+        let Some(id) = probe.values.first().and_then(pi_session_id) else {
+            discovery.warn(spec.header_missing);
+            continue;
+        };
+        if !seen.insert(id.clone()) {
+            discovery.warn(spec.duplicate);
+            continue;
+        }
+        groups.push(Group {
+            id,
+            modified: probe.modified.unwrap_or(modified),
+            members: vec![path],
+        });
     }
     groups
 }
@@ -590,9 +674,11 @@ fn discover_kimi(discovery: &mut Discovery<'_>) -> Vec<Group> {
                 };
                 let wire = agents_path.join(agent_name).join("wire.jsonl");
                 let Some(modified) = discovery.modified(&wire) else {
+                    discovery.warn(spec.unreadable_file);
                     continue;
                 };
                 if streams.len() >= MAX_GROUP_MEMBERS {
+                    discovery.warn(spec.too_many_members);
                     break;
                 }
                 streams.push((agent_name.to_string(), wire, modified));
@@ -659,9 +745,9 @@ fn pi_session_id(record: &Value) -> Option<String> {
 
 fn is_safe_session_id(id: &str) -> bool {
     !id.is_empty()
-        && id
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+        && id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
 }
 
 fn is_kimi_session_dir(name: &str) -> bool {
