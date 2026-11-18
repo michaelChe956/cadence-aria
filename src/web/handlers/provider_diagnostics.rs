@@ -1139,4 +1139,6 @@ mod tests {
             .expect("response");
         assert_eq!(response.status(), StatusCode::OK);
     }
+
+    include!("provider_diagnostics_tests.inc.rs");
 }
