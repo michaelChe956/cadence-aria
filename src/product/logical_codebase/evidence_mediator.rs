@@ -111,8 +111,9 @@ pub fn handle_evidence_query(
     handle_evidence_query_with_runner(paths, input, Arc::new(TokioBoundedCommandRunner))
 }
 
-/// 可注入 runner 的编排实现（测试经 fake runner 注入 CodeGraphCli）。
-fn handle_evidence_query_with_runner(
+/// 可注入 runner 的编排实现（测试经 fake runner 注入 CodeGraphCli；片8A 起
+/// 证据 handler 经片7W 覆盖点 `state.evidence_command_runner` 注入 runner）。
+pub fn handle_evidence_query_with_runner(
     paths: &ProductAppPaths,
     input: &EvidenceQueryInput,
     runner: Arc<dyn BoundedCommandRunner>,
@@ -209,6 +210,8 @@ fn handle_evidence_query_with_runner(
             snapshot_refs: hits.iter().map(|hit| hit.file_path.clone()).collect(),
             budget_remaining,
             timestamp: Utc::now().to_rfc3339(),
+            // 片8A：真实检索路径无「未检索原因」（原因码归片8 跳过分支填充）。
+            not_searched_reason: None,
         },
     )?;
 

@@ -34,6 +34,10 @@ static EVIDENCE_AUDIT_LOG_MUTEX: Mutex<()> = Mutex::new(());
 /// 单条证据查询审计记录（对应设计 §5.3 的 `evidence_query` 条目，serde snake_case）。
 ///
 /// `role` 为 Coder/Reviewer 自报标注（含 `role_self_reported` 标记），由 T6 调用方拼装。
+///
+/// 片8A（REQ-COD-05 delta，纯加法）：新增可选字段 `not_searched_reason`——
+/// 只解释「为什么没检索」（如配置仓目标跳过 CodeGraph 查询的原因码）；既有
+/// 字段与判定口径不变，`#[serde(default)]` 保证既有审计 JSON（无该字段）仍可读。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct EvidenceAuditRecord {
@@ -45,6 +49,10 @@ pub struct EvidenceAuditRecord {
     pub snapshot_refs: Vec<String>,
     pub budget_remaining: usize,
     pub timestamp: String,
+    /// 未检索原因（可选）：None = 已真实检索；Some(code) = 该条目未派发
+    /// CodeGraph 查询的原因码（片8 填充，本片仅落字段与接线）。
+    #[serde(default)]
+    pub not_searched_reason: Option<String>,
 }
 
 /// 审计 jsonl 的持久化行：`sequence`（递增序号，仿 role_run_event 先例）+ 记录字段。
@@ -175,6 +183,7 @@ mod tests {
             snapshot_refs: vec!["web/src/app.ts".to_string()],
             budget_remaining: 119_880,
             timestamp: timestamp.to_string(),
+            not_searched_reason: None,
         }
     }
 

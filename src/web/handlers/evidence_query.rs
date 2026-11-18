@@ -2,28 +2,34 @@
 //
 // 契约 REQ-COD-05「受控接口」；设计 §3.3/§5.2。`POST /api/evidence-query`
 // 接收 body `{token, role, query}`（serde snake_case），调用 T6
-// `handle_evidence_query`，成功返回 `{text, truncated, index_stale, budget_remaining}`
+// `handle_evidence_query_with_runner`（runner 经片7W 覆盖点注入：None ⇒
+// 生产默认），成功返回 `{text, truncated, index_stale, budget_remaining}`
 // （200）；失败走稳定码 JSON（见 `evidence_error_mapping` 与 `web/error.rs`）。
 //
 // 控制器裁决 1（T6 Minor-1）：对 `handle_evidence_query` 返回 `Err` 的查询也追加
 // 一条 evidence_query 审计条目（query 文本留痕；result_chars=0、budget_remaining
 // 取当前 ledger 值或 0）。成功路径仍由 T6 落审计，本层不重复。
 
+use std::sync::Arc;
+
 use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use chrono::Utc;
 
+use crate::cross_cutting::bounded_command_runner::{
+    BoundedCommandRunner, TokioBoundedCommandRunner,
+};
 use crate::product::app_paths::ProductAppPaths;
 use crate::product::logical_codebase::evidence_audit::{
     EvidenceAuditRecord, append_evidence_audit,
 };
 use crate::product::logical_codebase::evidence_budget::EvidenceBudgetLedger;
 use crate::product::logical_codebase::evidence_index::EvidenceError;
-use crate::product::logical_codebase::evidence_mediator::evidence_role_label;
-use crate::product::logical_codebase::{
-    EvidenceQueryInput, handle_evidence_query, resolve_attempt_by_token,
+use crate::product::logical_codebase::evidence_mediator::{
+    evidence_role_label, handle_evidence_query_with_runner,
 };
+use crate::product::logical_codebase::{EvidenceQueryInput, resolve_attempt_by_token};
 use crate::web::error::ApiResult;
 use crate::web::handlers::evidence_error_mapping::evidence_api_error;
 use crate::web::state::WebAppState;
@@ -51,7 +57,14 @@ pub async fn evidence_query(
         .map_err(crate::web::handlers::evidence_error_mapping::policy_api_error)?;
         return Ok(axum::Json(result).into_response());
     }
-    match handle_evidence_query(&paths, &input) {
+    // 片8A 接线（片7W 覆盖点）：None ⇒ 生产默认 runner（与 `handle_evidence_query`
+    // 等价）；Some ⇒ 注入 runner（it_web 用计数 runner 断言派发行为）。
+    // 分支语义（跳过目标不派发查询）归片8，本层只做注入。
+    let runner: Arc<dyn BoundedCommandRunner> = state
+        .evidence_command_runner
+        .clone()
+        .unwrap_or_else(|| Arc::new(TokioBoundedCommandRunner));
+    match handle_evidence_query_with_runner(&paths, &input, runner) {
         Ok(response) => Ok(Json(response).into_response()),
         Err(error) => {
             // 控制器裁决 1（T6 Minor-1）：被拒查询也补审计（query 留痕；
@@ -94,6 +107,8 @@ fn record_rejected_evidence_query(paths: &ProductAppPaths, input: &EvidenceQuery
             snapshot_refs: Vec::new(),
             budget_remaining,
             timestamp: Utc::now().to_rfc3339(),
+            // 片8A：被拒补记路径无「未检索原因」（原因码归片8 跳过分支填充）。
+            not_searched_reason: None,
         },
     );
 }
@@ -120,18 +135,16 @@ mod tests {
         AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
         AggregateIndexStore,
     };
-    use crate::product::logical_codebase::store::{
-        LogicalCodebaseManifest, LogicalCodebaseStore,
-    };
+    use crate::product::logical_codebase::evidence_audit::EvidenceAuditRecord;
+    use crate::product::logical_codebase::evidence_budget::EVIDENCE_ATTEMPT_CHAR_QUOTA;
+    use crate::product::logical_codebase::evidence_index::EvidenceError;
+    use crate::product::logical_codebase::evidence_token::issue_evidence_token;
+    use crate::product::logical_codebase::store::{LogicalCodebaseManifest, LogicalCodebaseStore};
     use crate::product::logical_codebase::{
         CheckoutAvailability, CheckoutKind, CodebaseMemberRecord, LogicalCodebaseLayout,
         LogicalRepositoryId, MemberStatus, RepositoryCheckoutId, RepositoryCheckoutRecord,
         RepositorySourceIdentity, RepositoryType,
     };
-    use crate::product::logical_codebase::evidence_audit::EvidenceAuditRecord;
-    use crate::product::logical_codebase::evidence_budget::EVIDENCE_ATTEMPT_CHAR_QUOTA;
-    use crate::product::logical_codebase::evidence_index::EvidenceError;
-    use crate::product::logical_codebase::evidence_token::issue_evidence_token;
     use crate::product::logical_codebase::{EvidenceQueryInput, EvidenceRole};
     use crate::product::models::ProviderName;
     use crate::web::workspace_ws_types::ProviderConfigSnapshot;
@@ -361,8 +374,9 @@ mod tests {
             .create(crate::product::issue_store::CreateProductIssueInput {
                 project_id: PROJECT_ID.to_string(),
                 repo_id: Some("repository_0001".to_string()),
-                logical_codebase_id:
-                    crate::product::logical_codebase::legacy_logical_codebase_id(PROJECT_ID),
+                logical_codebase_id: crate::product::logical_codebase::legacy_logical_codebase_id(
+                    PROJECT_ID,
+                ),
                 title: "evidence query handler issue".to_string(),
                 description: None,
                 change_id: None,
@@ -653,10 +667,9 @@ mod tests {
         );
         // 全链成功佐证：审计落盘 1 条命中（结果确经注入 runner 返回）。
         let content = fs::read_to_string(audit_file_path(&paths)).expect("read audit file");
-        let record: EvidenceAuditRecord = serde_json::from_str(
-            content.lines().next().expect("audit line"),
-        )
-        .expect("audit record deserializes");
+        let record: EvidenceAuditRecord =
+            serde_json::from_str(content.lines().next().expect("audit line"))
+                .expect("audit record deserializes");
         assert_eq!(record.hit_count, 1);
     }
 }
