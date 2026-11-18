@@ -25,6 +25,9 @@ type PrimaryMemberOption = {
   logical_repository_id: string;
   physical_repository_id: string | null;
   alias: string;
+  /// REQ-MRE-01：服务端下发的结构化无源码标注（旧响应缺省 = 无提示）。
+  /// 仅作提示，不影响复选/提交/禁用。
+  index_alert: { code: string; message_zh: string } | null;
 };
 
 export function CreateLifecycleIssueDialog({
@@ -64,6 +67,8 @@ export function CreateLifecycleIssueDialog({
       return;
     }
     let disposed = false;
+    // 切 LC 生效的那一刻即清空上一 LC 的成员与标注（否则加载窗口内仍显示旧列表）。
+    setMembers([]);
     setMembersLoading(true);
     setMembersError(null);
     listMembers(selectedLogicalCodebaseId)
@@ -80,6 +85,8 @@ export function CreateLifecycleIssueDialog({
                     ? member.physical_repository_id
                     : null,
                 alias: member.alias,
+                // 标注随成员列表响应一起到达（不另发聚合索引请求）。
+                index_alert: member.index_alert ?? null,
               })),
           );
         }
@@ -190,6 +197,8 @@ export function CreateLifecycleIssueDialog({
               onChange={(event) => {
                 setCodebaseValue(event.target.value);
                 setCheckedLogicalIds([]);
+                // 切 LC 生效即刻清空上一 LC 的成员与标注（不等到新响应到达）。
+                setMembers([]);
                 resetSelectionErrors();
               }}
               className="mt-1 block w-full rounded-md border border-[var(--aria-line)] bg-white px-3 py-2 text-sm font-normal text-[var(--aria-ink)]"
@@ -224,25 +233,37 @@ export function CreateLifecycleIssueDialog({
                     ? `${member.alias} · ${member.physical_repository_id}`
                     : `${member.alias} · 缺少物理仓库映射`;
                   return (
-                    <label
+                    <div
                       key={member.logical_repository_id}
-                      className="flex items-center gap-2 text-sm font-normal text-[var(--aria-ink)]"
+                      className="flex items-center gap-2"
                     >
-                      <input
-                        type="checkbox"
-                        checked={checkedLogicalIds.includes(member.logical_repository_id)}
-                        disabled={!member.physical_repository_id}
-                        onChange={() => {
-                          setCheckedLogicalIds((previous) =>
-                            previous.includes(member.logical_repository_id)
-                              ? previous.filter((id) => id !== member.logical_repository_id)
-                              : [...previous, member.logical_repository_id],
-                          );
-                          resetSelectionErrors();
-                        }}
-                      />
-                      {label}
-                    </label>
+                      <label className="flex items-center gap-2 text-sm font-normal text-[var(--aria-ink)]">
+                        <input
+                          type="checkbox"
+                          checked={checkedLogicalIds.includes(member.logical_repository_id)}
+                          disabled={!member.physical_repository_id}
+                          onChange={() => {
+                            setCheckedLogicalIds((previous) =>
+                              previous.includes(member.logical_repository_id)
+                                ? previous.filter((id) => id !== member.logical_repository_id)
+                                : [...previous, member.logical_repository_id],
+                            );
+                            resetSelectionErrors();
+                          }}
+                        />
+                        {label}
+                      </label>
+                      {/* REQ-MRE-01：服务端下发的无源码标注（正文只取 message_zh）；
+                          仅提示，不影响复选/提交/禁用。 */}
+                      {member.index_alert ? (
+                        <span
+                          data-testid={`member-index-note-${member.logical_repository_id}`}
+                          className="text-xs font-normal text-[var(--aria-ink-muted)]"
+                        >
+                          {member.index_alert.message_zh}
+                        </span>
+                      ) : null}
+                    </div>
                   );
                 })}
               </div>
