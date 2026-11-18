@@ -11,11 +11,13 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 
 use crate::product::json_store::validate_relative_id;
+use crate::product::logical_codebase::story_index_refresh::StoryIndexFreshness;
 use crate::product::logical_codebase::{
     CodebaseMemberRecord, LogicalCodebaseManifest, LogicalCodebaseStore, LogicalRepositoryId,
     MemberStatus,
@@ -87,11 +89,20 @@ pub struct AggregateIndexFreshnessService {
     logical: LogicalCodebaseStore,
     store: AggregateIndexStore,
     snapshots: AggregateIndexSnapshotCollector,
-    operation: AggregateIndexOperation,
+    operation: Arc<AggregateIndexOperation>,
 }
 
 impl AggregateIndexFreshnessService {
     pub fn new(operation: AggregateIndexOperation) -> Self {
+        Self::from_shared(Arc::new(operation))
+    }
+
+    /// 单一共享后端注入点（P10）：`AggregateIndexOperation` 没有 `Clone`，
+    /// Story 路径与规划路径必须共享同一个 operation 实例——片7W 用一个
+    /// `Arc<AggregateIndexFreshnessService>` 同时 coerce 成
+    /// `Arc<dyn PlanningIndexFreshness>` 与 `Arc<dyn StoryIndexFreshness>`，
+    /// 不得构造两套 operation / 两套 service。
+    pub fn from_shared(operation: Arc<AggregateIndexOperation>) -> Self {
         Self {
             logical: operation.logical_clone(),
             store: operation.store_clone(),
@@ -103,7 +114,7 @@ impl AggregateIndexFreshnessService {
     /// Re-scopes manifest/member/index reads to one logical codebase subtree,
     /// reusing the same CLI and snapshot command runner (D5 semantics).
     pub fn for_lc(&self, lc_id: impl Into<String>) -> Self {
-        Self::new(self.operation.for_lc(lc_id))
+        Self::from_shared(Arc::new(self.operation.for_lc(lc_id)))
     }
 
     /// Returns a fresh assessment without mutating any durable state. The AI
@@ -174,6 +185,59 @@ impl AggregateIndexFreshnessService {
             }
         }
         Ok(due)
+    }
+}
+
+impl StoryIndexFreshness for AggregateIndexFreshnessService {
+    fn readable_generation(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<AggregateIndexRecord>, AggregateIndexError> {
+        // `active_required` 已含 Active → Degraded → Stale 的 LKG 优先级；
+        // 「没有任何可读世代」映射为分支 1 的入口条件，读坏/歧义原样上抛。
+        match self.store.active_required(project_id) {
+            Ok(record) => Ok(Some(record)),
+            Err(AggregateIndexError::Failed { code, .. })
+                if code == "aggregate_index_active_missing" =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn current_snapshots(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<AggregateIndexMemberSnapshot>, AggregateIndexError> {
+        validate_relative_id(project_id)?;
+        let manifest = self
+            .logical
+            .load_manifest(project_id)?
+            .ok_or_else(|| missing_manifest(project_id))?;
+        // 只取当前快照，不做全局漂移判定（`member_evidence_drifted` 不动）。
+        self.snapshots.capture_included(project_id, &manifest)
+    }
+
+    fn sync_and_verify(
+        &self,
+        project_id: &str,
+        prior: AggregateIndexRecord,
+    ) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        self.operation.sync_and_verify(project_id, prior)
+    }
+
+    fn build(&self, project_id: &str) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        let manifest = self
+            .logical
+            .load_manifest(project_id)?
+            .ok_or_else(|| missing_manifest(project_id))?;
+        self.operation
+            .build(project_id, manifest.membership_revision)
+    }
+
+    fn for_lc(&self, lc_id: &str) -> Arc<dyn StoryIndexFreshness> {
+        Arc::new(AggregateIndexFreshnessService::for_lc(self, lc_id))
     }
 }
 
@@ -448,6 +512,22 @@ mod tests {
         CheckoutAvailability, CheckoutKind, LogicalRepositoryId, RepositoryCheckoutId,
         RepositorySourceIdentity, RepositoryType,
     };
+
+    #[test]
+    fn global_drift_judgement_is_unchanged_by_story_path() {
+        // REQ-IND-03：Story 复用门的「上次与本次都无未提交修改」是独立判定
+        //（story_can_reuse），不得污染既有全局漂移判据——两边 dirty 且
+        // revision 相同 ⇒ 全局判据仍为「未漂移」。
+        let before = AggregateIndexMemberSnapshot::indexed(
+            LogicalRepositoryId(Uuid::parse_str("018f0f8e-2c2d-7a10-8a11-111111111111").unwrap()),
+            RepositoryCheckoutId(Uuid::parse_str("018f0f8e-2c2d-7a10-8a11-222222222222").unwrap()),
+            "a".repeat(40),
+            true,
+            "2026-11-18T00:00:00Z".into(),
+        );
+        let now = before.clone();
+        assert!(!member_evidence_drifted(&[before], &[now]));
+    }
 
     #[test]
     fn changed_member_marks_active_index_stale_then_sync_replaces_snapshot() {

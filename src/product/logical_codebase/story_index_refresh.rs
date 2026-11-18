@@ -87,9 +87,29 @@ pub fn story_can_reuse(
     published: &AggregateIndexRecord,
     current: &[AggregateIndexMemberSnapshot],
 ) -> bool {
-    // 红态占位：先让测试以断言失败变红；绿态替换为上方五条判据。
-    let _ = (published, current);
-    false
+    // 1. 前置（R3，Active-only）：只有已验收为 Active 的世代才谈得上
+    //    「能确认没变」；Degraded 是被降级的 LKG、Stale 已被判漂移。
+    if published.status != AggregateIndexStatus::Active {
+        return false;
+    }
+    // 2. 成员集合未变（长度一致且逐位成员 id 相同）。
+    if published.member_snapshots.len() != current.len() {
+        return false;
+    }
+    published
+        .member_snapshots
+        .iter()
+        .zip(current)
+        .all(|(before, now)| {
+            before.logical_repository_id == now.logical_repository_id
+            // 3. 主工作目录身份未变。
+            && before.checkout_id == now.checkout_id
+            // 4. Git 提交未变。
+            && before.revision == now.revision
+            // 5. 上次与本次都没有未提交修改（git status --porcelain 为准）。
+            && !before.dirty
+            && !now.dirty
+        })
 }
 
 /// Story 前刷新的三分支编排（lc 解析不在本函数——由片7W 入口先
@@ -98,12 +118,63 @@ pub fn refresh_for_story(
     project_id: &str,
     backend: &dyn StoryIndexFreshness,
 ) -> Result<StoryIndexRefreshOutcome, StoryIndexRefreshError> {
-    // 红态占位：不触碰 backend、返回错误的复用结果让断言变红；
-    // 绿态替换为「分支 1 建库 / 分支 2 Active-only 复用 / 分支 3 同步+重新验收」。
-    let _ = (project_id, backend);
-    Ok(StoryIndexRefreshOutcome::Reused {
-        aggregate_index_id: String::new(),
-    })
+    let published = match backend.readable_generation(project_id) {
+        // 分支 1：没有任何可读世代 ⇒ 首次建库并验收。
+        Ok(None) => {
+            return backend
+                .build(project_id)
+                .map(|record| StoryIndexRefreshOutcome::Rebuilt {
+                    aggregate_index_id: record.aggregate_index_id,
+                })
+                .map_err(|error| verification_failed(&error));
+        }
+        // 记录读坏 / 归属不明 / 彼此矛盾 ⇒ 按既有失败规则报错，
+        // 不得当成「没有索引」静默首建。
+        Err(error) => {
+            let (code, message) = stable_parts(&error);
+            return Err(StoryIndexRefreshError::UnreadableGeneration { code, message });
+        }
+        Ok(Some(record)) => record,
+    };
+    // 分支 2（Active-only 复用门）：published 为 Active 且四条判据全部成立
+    // 才复用。`current_snapshots` 返回 Err = 不能确认没变 ⇒ 落分支 3
+    //（不是 Reused、也不是直接停机）。
+    if published.status == AggregateIndexStatus::Active
+        && backend
+            .current_snapshots(project_id)
+            .is_ok_and(|current| story_can_reuse(&published, &current))
+    {
+        return Ok(StoryIndexRefreshOutcome::Reused {
+            aggregate_index_id: published.aggregate_index_id,
+        });
+    }
+    // 分支 3：有变化或不能确认没变 ⇒ 增量同步 + 重新验收。
+    // 判定依据是 sync_and_verify **返回的那份记录**（它就是本次验收发布的
+    // 记录），不再跑一次 assess()——assess 会用当前工作区重新判 dirty，
+    // 可能否定一次已经成功的验收（M5）。
+    match backend.sync_and_verify(project_id, published) {
+        Ok(record) if record.status == AggregateIndexStatus::Active => {
+            Ok(StoryIndexRefreshOutcome::Synced {
+                aggregate_index_id: record.aggregate_index_id,
+            })
+        }
+        // 成功但返回记录仍非 Active ⇒ 停机（AI 不启动）；无失败封套可解析，
+        // 落兜底稳定码。
+        Ok(record) => Err(StoryIndexRefreshError::VerificationFailed {
+            code: FALLBACK_STABLE_CODE.to_string(),
+            message: format!(
+                "aggregate index for {project_id} is {:?} after sync, expected active",
+                record.status
+            ),
+        }),
+        Err(error) => Err(verification_failed(&error)),
+    }
+}
+
+/// 失败封套 ⇒ 停机错误：稳定码逐字透传，不得借道通用 500 丢码。
+fn verification_failed(error: &AggregateIndexError) -> StoryIndexRefreshError {
+    let (code, message) = stable_parts(error);
+    StoryIndexRefreshError::VerificationFailed { code, message }
 }
 
 /// 失败封套 →（稳定码, 消息）：`Failed`/`Degraded` 两个变体都携带
@@ -137,11 +208,7 @@ mod tests {
         snapshot_with(CHECKOUT, revision, dirty)
     }
 
-    fn snapshot_with(
-        checkout: &str,
-        revision: &str,
-        dirty: bool,
-    ) -> AggregateIndexMemberSnapshot {
+    fn snapshot_with(checkout: &str, revision: &str, dirty: bool) -> AggregateIndexMemberSnapshot {
         AggregateIndexMemberSnapshot::indexed(
             LogicalRepositoryId(Uuid::parse_str(MEMBER).unwrap()),
             RepositoryCheckoutId(Uuid::parse_str(checkout).unwrap()),
@@ -479,7 +546,10 @@ mod tests {
         };
         // 无失败封套可解析 ⇒ 兜底稳定码（与外层 422 码同名）。
         assert_eq!(code, "aggregate_index_unavailable");
-        assert!(message.contains("Degraded"), "消息应点名实际状态：{message}");
+        assert!(
+            message.contains("Degraded"),
+            "消息应点名实际状态：{message}"
+        );
         assert_eq!(backend.sync_count(), 1);
     }
 
@@ -509,11 +579,7 @@ mod tests {
         // R3：复用门 = Active-only。Degraded / Stale 各一例——成员/revision/dirty
         // 全同、看起来「没变」——也必须走分支 3（同步 + 重新验收）。
         for status in [AggregateIndexStatus::Degraded, AggregateIndexStatus::Stale] {
-            let published = generation(
-                "aggregate_index_story_published",
-                status,
-                clean_current(),
-            );
+            let published = generation("aggregate_index_story_published", status, clean_current());
             // 直接判定：非 Active 世代一票否决复用。
             assert!(!story_can_reuse(&published, &clean_current()), "{status:?}");
             let backend = ScriptedStoryBackend::new(
@@ -582,5 +648,41 @@ mod tests {
         );
         assert_eq!(backend.sync_count(), 1);
         assert_eq!(backend.build_count(), 0);
+    }
+
+    // 绿态补充：生产 `impl StoryIndexFreshness` 的直接行为测试（片报告注明）。
+    // 13 条红测试用桩钉编排语义；这里钉 from_shared 注入点与 active_missing
+    // ⇒ Ok(None) 的映射（后者是生产实现的行为，桩测不到）。
+    #[test]
+    fn from_shared_story_backend_maps_missing_to_none_and_coerces_to_both_traits() {
+        use crate::cross_cutting::bounded_command_runner::TokioBoundedCommandRunner;
+        use crate::product::app_paths::ProductAppPaths;
+        use crate::product::logical_codebase::aggregate_index::{
+            AggregateIndexFreshnessService, AggregateIndexOperation, CodeGraphCli,
+            CodeGraphExcludeGenerator,
+        };
+        use crate::product::logical_codebase::planning_context_resolver::PlanningIndexFreshness;
+
+        let paths = ProductAppPaths::new(format!("/tmp/aria_story_refresh_{}", Uuid::new_v4()));
+        let operation = AggregateIndexOperation::new(
+            paths,
+            CodeGraphCli::new(Arc::new(TokioBoundedCommandRunner), "codegraph".to_string()),
+            CodeGraphExcludeGenerator,
+        );
+        let service = Arc::new(AggregateIndexFreshnessService::from_shared(Arc::new(
+            operation,
+        )));
+        // P10 注入点：同一个 Arc 双 coerce（禁止两套 operation / 两套 service）。
+        let _planning: Arc<dyn PlanningIndexFreshness> = service.clone();
+        let story: Arc<dyn StoryIndexFreshness> = service;
+        // 没有任何可读世代 ⇒ Ok(None)（分支 1 入口条件），不是 Err。
+        assert_eq!(story.readable_generation("project_story").unwrap(), None);
+        // 快照采集失败（无 manifest）保持 Err：不能确认没变，由编排层落分支 3。
+        let error = story.current_snapshots("project_story").unwrap_err();
+        assert!(
+            matches!(&error, AggregateIndexError::Failed { code, .. }
+                if *code == "aggregate_index_manifest_missing"),
+            "unexpected error: {error:?}"
+        );
     }
 }
