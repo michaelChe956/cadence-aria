@@ -1066,3 +1066,9 @@ mod projection_tests {
         }
     }
 }
+// 片5 测试外挪（large_file_guard 1200 行上限）：结构化跳过告警 + 世代取法
+// 的用例经 include! 挂载，与本文件同一模块作用域（纯外挪，无行为变化）。
+#[cfg(test)]
+mod source_less_tests {
+    include!("aggregate_index_source_less_tests.inc.rs");
+}
