@@ -1,12 +1,26 @@
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::Serialize;
+use std::collections::HashMap;
 
+use super::aggregate_index::projected_record;
 use super::support::{
     default_logical_codebase_id, product_app_paths, product_store_api_error, resolve_lc_authority,
 };
+use crate::product::app_paths::ProductAppPaths;
 use crate::product::json_store::validate_relative_id;
-use crate::product::logical_codebase::{LogicalCodebaseStore, MemberStatus};
+use crate::product::logical_codebase::aggregate_index::{
+    AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
+};
+use crate::product::logical_codebase::failure_copy::{
+    MEMBER_SOURCE_LESS_CODE, SourceLessAlert, member_source_less_member_copy,
+};
+use crate::product::logical_codebase::types::{
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
+};
+use crate::product::logical_codebase::{
+    LogicalCodebaseStore, LogicalRepositoryId, MemberStatus, RepositoryCheckoutId,
+};
 use crate::web::error::{ApiError, ApiResult};
 use crate::web::state::WebAppState;
 
@@ -19,6 +33,14 @@ pub struct LogicalCodebaseMemberDto {
     pub physical_repository_id: Option<String>,
     pub alias: String,
     pub status: MemberStatus,
+    /// 已验收聚合索引世代确认「无源码、未纳入代码搜索」时的**结构化**告警
+    /// （与卡片 `source_less_alert`、证据 `not_searched` 同构）。
+    ///
+    /// `None` = 无该事实（无可读世代 / 世代里没有跳过事实 / 旧世代 /
+    /// 快照 checkout 已不是该成员当前可用的 Main 检出 / 读记录失败）。
+    /// **不承载任何选择资格**：复选、提交、禁用、主仓校验一律不受它影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_alert: Option<SourceLessAlert>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,7 +76,8 @@ fn list_logical_codebase_members_for_lc(
     logical_codebase_id: &str,
 ) -> ApiResult<Json<LogicalCodebaseMembersResponse>> {
     validate_project_id(project_id)?;
-    let store = LogicalCodebaseStore::new(product_app_paths(state));
+    let paths = product_app_paths(state);
+    let store = LogicalCodebaseStore::new(paths.clone());
     if store
         .load_lc_manifest(project_id, logical_codebase_id)
         .map_err(product_store_api_error)?
@@ -66,16 +89,109 @@ fn list_logical_codebase_members_for_lc(
     }
     let members = store
         .list_lc_members(project_id, logical_codebase_id)
-        .map_err(product_store_api_error)?
+        .map_err(product_store_api_error)?;
+    // 标注是**附加信息**：只读 durable 世代与成员/检出记录（不扫盘、不启
+    // CodeGraph、不写任何状态），且不改任何选择资格字段。
+    let alerts = source_less_alerts(&paths, project_id, logical_codebase_id, &members);
+    let members = members
         .into_iter()
         .map(|member| LogicalCodebaseMemberDto {
             logical_repository_id: member.logical_repository_id.0.to_string(),
             physical_repository_id: Some(member.physical_repository_id),
             alias: member.alias,
             status: member.status,
+            index_alert: alerts.get(&member.logical_repository_id).cloned(),
         })
         .collect();
     Ok(Json(LogicalCodebaseMembersResponse { members }))
+}
+
+/// 该 LC 当前被投影的那一代聚合索引记录（durable 记录，无则 `None`）。
+///
+/// 与卡片投影共用唯一世代选择规则（片5 `projected_record`）：本函数只负责
+/// 读记录 + 排序（`updated_at` / `aggregate_index_id` 降序），**选择**一律
+/// 交给 `projected_record`，不得自写「Active 优先」等第二套规则（P8/R4）。
+/// 读记录失败 ⇒ `None`（降级为空，不报错、不猜）。
+fn projected_generation(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+) -> Option<AggregateIndexRecord> {
+    let mut records = AggregateIndexStore::for_lc(paths.clone(), logical_codebase_id)
+        .records(project_id)
+        .unwrap_or_default();
+    records.retain(|record| record.status != AggregateIndexStatus::Superseded);
+    records.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| right.aggregate_index_id.cmp(&left.aggregate_index_id))
+    });
+    projected_record(&records).cloned()
+}
+
+/// 逐仓结构化标注（REQ-MRE-01）：被投影世代里「经盘检确认无源码」的成员，
+/// 按（成员 ID，**当前**可用的 Main checkout ID）双键匹配快照才贴标
+/// （口径与卡片投影一致：不按显示名/别名/裸成员 ID 推断）。
+///
+/// 只读既有 durable 记录与成员/检出记录：不盘检、不启动 CodeGraph、不写状态。
+/// 世代缺失 / 无跳过事实 / 快照 checkout 已更换 / 记录读不到 ⇒ 不标注。
+fn source_less_alerts(
+    paths: &ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+    members: &[CodebaseMemberRecord],
+) -> HashMap<LogicalRepositoryId, SourceLessAlert> {
+    let mut alerts = HashMap::new();
+    let Some(record) = projected_generation(paths, project_id, logical_codebase_id) else {
+        return alerts;
+    };
+    let store = LogicalCodebaseStore::for_lc(paths.clone(), logical_codebase_id);
+    for snapshot in record
+        .member_snapshots
+        .iter()
+        .filter(|snapshot| snapshot.skip_reason.is_some())
+    {
+        let Some(member) = members
+            .iter()
+            .find(|member| member.logical_repository_id == snapshot.logical_repository_id)
+        else {
+            continue;
+        };
+        if !is_current_main_checkout(&store, project_id, member, snapshot.checkout_id) {
+            continue;
+        }
+        alerts
+            .entry(member.logical_repository_id)
+            .or_insert_with(|| SourceLessAlert {
+                code: MEMBER_SOURCE_LESS_CODE.to_string(),
+                message_zh: member_source_less_member_copy(&member.alias),
+            });
+    }
+    alerts
+}
+
+/// 快照的 checkout 是否仍是该成员「当前可用的 Main 检出」（双键匹配口径）。
+///
+/// 与卡片投影同一口径：快照 checkout 仍挂在成员 `checkout_ids` 上，且检出
+/// 记录本身是 Main + Available 且属于该成员。检出记录读不到 ⇒ 不算
+/// （不得给换过检出的成员贴旧标）。
+fn is_current_main_checkout(
+    store: &LogicalCodebaseStore,
+    project_id: &str,
+    member: &CodebaseMemberRecord,
+    checkout_id: RepositoryCheckoutId,
+) -> bool {
+    member.checkout_ids.contains(&checkout_id)
+        && store
+            .load_checkout(project_id, checkout_id)
+            .ok()
+            .flatten()
+            .is_some_and(|checkout| {
+                checkout.kind == CheckoutKind::Main
+                    && checkout.availability == CheckoutAvailability::Available
+                    && checkout.logical_repository_id == member.logical_repository_id
+            })
 }
 
 fn validate_project_id(project_id: &str) -> ApiResult<()> {
@@ -89,7 +205,8 @@ mod tests {
     use super::*;
     use crate::product::app_paths::ProductAppPaths;
     use crate::product::logical_codebase::aggregate_index::{
-        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
+        AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
+        AggregateIndexStore,
     };
     use crate::product::logical_codebase::types::{
         CheckoutAvailability, CheckoutKind, RepositoryCheckoutRecord,
@@ -423,8 +540,13 @@ mod tests {
             "跳过事实必须落成结构化告警：{}",
             gray["index_alert"]
         );
-        let message = gray["index_alert"]["message_zh"].as_str().unwrap_or_default();
-        assert!(message.contains("gray-config"), "告警必须点名成员：{message}");
+        let message = gray["index_alert"]["message_zh"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            message.contains("gray-config"),
+            "告警必须点名成员：{message}"
+        );
         assert!(
             message.contains("未纳入代码搜索"),
             "告警文案取自服务端成品：{message}"
@@ -552,10 +674,7 @@ mod tests {
         let members = body["members"].as_array().expect("成员列表");
         assert_eq!(members.len(), 2, "带标注的成员不得被过滤掉");
         for member in members {
-            assert_eq!(
-                member["status"], "active",
-                "标注不得改变成员资格：{member}"
-            );
+            assert_eq!(member["status"], "active", "标注不得改变成员资格：{member}");
         }
         let gray = members
             .iter()
@@ -590,7 +709,11 @@ mod tests {
             &paths,
             root.path(),
             &lc_one,
-            &[member_with_checkout(member_one, "gray-config", checkout_one)],
+            &[member_with_checkout(
+                member_one,
+                "gray-config",
+                checkout_one,
+            )],
             &[main_checkout(
                 member_one,
                 checkout_one,
@@ -717,7 +840,8 @@ mod tests {
             .unwrap();
         // 夹具自证：盘上 JSON 是老形态（无 `skip_reason` 键）。
         let disk =
-            std::fs::read_to_string(find_json(root.path(), "aggregate_index_legacy_gen.json")).unwrap();
+            std::fs::read_to_string(find_json(root.path(), "aggregate_index_legacy_gen.json"))
+                .unwrap();
         assert!(
             !disk.contains("skip_reason"),
             "夹具必须是老形态 JSON：{disk}"
@@ -791,7 +915,11 @@ mod tests {
             &paths_two,
             root_two.path(),
             &lc_two,
-            &[member_with_checkout(member_two, "gray-config", checkout_two)],
+            &[member_with_checkout(
+                member_two,
+                "gray-config",
+                checkout_two,
+            )],
             &[main_checkout(
                 member_two,
                 checkout_two,
