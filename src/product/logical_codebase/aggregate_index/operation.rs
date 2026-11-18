@@ -19,12 +19,13 @@ use super::codegraph_coverage::{
     summarize_coverage,
 };
 use super::source_scan::{
-    GitVisibleFiles, MemberSourceVerdict, MemberSourceVisibility, SourceScanBudget,
-    scan_member_source,
+    ARIA_SOURCE_SUFFIX_CALIBRATED_CODEGRAPH_VERSION, GitVisibleFiles, MemberSourceVerdict,
+    MemberSourceVisibility, SourceScanBudget, scan_member_source,
 };
 use super::{
     AggregateIndexError, AggregateIndexRecord, AggregateIndexSnapshotCollector,
     AggregateIndexStatus, AggregateIndexStore, CodeGraphCli, CodeGraphExcludeGenerator,
+    codegraph_cli::parse_codegraph_version,
 };
 
 const EXCLUDED_QUERIES: [&str; 4] = [
@@ -602,6 +603,9 @@ impl AggregateIndexOperation {
         record.observed_after_member_snapshots = after;
         record.status = AggregateIndexStatus::Active;
         record.codegraph_root = manifest.provider_context_root.clone();
+        // 版本漂移只记软告警（不改判定、不阻断激活）：实测 codegraph 版本
+        // 与源码后缀清单的校准基线不一致 ⇒ 追加一条可审计 warning。
+        let drift_warning = codegraph_version_drift_warning(&codegraph_version);
         // 实测版本透传：激活世代记录真实 CLI 版本（版本门实测值），
         // building/failed 世代保持空值，不伪造未实测的版本号。
         record.codegraph_version = codegraph_version;
@@ -621,6 +625,17 @@ impl AggregateIndexOperation {
             }
         }
         record.warning = acceptance.soft_warning();
+        if let Some(drift) = drift_warning {
+            tracing::warn!(
+                observed = %record.codegraph_version,
+                baseline = ARIA_SOURCE_SUFFIX_CALIBRATED_CODEGRAPH_VERSION,
+                "codegraph version drift from source-suffix calibration baseline"
+            );
+            record.warning = Some(match record.warning.take() {
+                Some(existing) => format!("{existing}；{drift}"),
+                None => drift,
+            });
+        }
         record.updated_at = now;
         let active = self.store.replace_active(project_id, record)?;
         // 激活落点回写 manifest 指针：evidence 链首查按
@@ -989,6 +1004,29 @@ fn index_health_warning(outcome: &CoverageOutcome) -> Option<String> {
             signals.join("；")
         ))
     }
+}
+
+/// 版本漂移软告警（**不改判定、不阻断激活**）：实测 codegraph 版本 ≠
+/// 源码后缀清单的校准基线 ⇒ 记一条可审计 warning（含实测版本、基线
+/// 版本、后果与复校准指引）。
+fn codegraph_version_drift_warning(observed: &str) -> Option<String> {
+    let baseline = ARIA_SOURCE_SUFFIX_CALIBRATED_CODEGRAPH_VERSION;
+    // 实测输出可能带前缀（形如 `codegraph 1.6.3`）：按三元组比，避免同
+    // 一版本被误报成漂移。
+    let drifted = observed.trim() != baseline
+        && !matches!(
+            (parse_codegraph_version(observed), parse_codegraph_version(baseline)),
+            (Some(actual), Some(base)) if actual == base
+        );
+    if !drifted {
+        return None;
+    }
+    Some(format!(
+        "codegraph 版本漂移（不阻断激活）：已安装 {observed}，源码后缀清单校准基线 {baseline}；\
+         新版若不再收录清单内某后缀，该类仓会被判「漏收」而失败；\
+         复校准：按 cadence/notes/2026-11-18_校准_CodeGraph源码后缀清单_1.6.3_v1.0.md \
+         的测量命令重跑后缀收录表，更新 ARIA_SOURCE_EXTENSIONS 与基线常量"
+    ))
 }
 
 /// 五个失败构造函数（design D3）：message 必须含 `included members [`，

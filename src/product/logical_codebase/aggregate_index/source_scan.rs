@@ -57,6 +57,22 @@ pub const ARIA_SOURCE_EXTENSIONS: &[&str] = &[
     "tsx", "vb", "vue",
 ];
 
+/// `ARIA_SOURCE_EXTENSIONS` 的**校准基线 codegraph 版本**（实测
+/// `codegraph --version` 的版本号）。
+///
+/// - **校准基线**：1.6.3（实测收录表见
+///   `cadence/notes/2026-11-18_校准_CodeGraph源码后缀清单_1.6.3_v1.0.md`）。
+/// - **可复现测量命令**：逐后缀独立临时根放该语言最小有效样本 ⇒
+///   `codegraph init .` ⇒ `codegraph sync .` ⇒ `codegraph files --json`，
+///   样本出现在收录结果里 ⇒ 该版本会收录该后缀（生产 argv 以
+///   `codegraph_cli.rs` 为准）。
+/// - **复校准步骤**：换 codegraph 版本 ⇒ 重跑上面的测量 ⇒ 更新
+///   `ARIA_SOURCE_EXTENSIONS` ⇒ 更新本常量 ⇒ 在校准 notes 追加新基线 ⇒
+///   同步更新 `source_scope_tests` 的期望。
+/// - **漂移后果**：新版若不再收录清单内某后缀，该类仓会被判「漏收」而失败；
+///   运行期遇到版本漂移**只记可审计软告警、不阻断索引构建**。
+pub const ARIA_SOURCE_SUFFIX_CALIBRATED_CODEGRAPH_VERSION: &str = "1.6.3";
+
 /// 物理扫描段（`.worktrees/` 诊断）的深度上限（根深度 = 0）。
 pub const SOURCE_SCAN_MAX_DEPTH: usize = 32;
 /// 单成员条目上限（独立于整批上限）。
