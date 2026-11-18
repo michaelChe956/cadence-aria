@@ -1,7 +1,8 @@
 // WP6 Task 2：50 成员预算合成 case。
-//
 // fixture 只通过 LogicalCodebaseStore / AggregateIndexStore 直接落盘 manifest、members、
-// checkouts 与 index record；成员目录是普通临时目录，不创建 50 个真实 git 仓库。
+// checkouts 与 index record；成员目录是单提交的微型真实 git 仓（Story 前共享索引刷新
+// 会对每个成员主 checkout 执行 git rev-parse HEAD / status --porcelain，普通目录会让
+// 刷新以 aggregate_index_git_failed 失败，故复用 part_01 的 git 夹具辅助）。
 // evidence query 仍走真实 HTTP handler + 已有 CodeGraph 索引 fixture，不调用真实 Provider。
 
 use std::collections::HashSet;
@@ -74,14 +75,15 @@ impl FiftyMemberFixture {
         for index in 0..MEMBER_COUNT {
             let alias = format!("member-{index:02}");
             let member_root = aggregate_root.join(&alias);
-            fs::create_dir_all(&member_root).expect("synthetic member directory");
-            // The source is intentionally ordinary files: no real repository checkout or git
-            // command is needed for this budget/evidence correctness case.
+            // 真实 git 仓（含一次初始提交）：规划前的索引刷新要求每个成员主
+            // checkout 的 `git rev-parse HEAD` 返回 40 位 hex revision。
+            git_init_repo(&member_root);
             fs::write(
                 member_root.join("symbols.ts"),
                 format!("export function {BUDGET_QUERY}_{index:02}() {{ return {index}; }}\n"),
             )
             .expect("synthetic member source");
+            git_commit_all(&member_root);
 
             let logical_id = member_ids[index];
             let checkout_id = checkout_ids[index];
@@ -155,10 +157,10 @@ impl FiftyMemberFixture {
                     aggregate_index_id: "aggregate_index_50_members".to_string(),
                     project_id: PROJECT_ID.to_string(),
                     membership_revision: 1,
-                    // This store-only fixture intentionally has ordinary source directories,
-                    // not Git checkout metadata. Its index is a readable last-known-good
-                    // fixture, so the production fresh entrypoint must retain it without
-                    // attempting a Git/CodeGraph rebuild.
+                    // Degraded last-known-good fixture: the member snapshots below stay
+                    // synthetic, so the story pre-refresh (Active-only reuse gate)
+                    // re-syncs this index against the real member git checkouts above,
+                    // while the plain planning entrypoint keeps it as an LKG warning.
                     status: AggregateIndexStatus::Degraded,
                     member_snapshots: snapshots,
                     observed_after_member_snapshots: Vec::new(),
