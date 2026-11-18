@@ -130,39 +130,39 @@ impl HostPaths {
     fn from_env() -> Self {
         let home = nonempty_env_path("HOME").filter(|p| p.is_absolute());
         let resolve = |def: &ProviderDef| -> ProviderRoot {
-            if let Some(var) = def.sessions_env {
-                if let Some(value) = nonempty_env_path(var) {
-                    return if value.is_absolute() {
-                        ProviderRoot {
-                            path: Some(value),
-                            source: SOURCE_ENV,
-                            invalid_var: None,
-                        }
-                    } else {
-                        ProviderRoot {
-                            path: None,
-                            source: SOURCE_INVALID_ENV,
-                            invalid_var: Some(var),
-                        }
-                    };
-                }
+            if let Some(var) = def.sessions_env
+                && let Some(value) = nonempty_env_path(var)
+            {
+                return if value.is_absolute() {
+                    ProviderRoot {
+                        path: Some(value),
+                        source: SOURCE_ENV,
+                        invalid_var: None,
+                    }
+                } else {
+                    ProviderRoot {
+                        path: None,
+                        source: SOURCE_INVALID_ENV,
+                        invalid_var: Some(var),
+                    }
+                };
             }
-            if let Some(var) = def.home_env {
-                if let Some(value) = nonempty_env_path(var) {
-                    return if value.is_absolute() {
-                        ProviderRoot {
-                            path: Some(value.join(def.sessions_subdir)),
-                            source: SOURCE_ENV,
-                            invalid_var: None,
-                        }
-                    } else {
-                        ProviderRoot {
-                            path: None,
-                            source: SOURCE_INVALID_ENV,
-                            invalid_var: Some(var),
-                        }
-                    };
-                }
+            if let Some(var) = def.home_env
+                && let Some(value) = nonempty_env_path(var)
+            {
+                return if value.is_absolute() {
+                    ProviderRoot {
+                        path: Some(value.join(def.sessions_subdir)),
+                        source: SOURCE_ENV,
+                        invalid_var: None,
+                    }
+                } else {
+                    ProviderRoot {
+                        path: None,
+                        source: SOURCE_INVALID_ENV,
+                        invalid_var: Some(var),
+                    }
+                };
             }
             match &home {
                 Some(home) => ProviderRoot {
@@ -381,43 +381,42 @@ pub(super) fn build_with_sessions(
     }
     append_member(&mut bundle, "runtime-info.json", &runtime_bytes, mtime)?;
 
-    // Aria 聚合树。
+    // Aria 聚合树与各 provider 轨迹的收集：tar 写入、成员时间戳与预算经
+    // BundleWriter 一起流转；作用域结束后 bundle/budget 交还本函数做 manifest 计量。
     let mut aria = AriaAccumulator::default();
-    let aria_status: &'static str = match host.home.as_ref() {
-        None => "home_unavailable",
-        Some(home) => match Root::open(&home.join(".aria").join("projects")) {
-            Ok(root) => {
-                let mut scan_left = SCAN_ENTRY_BUDGET;
-                walk_aria(
-                    &mut bundle,
-                    &root,
-                    Path::new(""),
-                    0,
-                    false,
-                    mtime,
-                    &mut budget,
-                    &mut aria,
-                    &mut scan_left,
-                )?;
-                "ok"
-            }
-            Err(_) => "root_unavailable",
-        },
-    };
-
-    // 各 provider 轨迹（wire 名固定顺序，清单确定性）。
+    let aria_status: &'static str;
     let mut providers_json = Map::new();
-    for (idx, def) in PROVIDERS.iter().enumerate() {
-        let section = emit_provider(
-            idx,
-            def,
-            host.provider_root(idx),
-            &mut bundle,
+    {
+        let mut writer = BundleWriter {
+            bundle: &mut bundle,
             mtime,
-            &mut budget,
-            injected,
-        )?;
-        providers_json.insert(def.slug.to_string(), section);
+            budget: &mut budget,
+        };
+        aria_status = match host.home.as_ref() {
+            None => "home_unavailable",
+            Some(home) => match Root::open(&home.join(".aria").join("projects")) {
+                Ok(root) => {
+                    let mut scan_left = SCAN_ENTRY_BUDGET;
+                    walk_aria(
+                        &mut writer,
+                        &root,
+                        Path::new(""),
+                        0,
+                        false,
+                        &mut aria,
+                        &mut scan_left,
+                    )?;
+                    "ok"
+                }
+                Err(_) => "root_unavailable",
+            },
+        };
+
+        // 各 provider 轨迹（wire 名固定顺序，清单确定性）。
+        for (idx, def) in PROVIDERS.iter().enumerate() {
+            let section = emit_provider(idx, def, host.provider_root(idx), &mut writer, injected)?;
+            providers_json.insert(def.slug.to_string(), section);
+        }
     }
 
     // manifest.json 最后写入，包含最终计数与限额使用情况。
@@ -447,6 +446,19 @@ fn append_member(bundle: &mut Bundle, path: &str, data: &[u8], mtime: u64) -> io
     header.set_entry_type(tar::EntryType::Regular);
     // append_data 负责长相对路径的 GNU 扩展头及校验和，不能先用 set_path 截成 100 字节。
     bundle.append_data(&mut header, path, data)
+}
+
+/// 归档写入上下文：tar 成员、时间戳与预算在收集过程中一起流转。
+struct BundleWriter<'a> {
+    bundle: &'a mut Bundle,
+    mtime: u64,
+    budget: &'a mut Budget,
+}
+
+impl BundleWriter<'_> {
+    fn append(&mut self, path: &str, data: &[u8]) -> io::Result<()> {
+        append_member(self.bundle, path, data, self.mtime)
+    }
 }
 
 #[derive(Default)]
@@ -484,13 +496,11 @@ fn safe_component(name: &str) -> bool {
 }
 
 fn walk_aria(
-    bundle: &mut Bundle,
+    writer: &mut BundleWriter<'_>,
     root: &Root,
     rel: &Path,
     depth: usize,
     under_aggregate: bool,
-    mtime: u64,
-    budget: &mut Budget,
     acc: &mut AriaAccumulator,
     scan: &mut usize,
 ) -> io::Result<()> {
@@ -528,26 +538,16 @@ fn walk_aria(
         match entry.kind {
             Kind::Dir => {
                 let now_under = under_aggregate || ARIA_TREES.contains(&name.as_str());
-                walk_aria(
-                    bundle,
-                    root,
-                    &child,
-                    depth + 1,
-                    now_under,
-                    mtime,
-                    budget,
-                    acc,
-                    scan,
-                )?;
+                walk_aria(writer, root, &child, depth + 1, now_under, acc, scan)?;
             }
             Kind::File => {
                 if !under_aggregate || !name.ends_with(".json") {
                     continue; // 聚合树之外的旁文件/非 JSON 不收录
                 }
-                match aria_member_bytes(root, &child, budget) {
+                match aria_member_bytes(root, &child, &mut *writer.budget) {
                     Ok(bytes) => {
                         let member = format!("aria/projects/{}", child.display());
-                        append_member(bundle, &member, &bytes, mtime)?;
+                        writer.append(&member, &bytes)?;
                         acc.included.push(member);
                     }
                     Err(reason) => acc.skipped.push((child.display().to_string(), reason)),
@@ -665,10 +665,8 @@ fn redact_credentials(value: &mut Value) {
                 redact_credentials(item);
             }
         }
-        Value::String(text) => {
-            if looks_like_credential(text) {
-                *text = REDACTED.to_string();
-            }
+        Value::String(text) if looks_like_credential(text) => {
+            *text = REDACTED.to_string();
         }
         _ => {}
     }
@@ -705,11 +703,11 @@ fn emit_provider(
     idx: usize,
     def: &ProviderDef,
     root_info: &ProviderRoot,
-    bundle: &mut Bundle,
-    mtime: u64,
-    budget: &mut Budget,
+    writer: &mut BundleWriter<'_>,
     injected: &[(&'static str, Vec<Session>)],
 ) -> io::Result<Value> {
+    // 打包时刻：会话成员时间戳不可得时的回退值。
+    let mtime = writer.mtime;
     let mut warnings: Vec<&'static str> = Vec::new();
     let mut status: &'static str;
     let mut root: Option<Root> = None;
@@ -753,23 +751,15 @@ fn emit_provider(
     if let Some(root) = root.as_ref() {
         for (i, session) in sessions.iter().take(MAX_SESSIONS_PER_PROVIDER).enumerate() {
             let rank = i + 1;
-            let session_mtime = session
+            // 会话成员的 tar 时间戳跟随该会话最后修改时间。
+            writer.mtime = session
                 .modified
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(mtime, |age| age.as_secs());
             let prior_files = included_files.len();
             for (stream, member_rel) in session.members.iter().enumerate() {
-                let report = emit_trace_member(
-                    idx,
-                    def.slug,
-                    rank,
-                    stream,
-                    root,
-                    member_rel,
-                    bundle,
-                    session_mtime,
-                    budget,
-                )?;
+                let report =
+                    emit_trace_member(writer, idx, def.slug, rank, stream, root, member_rel)?;
                 if report.status == "included" {
                     included_files.push(report.member.clone());
                 }
@@ -777,6 +767,8 @@ fn emit_provider(
             }
             included_groups += usize::from(included_files.len() > prior_files);
         }
+        // 还原打包时刻，避免上一家的会话时间戳泄漏成下一家的回退值。
+        writer.mtime = mtime;
     }
 
     let mut section = Map::new();
@@ -803,15 +795,13 @@ fn emit_provider(
 /// 单个会话成员 → `providers/<wire>/<rank>/<stream>.jsonl`：8 MiB 尾窗、
 /// 不追追加、只投影完整可解析行；巨行/坏行不写原文。
 fn emit_trace_member(
+    writer: &mut BundleWriter<'_>,
     idx: usize,
     slug: &str,
     rank: usize,
     stream: usize,
     root: &Root,
     member_rel: &Path,
-    bundle: &mut Bundle,
-    mtime: u64,
-    budget: &mut Budget,
 ) -> io::Result<FileReport> {
     let member = format!("providers/{slug}/{rank}/{stream}.jsonl");
     let mut report = FileReport {
@@ -869,7 +859,7 @@ fn emit_trace_member(
     let mut stopped: Option<&'static str> = None;
     while stopped.is_none() && remaining > 0 {
         let want = remaining.min(chunk.len() as u64) as usize;
-        let granted = budget.grant_trace_input(idx, want as u64) as usize;
+        let granted = writer.budget.grant_trace_input(idx, want as u64) as usize;
         if granted == 0 {
             stopped = Some("budget_exhausted");
             break;
@@ -901,7 +891,7 @@ fn emit_trace_member(
                         idx,
                         &line,
                         &mut member_buf,
-                        budget,
+                        &mut *writer.budget,
                         &mut report,
                     ) {
                         Ok(()) => {}
@@ -927,7 +917,14 @@ fn emit_trace_member(
         if line_overflow {
             report.oversized_lines += 1;
         } else if !line.is_empty() {
-            match push_projected_line(slug, idx, &line, &mut member_buf, budget, &mut report) {
+            match push_projected_line(
+                slug,
+                idx,
+                &line,
+                &mut member_buf,
+                &mut *writer.budget,
+                &mut report,
+            ) {
                 Ok(()) => {}
                 Err("invalid_json") => report.invalid_lines += 1,
                 Err("budget_exhausted") => stopped = Some("budget_exhausted"),
@@ -944,7 +941,7 @@ fn emit_trace_member(
         report.status = "no_events";
         report.reasons.push("no_parseable_lines");
     } else {
-        append_member(bundle, &member, &member_buf, mtime)?;
+        writer.append(&member, &member_buf)?;
     }
     Ok(report)
 }
