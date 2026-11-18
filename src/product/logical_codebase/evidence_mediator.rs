@@ -163,8 +163,8 @@ pub fn handle_evidence_query_with_runner(
     }
 
     // ③b 输入校验（片8 M7：上提到分叉之前——跳过目标同样拒绝非法查询词；
-    // 拒绝语义与 evidence_index::validate_symbol 等价，普通支路内层不变）。
-    validate_query_symbol(&input.query)?;
+    // 直接复用 evidence_index 的权威 validate_symbol，不另存第二份口径）。
+    crate::product::logical_codebase::evidence_index::validate_symbol(&input.query)?;
 
     // ④ 快照钉住：首查写 pin，后续读钉住 record；stale 两方向判定。
     let pinned = load_or_pin_index(paths, &attempt, &manifest, lc_id.as_str())?;

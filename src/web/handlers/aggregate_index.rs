@@ -287,7 +287,7 @@ fn read_active_projection(
     }
     // 跳过告警只从「被投影的那一份」记录派生（REQ-IND-06：只读投影）；
     // 重建中不出提示（状态矩阵）；degraded 与失败三段并存，文案走历史措辞。
-    let skipped = skipped_member_names(paths, project_id, logical_codebase_id, projected)?;
+    let skipped = skipped_member_names(paths, project_id, logical_codebase_id, projected);
     if !skipped.is_empty() && response.state != "rebuilding" {
         let names: Vec<&str> = skipped.iter().map(String::as_str).collect();
         response.source_less_alert = Some(member_source_less_alert(
@@ -321,9 +321,9 @@ pub(crate) fn skipped_member_names(
     project_id: &str,
     logical_codebase_id: &str,
     record: Option<&AggregateIndexRecord>,
-) -> ApiResult<Vec<String>> {
+) -> Vec<String> {
     let Some(record) = record else {
-        return Ok(Vec::new());
+        return Vec::new();
     };
     let skipped: Vec<&AggregateIndexMemberSnapshot> = record
         .member_snapshots
@@ -331,7 +331,7 @@ pub(crate) fn skipped_member_names(
         .filter(|snapshot| snapshot.skip_reason.is_some())
         .collect();
     if skipped.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let store = LogicalCodebaseStore::for_lc(paths.clone(), logical_codebase_id);
     let members = store
@@ -349,7 +349,7 @@ pub(crate) fn skipped_member_names(
             names.push(member.alias.clone());
         }
     }
-    Ok(names)
+    names
 }
 
 /// 快照的 checkout 是否仍是该成员「当前可用的 Main 检出」（双键匹配）；

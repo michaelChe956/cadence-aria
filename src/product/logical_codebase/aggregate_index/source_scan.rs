@@ -1156,7 +1156,8 @@ mod tests {
             "fixture premise broken: git must still list the tracked file, got {visible:?}"
         );
         assert_eq!(
-            verdict, MemberSourceVerdict::Unknown,
+            verdict,
+            MemberSourceVerdict::Unknown,
             "unreadable directory is insufficient evidence, not NoSource"
         );
     }

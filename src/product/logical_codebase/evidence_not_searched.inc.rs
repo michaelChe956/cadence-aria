@@ -13,30 +13,6 @@ use crate::product::logical_codebase::failure_copy::{
     MEMBER_SOURCE_LESS_CODE, member_source_less_evidence_copy,
 };
 
-/// 查询符号的字符上限——与 `evidence_index` 的 `MAX_QUERY_SYMBOL_CHARS`
-/// 等价（该常量私有无法跨模块引用；两处必须同步，普通支路内层
-/// `validate_symbol` 保持权威不变）。
-const EVIDENCE_QUERY_SYMBOL_CHAR_LIMIT: usize = 512;
-
-/// 入口级查询词校验（片8 M7：上提到分叉之前——跳过目标同样拒绝非法
-/// 查询词；错误类型与 message 与 evidence_index::validate_symbol 逐字一致）。
-fn validate_query_symbol(symbol: &str) -> Result<(), EvidenceError> {
-    if symbol.trim().is_empty() {
-        return Err(EvidenceError::InvalidQuery {
-            reason: "query symbol must not be empty".to_string(),
-        });
-    }
-    if symbol.chars().count() > EVIDENCE_QUERY_SYMBOL_CHAR_LIMIT {
-        return Err(EvidenceError::InvalidQuery {
-            reason: format!(
-                "query symbol exceeds {EVIDENCE_QUERY_SYMBOL_CHAR_LIMIT} chars (got {})",
-                symbol.chars().count()
-            ),
-        });
-    }
-    Ok(())
-}
-
 /// 目标被钉住世代判定为「已确认无源码、未纳入代码检索」时的事实；与
 /// 「检索过但无命中」显式区分（REQ-COD-05）。与卡片/成员行告警同构。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

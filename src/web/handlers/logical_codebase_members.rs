@@ -145,17 +145,13 @@ fn source_less_alerts(
         return alerts;
     };
     // 共享口径：被跳过的成员名单（成员/检出读不到 ⇒ 空集，不报错）。
-    let skipped = skipped_member_names(paths, project_id, logical_codebase_id, Some(projected))
-        .unwrap_or_default();
+    let skipped = skipped_member_names(paths, project_id, logical_codebase_id, Some(projected));
     if skipped.is_empty() {
         return alerts;
     }
     // 精确到成员行：快照上的跳过事实 + 该成员当前可用的 Main 检出（共享判定）。
     let store = LogicalCodebaseStore::for_lc(paths.clone(), logical_codebase_id);
     for member in members {
-        if !skipped.iter().any(|alias| alias == &member.alias) {
-            continue;
-        }
         let skipped_by_snapshot = projected.member_snapshots.iter().any(|snapshot| {
             snapshot.logical_repository_id == member.logical_repository_id
                 && snapshot.skip_reason.is_some()
