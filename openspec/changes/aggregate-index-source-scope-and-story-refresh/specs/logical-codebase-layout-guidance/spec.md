@@ -2,7 +2,7 @@
 
 ### Requirement: 布局规则与稳定错误码（REQ-LAYOUT-01）
 
-系统 SHALL 维护单一布局规则表，覆盖六条规则：(1) 聚合根 MUST NOT 是 git 仓；(2) 每个成员仓 MUST 是聚合根的直接子目录；(3) 成员路径 MUST NOT 经符号链接绕出根；(4) 同一聚合根 MUST NOT 被两个逻辑代码库占用（含跨项目）；(5) 成员仓 MUST NOT 是嵌套 worktree；(6) 聚合索引至少需要一个**已覆盖**成员；索引未覆盖、且经 Aria 有界盘检在成员主工作目录与 `.worktrees/` 两段范围均**确认无源码**的成员 MAY 跳过并告警（只跳过代码检索，MUST NOT 移除项目成员，MUST NOT 阻断激活）。规则六的判定由聚合索引契约拥有，本能力 MUST NOT 修改登记准入或另建判定，也 MUST NOT 把「无法确认是否有源码」当作无源码。
+系统 SHALL 维护单一布局规则表，覆盖六条规则：(1) 聚合根 MUST NOT 是 git 仓；(2) 每个成员仓 MUST 是聚合根的直接子目录；(3) 成员路径 MUST NOT 经符号链接绕出根；(4) 同一聚合根 MUST NOT 被两个逻辑代码库占用（含跨项目）;(5) 成员仓 MUST NOT 是嵌套 worktree；(6) 聚合索引至少需要一个**已覆盖**成员；索引未覆盖、且经 Aria 有界盘检在成员主工作目录（**git 可见范围**，`git ls-files --cached --others --exclude-standard`）与 `.worktrees/` 两段范围均**确认无源码**的成员 MAY 跳过并告警（只跳过代码检索，MUST NOT 移除项目成员，MUST NOT 阻断激活）。**被 `.gitignore` 忽略的文件不算源码**，MUST NOT 被判为「确有源码」而触发漏收失败。规则六的判定由聚合索引契约拥有，本能力 MUST NOT 修改登记准入或另建判定，也 MUST NOT 把「无法确认是否有源码」当作无源码。
 
 #### Scenario: 聚合根是 git 仓
 
@@ -41,8 +41,13 @@
 
 #### Scenario: 未覆盖且确有源码或不能确认
 
-- **WHEN** 索引未覆盖某成员，但该成员普通路径有源码、源码仅在 `.worktrees/`，或盘检因权限/超时/超限未能确认
-- **THEN** 系统 SHALL 分别采用 `aggregate_index_member_coverage_failed`、`aggregate_index_member_source_excluded`、`aggregate_index_source_scan_incomplete`；MUST NOT 把这些事实标为无源码或当作可跳过
+- **WHEN** 索引未覆盖某成员，但该成员普通路径在 **git 可见范围内**有源码、源码仅在 `.worktrees/`，或盘检因权限/超时/超限未能确认
+- **THEN** 系统 SHALL 分别采用 `aggregate_index_member_coverage_failed`、`aggregate_index_member_source_excluded`、`aggregate_index_source_scan_incomplete`；MUST NOT 把这些事实标为无源码或当作可跳过；被 `.gitignore` 忽略的文件 MUST NOT 归入「确有源码」
+
+#### Scenario: 被忽略的源码按无源码成员跳过
+
+- **WHEN** 某成员普通路径只有被 `.gitignore` 忽略的源码文件，索引未覆盖它
+- **THEN** 系统 SHALL 按第六条把它当作「确认无源码」的可跳过成员并告警，MUST NOT 报漏收失败（CodeGraph 同样不收录这些文件）
 
 #### Scenario: 全部成员无源码仍失败
 

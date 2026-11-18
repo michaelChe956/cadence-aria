@@ -17,7 +17,7 @@
 判定顺序（先覆盖、后盘检、再汇总）：
 
 1. **成员覆盖**：SDK 逐成员 `hasFilesUnder` 为主路径；SDK 不可用/不兼容才回退 CLI `files --json`（`verify` 内的回退块与 `verify_member_coverage`）。CLI 的空索引提示 `codegraph_files_empty_index` 在验收层归一为「全员未覆盖 → 进入交叉验收」，**不**解释成截断、非法 JSON 或协议错误。
-2. **有界盘检**：只对**未被覆盖**的成员，在其**主工作目录**内按 Aria 自有源码类型清单做一次有界盘检（口径见 D2），产出四值结论：`SourceInNormalPath` / `SourceOnlyInWorktrees` / `NoSource` / `Unknown`（权限、超时、超限、IO 失败一律 `Unknown`）。
+2. **有界盘检**：只对**未被覆盖**的成员，在其**主工作目录**内按 Aria 自有源码类型清单做一次有界盘检（口径见 D2：源码候选只取 **git 可见范围** `git ls-files --cached --others --exclude-standard` ∩ Aria 源码后缀集，扣除 Aria 自身排除；**被 `.gitignore` 忽略的文件不算源码**），产出四值结论：`SourceInNormalPath` / `SourceOnlyInWorktrees` / `NoSource` / `Unknown`（权限、超时、超限、IO 失败、git 侧失败一律 `Unknown`）。
 3. **汇总**：
    - 至少一个成员被覆盖，且其余未覆盖成员**全部**为 `NoSource` ⇒ 通过其它验收后可发布 active，并把 `NoSource` 成员记为本世代的**跳过事实**；
    - 出现 `SourceInNormalPath`（漏收）/ `SourceOnlyInWorktrees` / `Unknown` / 全部成员 `NoSource` ⇒ **失败**，不发布新 active；
@@ -45,6 +45,7 @@
 - 保守清单只纳入「确定被 CodeGraph 收录」的常见源码后缀（`.rs/.ts/.tsx/.js/.jsx/.py/.go/.java/...` 这类），实施不等待探针。
 - 逐后缀探针按语言各造**最小有效样本**（不能拿同一个 JS 样本改后缀），每个版本用独立临时根，按生产 argv 跑 `init .` / `sync .` / `files --json`，正反两组逐项出表；产物只落 `/tmp`。
 - 探针必须覆盖部署支持的版本基线（现行兼容区间 `>=1.6.0, <2.0.0`，`src/product/logical_codebase/aggregate_index/codegraph_cli.rs` 的版本常量与探测函数）。
+- **可见范围口径探针（G5）**：每个版本基线各验一次「被 `.gitignore` 忽略的文件不被 codegraph 收录、git 可见范围内的文件（含未跟踪但未被忽略的）被收录」这一条，正反两组逐项出表，使探针结论与扫描口径一致；该探针与后缀探针同属**并行前置、非阻塞门禁**，未跑完不阻塞盘检实现与其余工作包。
 - 探针结论 SHALL 以「增补已登记后缀」的方式落地；探针未跑完 **MUST NOT 阻塞**盘检实现与其余工作包。保守清单的偏保守后果是「多跳过」（不报错）而不是「误报错」，方向安全；探针回来后增补即可减少跳过面。
 - 清单、兼容基线或推荐版本变更前重跑探针；探针未跑通则**不宣称**兼容已验收。
 
@@ -57,10 +58,49 @@
 - 符号链接（目录与文件）与非普通文件**都不算**源码；目录打开不跟随符号链接。
 - 排除口径**复用**既有 11 条内建规则（`src/product/logical_codebase/aggregate_index/exclude.rs` 的 `BUILTIN_EXCLUDES`）与 `codegraph.json` 生成口径，**不另写副本**；普通遍历剪枝 `.git/.aria/node_modules/target/build/dist/.worktrees`。其中 4 条非目录固定名模式（`**/.env`、`**/.env.*`、`**/*credential*`、`**/*secret*`）在**目录条目**上按名字匹配剪枝（`credentials/`、`secret-notes/` 这类目录不进入），不得改成文件级规则或另行放宽。
 - `.worktrees/` 是**独立的第二段诊断**：普通路径查完且无源码时才查 `.worktrees/` 子树；两段都无候选且都完成 ⇒ `NoSource`；在 `.worktrees/` 找到候选 ⇒ `SourceOnlyInWorktrees`（失败，不是跳过）。`.worktrees` 入口本身是符号链接或不存在 ⇒ 该段「无候选且完成」，不跟随、不算失败。
-- **不模拟 `.gitignore`**：普通路径有源码但被 ignore 仍是真漏收（提示查规则，不是「配置仓」）。
-- **有界性**：根深度 0、上限深度 32；每成员最多访问 20,000 个目录条目、单次验收整批 100,000 条目、**2 秒**（含 worktree 诊断，共享同一计数与 deadline）；命中普通路径源码即停；不展开全量路径、不读内容、不起 git/CodeGraph 来扫描。超限/超时/权限不足 ⇒ `Unknown`。
+- **可见范围与 codegraph 同口径（G1 · 方向性更正，取代旧稿「不模拟 `.gitignore`」）**：判定「该成员有没有源码」时，源码候选**只取 git 可见范围**——在该成员**主工作目录**内执行 `git ls-files --cached --others --exclude-standard`（已跟踪的文件 + 未跟踪且未被忽略的文件），与 Aria 源码后缀集求交，再扣除 Aria 自身排除（与既有内建排除规则表同源、不另写副本；与本条直接相关的典型项为 `build/`、`dist/`、`node_modules/`、`.worktrees/`、`.aria/`、`.env*`、`*credential*`、`*secret*`）。**被 `.gitignore` 忽略的文件不算源码**：既不判「漏收」失败，该成员按「无源码成员」走跳过分支（只跳过代码检索，不移除成员、不阻断激活）。旧稿「普通路径有源码但被 ignore 仍是真漏收」**已作废**——它会把「codegraph 永不收录、git 也看不见」的文件算成漏收，产出「任何含被忽略源码文件的仓永远建不出索引」的死锁（同步多少次都没用）。
+- **第二段诊断不受可见范围收窄**：上条只界定**普通路径**的「有没有源码」；`.worktrees/` 仍是 D2 既有的独立第二段诊断（物理扫描 `.worktrees/` 子树），它的用途正是报告「源码存在但被 Aria 排除」这一事实，失败码 `aggregate_index_member_source_excluded` 的语义不变。`.worktrees/` 条目在可见范围求交时按 Aria 自身排除扣掉，因此它**不计入**普通路径的源码判定。
+- **git 侧异常按「无法确认」**：主工作目录不是 git 仓、git 不可用、命令失败或超时 ⇒ 结论为 `Unknown`（无法确认），MUST NOT 当成「无源码」。可见清单里可能含工具自身生成的非源码条目（如 `.codegraph/.gitignore`），按后缀与排除规则过滤即可，不构成异常。
+- **有界性**：根深度 0、上限深度 32（深度上限只约束物理扫描段，即 `.worktrees/` 第二段诊断）；可见清单的枚举与后缀过滤同样计入预算——每成员最多 20,000 个条目、单次验收整批 100,000 条目、**2 秒**（含第二段诊断，共享同一计数与 deadline）；命中普通路径源码即停；不展开全量路径、不读内容。盘检允许且**必须**调用只读的 `git ls-files --cached --others --exclude-standard` 取可见范围，MUST NOT 起 CodeGraph 进程、MUST NOT 写 git 状态或改动工作区。超限/超时/权限不足/git 侧失败 ⇒ `Unknown`。
 - 扫描期间已证实普通路径有源码时，无需继续收集无关错误；**仅部分完成且无正证据时必须返回 `Unknown`**（不能把「没查完」当「没有源码」）。
 - 交叉验收入口要能为测试注入时钟/取消信号与预算：聚合内部函数现成地各自新建预算，测试不得靠真实 sleep；实现时把预算/时限作为可注入参数（详见 `tasks.md` 的 T01 验收要点）。
+
+### G0 实测事实（可见范围口径，2026-11-18）
+
+**结论**：被 `.gitignore` 忽略的文件，对 **git 与 codegraph 同时「不存在」**——codegraph 永不收录它，因此增量同步也救不回来。凡是「codegraph 收录范围」的口径判定（有无源码、真漏收）都必须与 git 可见范围同口径，否则会出现「含被忽略源码文件的仓永远建不出索引」的死锁。
+
+**实测环境**：本机 `codegraph` **1.6.3**（部署兼容区间 `>=1.6.0, <2.0.0` 的下沿实测点）；临时 git 仓，产物只落 `/tmp`。
+
+**可复现命令与结果**（本轮已实测复核）：
+
+```bash
+T=$(mktemp -d /tmp/cg-vis-XXXX); cd "$T"
+git init -q .
+printf 'sandbox/\n' > .gitignore
+mkdir -p src sandbox
+printf 'export const a = 1;\n' > src/tracked.ts     # 已跟踪
+printf 'export const u = 3;\n' > src/untracked.ts   # 未跟踪、未被忽略
+printf 'export const b = 2;\n' > sandbox/ignored.ts  # 被 .gitignore 忽略
+git add .gitignore src/tracked.ts
+git -c user.email=a@b -c user.name=t commit -qm init
+
+codegraph init .
+codegraph files
+git ls-files --cached --others --exclude-standard
+git status --porcelain
+```
+
+- `codegraph files` ⇒ 收录 `src/tracked.ts` 与 `src/untracked.ts`（**未跟踪但未被忽略的文件同样被收录**），**未收录** `sandbox/ignored.ts`。
+- `git ls-files --cached --others --exclude-standard` ⇒ 同一可见集合（已跟踪 + 未跟踪且未被忽略），`sandbox/ignored.ts` 不在其中；可见清单里另含工具自身生成的非源码条目 `.codegraph/.gitignore`。
+- `git status --porcelain` ⇒ 仅 `?? src/untracked.ts`（被忽略文件**不参与** dirty 判定）。
+
+**该事实对契约的三处约束**：
+
+1. 盘检的「有没有源码」判定**只取 git 可见范围**（G1，见上）；
+2. 「真漏收」只在 git 可见范围内成立，被忽略文件不判漏收、不判失败（G3）；
+3. 「上次与本次都无未提交修改」以 `git status --porcelain` 为准，被忽略文件不参与（G4）。
+
+**未证实**：`.worktrees/` 第二段诊断是否也应收窄到 git 可见范围——本轮**不做收窄**（保持 D2 既有物理扫描语义），因为它的用途正是报告「源码存在但被 Aria 排除」；该边界的最终形态留给实施时验证 `.worktrees/` 条目在 `git ls-files --others --exclude-standard` 下的实际输出后再定，本次只冻结「普通路径按 git 可见范围」这一条。
 
 ## D3 · 覆盖验收四态与错误码取舍（十个失败码 + 一个告警码）
 
@@ -68,7 +108,7 @@
 
 | 盘检结论 | 事实 | 出口 | 稳定码 |
 |---|---|---|---|
-| `SourceInNormalPath` | 普通路径有 Aria 源码，索引未收录 | 失败，不发布新 active | **复用** `aggregate_index_member_coverage_failed` |
+| `SourceInNormalPath` | 普通路径**git 可见范围内**有 Aria 源码，索引未收录 | 失败，不发布新 active | **复用** `aggregate_index_member_coverage_failed` |
 | `SourceOnlyInWorktrees` | 源码只在被排除的 `.worktrees/` | 失败，不发布新 active | 新增 `aggregate_index_member_source_excluded` |
 | `Unknown` | 权限/超时/超限/IO 失败，无法确认 | 失败，不发布新 active | 新增 `aggregate_index_source_scan_incomplete` |
 | `NoSource` | 两段范围都确认无源码 | **跳过该成员**（非阻断告警）；若因此没有任何被覆盖成员 ⇒ 失败 | 新增告警码 `aggregate_index_member_source_less`；无被覆盖成员时用新增 `aggregate_index_all_members_source_less` |
@@ -94,6 +134,8 @@
 - 新事实前缀 `source found on disk; no indexed files under included members [...]` ⇒ 新成品（点名漏收成员、说明「磁盘上有源码但索引没收录」、指引检查成员路径与忽略规则后重建）。
 
 两个变体都登记在 `failure_copy_table.inc.rs` 这**同一张表**里，不另建文案表；新事实**不得**渲染成旧成品（会把用户的忽略规则问题说成「没放源码」），旧记录**不得**渲染成新成品（会编造磁盘证据）。既有 `subject_from_message` 的点名解析对新旧两种前缀都成立（都以 `included members [` 结尾），不重做三段 UI。**变体只挑模板**：归因与码表查找仍用 canonical 码（`failure_copy.rs` 的 `canonical_key`），`machine_line` 仍写原始稳定码——内部变体键（如 `.disk_source`）MUST NOT 替换 canonical key。
+
+**G1 之后这段文案的边界**：漏收事实现在**只在 git 可见范围内成立**（被 `.gitignore` 忽略的文件不算源码、不判漏收），因此成品文案**保持既有登记文本不变**（文案单一来源在 `failure_copy_table.inc.rs`，本变更不改码表、不新增第二份文案）；文案里「检查成员路径与忽略规则」这句是**通用排查指引**，不是「你的源码被忽略了」的断言。
 
 **失败封套的解析只有一个出口（冷启动必须接住）**：持久化失败封套（`aggregate_index_failed:<code>: <message>` / `aggregate_index_degraded:<code>: <message>`）到「内层稳定码 + 原始事实 + 三段成品」的解析 SHALL 放在**产品层**（`src/product/logical_codebase/failure_copy`），由 HTTP 出口（`src/web/handlers/aggregate_index.rs` 的 `failure_copy_from_warning`，改造后委托给该产品层入口）与**冷启动投影**（`src/product/logical_codebase/bootstrap_projector.inc.rs` 中 `AggregateIndexStatus::Failed` 分支决定 `reason_code` 的那段）共用。
 
@@ -140,10 +182,12 @@ skip_reason: Option<AggregateIndexMemberSkipReason>   // wire: "no_source"
 **三个分支**：
 
 1. **无可用索引** ⇒ 走既有**首次建库**流程（登记与主工作目录已就绪时），不是每新建一个 Issue 就从头建库。这里的「无可用索引」精确指**没有任何可读世代**（`assess()` 走 `active_required` 报 `aggregate_index_active_missing` 的情形，`src/product/logical_codebase/aggregate_index/store.rs`）；记录**读坏/归属不明/彼此矛盾**是另一回事，SHALL 按既有失败规则报错，MUST NOT 静默首建。
-2. **能确认没变** ⇒ 复用当前这一版。判据（全部满足才算「能确认」）：成员集合未变、主工作目录（唯一 available Main checkout 的身份）未变、Git 提交未变、**上次与本次都无未提交修改**，且**当前世代不含跳过成员**。任一成员上次或本次 `dirty = true` ⇒ **不能确认没变**（工作区内容可能在两次检查之间被改过，revision 不变也说明不了文件没变）。
-3. **有变化或不能确认没变** ⇒ 实际做**增量同步**（`codegraph sync` 语义）并**重新验收**（走 D1 的同一套判定）。**当前世代含跳过成员也归入本分支**：被 `.gitignore` 隐藏的新增源码对 revision/dirty 完全不可见，只要沿用上一代的跳过事实就等于「没证据也当没变」；这条保守分支的代价是一次增量同步（实测 3.4s 量级），换来跳过结论按本次盘检重算。上次更新失败留下的旧版**不能**直接当成最新版：先尝试恢复并验收。
+2. **能确认没变** ⇒ 复用当前这一版。判据（全部满足才算「能确认」）：成员集合未变、主工作目录（唯一 available Main checkout 的身份）未变、Git 提交未变、**上次与本次都无未提交修改**。任一成员上次或本次 `dirty = true` ⇒ **不能确认没变**（工作区内容可能在两次检查之间被改过，revision 不变也说明不了文件没变）。**「无未提交修改」以 `git status --porcelain` 为准**（既有快照采集即用 `git status --porcelain=v1`，`src/product/logical_codebase/aggregate_index/snapshot.rs` 的成员快照采集路径）：**被 `.gitignore` 忽略的文件不参与 dirty 判定**，因此既不会让分支 2 失效，也不会让分支 3 被无谓触发。**当前世代含跳过成员不再收窄分支 2**（G2：旧稿的「当前世代不含跳过成员」附加条件已删除）。
+3. **有变化或不能确认没变** ⇒ 实际做**增量同步**（`codegraph sync` 语义）并**重新验收**（走 D1 的同一套判定）。归入本分支的情形：成员集合/主工作目录/提交变了、**上次或本次显示有未提交修改**（两次都脏时即使 revision 相同也必须同步，否则同一 dirty 布尔会掩盖两次检查之间的改动）。上次更新失败留下的旧版**不能**直接当成最新版：先尝试恢复并验收。
 
-**为什么「无跳过成员」才允许走分支 2**：分支 2 的证据只有「成员集合 / checkout / revision / dirty」，对**被忽略的新增文件**是盲的；而跳过成员的覆盖结论恰恰依赖盘检。把「当前世代含跳过成员」放进分支 3，是唯一不需要在 freshness 里盘检（裁决 2 禁止）又能给出可信结论的做法。
+**为什么分支 2 不再要求「当前世代不含跳过成员」（G2 · 方向性更正）**：旧稿把「含跳过成员」收窄进分支 3，理由是「被 `.gitignore` 隐藏的新增源码对 revision/dirty 完全不可见」。G0 实测（见 D2「G0 实测事实」）推翻了这条前提：**被 `.gitignore` 忽略的文件，codegraph 永不收录**（增量同步也救不回来），因此它既不构成漏收、也不构成「不能确认没变」——它对 codegraph 收录范围**根本不可见**，谈不上「变了」。git 可见范围内的任何变化已经被「脏 ⇒ 同步」与「提交/成员集合变化 ⇒ 同步」两条覆盖。因此分支 2 的四项判据（成员集合 / 主工作目录 / Git 提交 / 上次与本次都无未提交修改）已经足够，**删除**「当前世代不含跳过成员」这一附加条件。
+
+**代价与收益**：旧稿的收窄条件会让「含跳过成员的世代」每次 Story 都强制多跑一次增量同步（实测 3.4s 量级，临时夹具）；撤销后该副作用消失——干净且未变的世代（含跳过成员）直接复用，不再无谓同步。**被忽略的文件既不判漏收、也不参与变更检测**（D2 的 G1 与本节的 G4 一致）。
 
 **并发**：若初始化或另一次重建正在更新同一份索引，就**等待并复核结果**，不并行写两份（既有 single-writer 互斥）。**锁只串行化写入，不替调用方复核**：拿到锁/拿到结果之后，成功与否 SHALL 以**本次实际验收并发布的记录**为准，MUST NOT 用仍带 dirty 的重新评估结果去否定一次刚刚成功的验收（否则「同步成功但因为工作区仍脏被判失败」会误停 AI）。
 
@@ -153,7 +197,7 @@ skip_reason: Option<AggregateIndexMemberSkipReason>   // wire: "no_source"
 
 **记录**：通过后记录这份 Story 参考的索引版本（沿用既有 planning snapshot 的 `aggregate_index_id` / `index_revision` 字段）。
 
-**重新验收的触发点（不做自动发现）**：成员集合 / `membership_revision` 变化、成员 revision/dirty 漂移、手动重建、本节的第三分支（含「含跳过成员」的保守分支）。除此之外没有发现「跳过成员后来出现源码」的通路；两次验收之间新增的源码要等下一次触发才被发现，这是已接受的时间窗。
+**重新验收的触发点（不做自动发现）**：成员集合 / `membership_revision` 变化、成员 revision/dirty 漂移、手动重建、本节的第三分支（成员/主工作目录/提交变化，或上次或本次有未提交修改）。除此之外没有发现「跳过成员后来出现源码」的通路；两次验收之间新增的源码要等下一次触发才被发现，这是已接受的时间窗。**「当前世代含跳过成员」不再是触发点**（G2）。
 
 **取舍论证（实测耗时）**：本机临时夹具（`/tmp` 隔离，**不是用户现场**）：69 个成员仓 / 1380 个源码文件 / 约 23 MB。
 
@@ -165,7 +209,7 @@ skip_reason: Option<AggregateIndexMemberSkipReason>   // wire: "no_source"
 | 强制 `codegraph sync`（命令本身） | **2.0–10.6s** |
 | 已有库上走「重建索引」后端路径 | **1.8s** |
 
-结论：**每次检查、变了才同步**。每次 Story 前必跑全量建库（24.6s 量级）不可接受；每次必跑增量同步（2.0–10.6s 量级，且 69 仓现场更慢）也不必要；而「未变检查」只要 0.24s 量级，可以每次都跑。**「上次与本次都显示有未提交修改」时必须同步**（3.4s 量级），因为 revision 相同不代表文件没变；**含跳过成员的世代也必须同步**，因为被忽略的新增源码同样不可见。数字来自临时夹具，**不得**当成用户现场的规模承诺；用户现场规模更大时按比例放大，但分支结构不变。
+结论：**每次检查、变了才同步**。每次 Story 前必跑全量建库（24.6s 量级）不可接受；每次必跑增量同步（2.0–10.6s 量级，且 69 仓现场更慢）也不必要；而「未变检查」只要 0.24s 量级，可以每次都跑。**「上次与本次都显示有未提交修改」时必须同步**（3.4s 量级），因为 revision 相同不代表文件没变；**两次都脏时即使提交号相同也必须同步**，否则同一个 dirty 布尔会掩盖两次检查之间的改动。被 `.gitignore` 忽略的文件**不参与**变更检测（G4，`git status --porcelain` 口径），因此不会因为它们而触发同步。数字来自临时夹具，**不得**当成用户现场的规模承诺；用户现场规模更大时按比例放大，但分支结构不变。
 
 ## D6 · 配置仓目标的证据链语义：200 + 显式「未检索」
 
@@ -207,12 +251,13 @@ skip_reason: Option<AggregateIndexMemberSkipReason>   // wire: "no_source"
 ## D8 · 取舍、残余风险与未证实项
 
 - **判定放在验收层而非 UI 层**：UI 只消费成品，不复算「有没有源码」；避免前后端两套口径。
-- **盘检是元数据扫描**：只按后缀、不读内容、不起 git/CodeGraph；代价是保守清单（探针未跑完前）会少认一些语言 —— 方向是「多跳过」而不是「误报错」，探针结论回来后增补后缀即可收窄。
+- **盘检是元数据扫描**：只按后缀、不读内容；源码候选只取 **git 可见范围**（`git ls-files --cached --others --exclude-standard`，只读调用 git，不起 CodeGraph）；代价是保守清单（探针未跑完前）会少认一些语言 —— 方向是「多跳过」而不是「误报错」，探针结论回来后增补后缀即可收窄。
 - **超限宁可失败**：扫描超限要求修复可读性或缩小工作树，宁可保留 last-known-good，也不扩大预算临时放行；无法确认绝不等于无源码。
-- **「上次与本次都脏」必须同步**、**「含跳过成员」必须同步**：牺牲 3.4s 量级，换取 Story 引用的是当次工作区内容；这是把「不能确认没变」并入第三分支的代价。
+- **「上次与本次都脏」必须同步**：牺牲 3.4s 量级，换取 Story 引用的是当次工作区内容；这是把「不能确认没变」并入第三分支的代价。**「含跳过成员」不再强制同步**（G2 已撤回），否则每次 Story 都要多跑一次增量同步。
 - **不拉远端**：「最新」只指本地成员主工作目录；远端更新由用户自己同步后再生成为准。
-- **不做自动发现**：跳过成员的源码后来出现时，要等下一次验收/重建（含 Story 前刷新落第三分支）才重新判断；时间窗是已接受的残余风险，不用后台扫描或 freshness 盘检来消除。
+- **不做自动发现**：跳过成员的源码后来出现时，要等下一次验收/重建才重新判断；时间窗是已接受的残余风险，不用后台扫描或 freshness 盘检来消除。
 - **残余风险（已知）**：CodeGraph 已覆盖但内容不足仍由既有验收边界负责；`REQ-BOOT-10` 的标题仍写「七个」（为 delta 匹配保留），以正文的十个失败码为准。
+- **残余风险（G1 带来，已接受）**：源码写在被 `.gitignore` 忽略的路径里的成员，会被判为「无源码」并进入跳过告警——**不报漏收**（codegraph 同样不收录它，报漏收是死锁）。用户看到的措辞仍是「确认无源码」口径，**不新增文案**（文案单一来源在 `failure_copy_table.inc.rs`）；「被忽略的源码要不要纳入索引」是用户自己管理 `.gitignore` 的事，本变更不介入。
 - **未证实（实施时必须验证，不得在契约里假定）**：
   1. Aria 源码类型清单的**具体后缀集合**（D2 的探针；不阻塞开工）；
   2. 本机 CodeGraph 安装包内上游扩展名表的准确位置与内容（旧稿勘察记录，**未证实**）；

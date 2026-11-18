@@ -13,7 +13,7 @@
 - `aggregate_index_source_scan_incomplete`：因权限、超时、超限或 IO 失败**无法确认**成员是否有源码（`Environment`）；MUST NOT 宣称该成员没有源码，动作为检查主 checkout 可读性与扫描范围后重建。
 - `aggregate_index_member_source_less`：**告警码**，表示成员经确认无源码、被跳过代码检索但仍是项目成员；它 MUST NOT 加入失败码集合，MUST NOT 触发失败通知，MUST NOT 以失败五字段传输。
 
-第六条既有码 `aggregate_index_member_coverage_failed` SHALL 支持两个成品变体，按持久化失败事实的机器事实前缀选择：旧记录（`no indexable code file under included members [...]`）SHALL 沿用既有成品，只说明覆盖不足，MUST NOT 编造磁盘有源码的证据；新事实（`source found on disk; no indexed files under included members [...]`）SHALL 点名漏收成员、说明磁盘上有源码但索引未收录，并给出检查成员路径与忽略规则后重建的处置，MUST NOT 责怪用户没有放源码。两个变体 SHALL 登记在本来源的同一张码表内，MUST NOT 另建文案表；新事实 MUST NOT 渲染成旧成品，旧记录 MUST NOT 渲染成新成品。
+第六条既有码 `aggregate_index_member_coverage_failed` SHALL 支持两个成品变体，按持久化失败事实的机器事实前缀选择：旧记录（`no indexable code file under included members [...]`）SHALL 沿用既有成品，只说明覆盖不足，MUST NOT 编造磁盘有源码的证据；新事实（`source found on disk; no indexed files under included members [...]`）SHALL 点名漏收成员、说明磁盘上有源码但索引未收录，并给出检查成员路径与忽略规则后重建的处置，MUST NOT 责怪用户没有放源码。两个变体 SHALL 登记在本来源的同一张码表内，MUST NOT 另建文案表；新事实 MUST NOT 渲染成旧成品，旧记录 MUST NOT 渲染成新成品。**新事实（漏收）只在 git 可见范围内成立**：被 `.gitignore` 忽略的文件对 CodeGraph 与 git 同时不可见，MUST NOT 产生该变体的事实；被忽略的文件按「确认无源码」的可跳过成员处理（见 `REQ-IND-01`）。成品文案 SHALL 沿用本来源既有登记文本，本变更不新增第二份文案、不改写已登记的中文成品。
 
 同一来源 SHALL 登记该条的布局范围成品说明，以及 `aggregate_index_member_source_less` 告警成品在**聚合索引卡片一行**、**创建 Issue 选成员逐仓标注**、**跨仓证据未检索说明**三处的呈现口径；三处 SHALL 消费同一份成品模板，MUST NOT 各自维护同义文案。告警码的成品 SHALL 支持按成员渲染（逐仓标注用单成员文案）与按成员列表渲染（卡片一行点名全部被跳过成员）两种形态，两种形态都由本来源的同一模板产出。
 

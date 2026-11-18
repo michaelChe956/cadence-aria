@@ -8,15 +8,15 @@
 
 仅在 SDK 未安装或与受支持版本不兼容时 MAY 回退既有 CLI 文件清单路径，且 SHALL 留审计痕迹。识别到的 `codegraph_files_empty_index` 通知或合法空清单 SHALL 在聚合验收层视为所有成员未覆盖；工具执行失败、SDK 协议错误/缺成员、非法 JSON 或截断 MUST NOT 被视为空索引。
 
-**磁盘交叉验收（成员未收录时才做）**：对每个**未被索引收录**的成员，平台 SHALL 在该成员的**主工作目录**内做一次**有界盘检**，用 Aria 自有的源码类型清单判定该成员是否真的没有源码。盘检 SHALL 只按后缀做元数据判定，MUST NOT 读文件内容、推断语言或符号、按仓名/标签/角色判断，也不 MUST 跟随符号链接（符号链接与非普通文件都不算源码）。Aria 源码类型清单 SHALL 由 Aria 自有且 MUST 是 CodeGraph 支持后缀的**真子集**；清单的具体后缀集合 SHALL 在实施时用真实 CodeGraph 逐后缀验证后确定，MUST NOT 依赖上游内部表或内部 API 取得该清单。清单与探针的关系 SHALL 是「保守清单先开工、探针结论回来再增补」：实施 SHALL 先以保守集合（只含确定被 CodeGraph 收录的常见源码后缀）落地盘检，逐后缀探针 MUST NOT 作为开工门禁；探针结论 SHALL 以「增补已登记后缀」的方式落地，MUST NOT 借此放宽「无法确认不等于无源码」的判定口径。`.yaml/.yml/.xml/.properties/.tf/.tfvars/.tofu` 一类配置格式与 `.json/.md/.toml/.txt/.csv/.html/.htm` 一类文档格式 SHALL NOT 计入 Aria 源码；是否产出符号 MUST NOT 作为判据。
+**磁盘交叉验收（成员未收录时才做）**：对每个**未被索引收录**的成员，平台 SHALL 在该成员的**主工作目录**内做一次**有界盘检**，用 Aria 自有的源码类型清单判定该成员是否真的没有源码。盘检 SHALL 只按后缀做元数据判定，MUST NOT 读文件内容、推断语言或符号、按仓名/标签/角色判断，也不 MUST 跟随符号链接（符号链接与非普通文件都不算源码）。Aria 源码类型清单 SHALL 由 Aria 自有且 MUST 是 CodeGraph 支持后缀的**真子集**；清单的具体后缀集合 SHALL 在实施时用真实 CodeGraph 逐后缀验证后确定，MUST NOT 依赖上游内部表或内部 API 取得该清单。清单与探针的关系 SHALL 是「保守清单先开工、探针结论回来再增补」：实施 SHALL 先以保守集合（只含确定被 CodeGraph 收录的常见源码后缀）落地盘检，逐后缀探针 MUST NOT 作为开工门禁；探针结论 SHALL 以「增补已登记后缀」的方式落地，MUST NOT 借此放宽「无法确认不等于无源码」的判定口径。探针 SHALL 额外覆盖**可见范围口径**：每个版本基线各验一次「被 `.gitignore` 忽略的文件不被 CodeGraph 收录、git 可见范围内的文件（含未跟踪但未被忽略的）被收录」，正反两组逐项出表，使探针结论与扫描口径一致；该探针与逐后缀探针同属**并行前置、非阻塞门禁**，MUST NOT 作为开工门禁。`.yaml/.yml/.xml/.properties/.tf/.tfvars/.tofu` 一类配置格式与 `.json/.md/.toml/.txt/.csv/.html/.htm` 一类文档格式 SHALL NOT 计入 Aria 源码；是否产出符号 MUST NOT 作为判据。
 
-盘检 SHALL 复用聚合索引既有的内建排除口径，MUST NOT 另写一份排除表；普通遍历 SHALL 剪枝 `.git/.aria/node_modules/target/build/dist/.worktrees`，且 MUST NOT 模拟 `.gitignore`（普通路径有源码但被忽略仍是真漏收）。11 条内建规则里的 4 条非目录固定名模式（`**/.env`、`**/.env.*`、`**/*credential*`、`**/*secret*`）SHALL 按目录名匹配参与剪枝（例如 `credentials/`、`secret-notes/` 这类目录不进入扫描），MUST NOT 被忽略、被改写成文件级规则或另行放宽。`.worktrees/` SHALL 作为独立的第二段诊断：仅当普通路径查完且无源码时才检查 `.worktrees/` 子树；该入口本身是符号链接时 SHALL 视为「该段无候选」而不跟随，入口不存在时同样 SHALL 视为「该段已完成且无候选」，两种情形都 MUST NOT 被记成盘检失败。
+盘检 SHALL 复用聚合索引既有的内建排除口径，MUST NOT 另写一份排除表；`.worktrees/` 第二段诊断的物理遍历 SHALL 剪枝 `.git/.aria/node_modules/target/build/dist/.worktrees`。**盘检的源码候选 SHALL 只取 git 可见范围**：在该成员**主工作目录**内执行 `git ls-files --cached --others --exclude-standard`（已跟踪的文件 + 未跟踪且未被忽略的文件），与 Aria 源码后缀集求交，再扣除 Aria 自身排除（`build/`、`dist/`、`node_modules/`、`.worktrees/`、`.aria/`、`.env*`、`*credential*`、`*secret*` 等既有内建排除项，与内建排除规则表同源，MUST NOT 另写副本）。**被 `.gitignore` 忽略的文件 SHALL NOT 计入源码**：MUST NOT 判「漏收」失败，该成员按「确认无源码」走跳过分支；「源码存在却未被收录」只在 **git 可见范围内**成立，判定时 MUST 能区分「不在范围（被忽略 / Aria 自身排除）」与「在范围却漏收」。git 侧异常（主工作目录不是 git 仓、git 不可用、命令失败或超时）SHALL 归「无法确认」，MUST NOT 当成无源码。11 条内建规则里的 4 条非目录固定名模式（`**/.env`、`**/.env.*`、`**/*credential*`、`**/*secret*`）SHALL 在可见清单上按目录名/路径名匹配过滤（例如 `credentials/`、`secret-notes/` 这类目录下的文件不进入候选），MUST NOT 被忽略、被改写成文件级规则或另行放宽。`.worktrees/` SHALL 作为独立的第二段诊断：仅当普通路径查完且无源码时才检查 `.worktrees/` 子树；该入口本身是符号链接时 SHALL 视为「该段无候选」而不跟随，入口不存在时同样 SHALL 视为「该段已完成且无候选」，两种情形都 MUST NOT 被记成盘检失败。
 
-盘检 SHALL 是有界的：根深度 0、上限深度 32；每成员最多访问 20,000 个目录条目，单次验收整批最多 100,000 个条目、整批 2 秒（含 `.worktrees/` 诊断，共享同一计数与同一 deadline）；命中普通路径源码即停止扩散。上限 SHALL 固化为常量并可注入时钟/取消信号以便测试，MUST NOT 依赖真实 sleep。MUST NOT 展开全量路径、读文件内容或为盘检启动 git/CodeGraph 进程。
+盘检 SHALL 是有界的：根深度 0、上限深度 32（深度上限约束物理扫描段，即 `.worktrees/` 第二段诊断）；可见清单的枚举与后缀过滤同样计入预算——每成员最多 20,000 个条目，单次验收整批最多 100,000 个条目、整批 2 秒（含 `.worktrees/` 诊断，共享同一计数与同一 deadline）；命中普通路径源码即停止扩散。上限 SHALL 固化为常量并可注入时钟/取消信号以便测试，MUST NOT 依赖真实 sleep。MUST NOT 展开全量路径、读文件内容或为盘检启动 CodeGraph 进程；盘检 MAY 且 MUST 调用只读的 `git ls-files --cached --others --exclude-standard` 取可见范围，MUST NOT 写 git 状态或改动工作区。
 
-**盘检结论 SHALL 是四值**：普通路径有源码、源码仅在 `.worktrees/`、确认无源码、**无法确认**（权限不足、IO 失败、超时、超限等证据不足）。**无法确认 MUST NOT 等同于无源码。** 盘检未完成且没有正证据时，结论 SHALL 为「无法确认」。
+**盘检结论 SHALL 是四值**：普通路径**在 git 可见范围内**有源码、源码仅在 `.worktrees/`、确认无源码（可见范围内无源码）、**无法确认**（权限不足、IO 失败、超时、超限、git 侧失败等证据不足）。**无法确认 MUST NOT 等同于无源码。** 盘检未完成且没有正证据时，结论 SHALL 为「无法确认」。
 
-普通路径有源码 SHALL 报 `aggregate_index_member_coverage_failed`（点名漏收成员，说明磁盘上有源码但索引未收录，并指引检查成员路径与忽略规则后重建；MUST NOT 责怪用户没有放源码）；只在 `.worktrees/` 有源码 SHALL 报 `aggregate_index_member_source_excluded`；盘检无法确认 SHALL 报 `aggregate_index_source_scan_incomplete`（点名无法确认的成员，MUST NOT 宣称该成员没有源码）。多类同时出现时 SHALL 依此顺序选择主码并保留已观察的阻断事实。仅正常路径与 `.worktrees/` 范围均确认无源码的未覆盖成员 MAY 跳过。
+普通路径**在 git 可见范围内**有源码 SHALL 报 `aggregate_index_member_coverage_failed`（点名漏收成员，说明磁盘上有源码但索引未收录，并指引检查成员路径与忽略规则后重建；MUST NOT 责怪用户没有放源码）；只在 `.worktrees/` 有源码 SHALL 报 `aggregate_index_member_source_excluded`；盘检无法确认 SHALL 报 `aggregate_index_source_scan_incomplete`（点名无法确认的成员，MUST NOT 宣称该成员没有源码）。多类同时出现时 SHALL 依此顺序选择主码并保留已观察的阻断事实。仅正常路径（git 可见范围内）与 `.worktrees/` 范围均确认无源码的未覆盖成员 MAY 跳过。
 
 **跳过与激活**：有至少一个成员被覆盖、其余未覆盖成员全部确认无源码、且其它验收（排除负查询、代表性检索）成功时，SHALL 激活并在该世代记录被跳过成员；被跳过的成员 SHALL 保留在成员快照里，SHALL NOT 被移出项目成员集合，SHALL 仍可作为 Issue 目标仓。各成员均确认无源码且无任何被覆盖成员时 SHALL 报 `aggregate_index_all_members_source_less`，MUST NOT 发布新 active，MUST NOT 把空索引报成成功。成员**未出现在覆盖判定结果里**（缺该成员的覆盖键）MUST NOT 被当作「已确认无源码」：结论只允许来自逐成员覆盖判定与盘检正证据齐全的成员，缺证据的成员 SHALL 按「无法确认」处理。
 
@@ -101,8 +101,18 @@
 
 #### Scenario: 真实漏收不能被跳过
 
-- **WHEN** SDK 或 CLI 均可给出未覆盖事实，且 Aria 在该成员普通路径看到源码（包含 `.gitignore` 忽略路径中的源码）
+- **WHEN** SDK 或 CLI 均可给出未覆盖事实，且 Aria 在该成员普通路径**git 可见范围内**看到源码
 - **THEN** SHALL 报 `aggregate_index_member_coverage_failed` 并点名漏收成员、说明磁盘有源码但索引未收录并指引检查路径与忽略规则；MUST NOT 按配置仓继续，MUST NOT 说用户没有放源码
+
+#### Scenario: 被忽略的文件不算源码
+
+- **WHEN** 某成员普通路径只有被 `.gitignore` 忽略的源码文件（`git ls-files --cached --others --exclude-standard` 看不到它们），成员因此未被索引收录
+- **THEN** 该成员 SHALL 按「确认无源码」处理（可跳过并告警），MUST NOT 报 `aggregate_index_member_coverage_failed`；理由是 CodeGraph 与 git 都看不到这些文件（增量同步也收录不到），判定 MUST NOT 产生「永远建不出索引」的死锁
+
+#### Scenario: 同仓内被忽略源码与可见范围内漏收并存
+
+- **WHEN** 同一成员仓既有被 `.gitignore` 忽略的源码文件，另有**在 git 可见范围内**却未被索引收录的源码文件
+- **THEN** SHALL 只对**可见范围内漏收**的那部分报 `aggregate_index_member_coverage_failed` 并点名该成员；被忽略的部分 MUST NOT 被算作漏收、不得单独触发失败，MUST NOT 把两类文件混为一谈（判定 MUST 能区分「不在范围（被忽略 / Aria 自身排除）」与「在范围却漏收」）
 
 #### Scenario: 只在工作树有源码
 
@@ -127,6 +137,8 @@
 ### Requirement: 索引快照与 freshness（REQ-IND-03）
 
 系统 SHALL 在每次 init/sync 前后由 Cadence 采集各成员仓 `git rev-parse HEAD` 与 dirty 状态填充 `AggregateIndexMemberSnapshot`（CodeGraph 不提供 per-member revision API）；按需 sync（AI 用前检查）+ 定时兜底刷新；stale/degraded 状态由 Cadence 对比快照 revision 推断并显式呈现。
+
+**dirty 的口径**：成员 dirty 状态 SHALL 以该成员主工作目录的 `git status --porcelain` 为准（既有快照采集即用 `git status --porcelain=v1`，`src/product/logical_codebase/aggregate_index/snapshot.rs`）；**被 `.gitignore` 忽略的文件不参与 dirty 判定**，因此忽略文件既不会让 dirty 成立、也不会掩盖可见范围内的改动。
 
 **本变更不改变全局漂移判据。** 既有成员漂移判定（成员集合长度、逐成员 revision 与 dirty 布尔；`src/product/logical_codebase/aggregate_index/freshness.rs` 的 `member_evidence_drifted`）SHALL 保持原义：MUST NOT 为 Story 前刷新把它全局改成「任何 dirty 都判 stale」，也 MUST NOT 在这条判据里加入磁盘或源码扫描。Story 生成前的「能确认没变 / 不能确认没变」是**该路径自有**的分支决策，归 `REQ-PLN-18` 拥有；Design、WorkItemPlan 等其它只读规划仍按既有 drift 判据与 last-known-good 语义工作。freshness 评估 MUST NOT 执行源码盘检，MUST NOT 为「跳过成员后来出现源码」做后台轮询。
 
@@ -191,6 +203,11 @@ REQ-IND-01 的真实漏收、源码仅在被排除的工作树目录、盘检无
 
 - **WHEN** 成员普通路径有源码却漏收、只在工作树有源码、盘检未完成或全员确认无源码
 - **THEN** SHALL 按 REQ-IND-01 的稳定码报告且点名成员；如有 last-known-good 则保留并将其标记 degraded，MUST NOT 伪造 active 或把相应失败事实记成跳过
+
+#### Scenario: 被忽略源码不报漏收、可见范围内漏收才报
+
+- **WHEN** 同一逻辑代码库内某成员既有被 `.gitignore` 忽略的源码文件，另有**在 git 可见范围内**却未被索引收录的源码文件
+- **THEN** 构建失败事实 SHALL 只来自**可见范围内漏收**的成员，并点名该成员；被忽略的源码 MUST NOT 被记成漏收、不得单独触发失败或降级，MUST NOT 让「被忽略的文件」与「在范围却漏收」混为一谈
 
 #### Scenario: 库 API 覆盖不足按构建失败处理
 
@@ -266,7 +283,7 @@ REQ-IND-01 的真实漏收、源码仅在被排除的工作树目录、盘检无
 
 被跳过的成员 SHALL 仍参与成员集合、身份、主工作目录、Git revision 与 dirty 的漂移判据，SHALL 仍参与规划指纹与引用巡检；跳过标记 MUST NOT 充当 checkout 可用性或授权判据，MUST NOT 让被跳过的成员变成不可用目标仓。索引纳入状态 MUST NOT 成为 Issue 创建、选仓或目标仓准入的门槛。
 
-对曾被跳过的成员后来出现源码（含只出现在 `.worktrees/` 的源码），本能力 **MUST NOT 提供自动发现**：重新判断只发生在**下一次验收/重建**时，SHALL NOT 引入后台扫描、SHALL NOT 在 freshness 评估里盘检、SHALL NOT 轮询磁盘。跳过事实只属于它所在的那一代；下一次验收 SHALL 对每个未覆盖成员重新判定结论，MUST NOT 沿用上一代的跳过事实当作本次结论。触发重新验收的既有通路只有：成员集合或 `membership_revision` 变化、成员 revision/dirty 漂移、手动重建、以及 `REQ-PLN-18` 的 Story 前刷新落到「有变化或不能确认没变」分支（其中「当前世代存在跳过事实」SHALL 归入该分支的保守处理，见 `REQ-PLN-18`）。两次验收之间新增的源码要等下一次触发才被发现，这是本能力已知并接受的时间窗。
+对曾被跳过的成员后来出现源码（含只出现在 `.worktrees/` 的源码），本能力 **MUST NOT 提供自动发现**：重新判断只发生在**下一次验收/重建**时，SHALL NOT 引入后台扫描、SHALL NOT 在 freshness 评估里盘检、SHALL NOT 轮询磁盘。跳过事实只属于它所在的那一代；下一次验收 SHALL 对每个未覆盖成员重新判定结论，MUST NOT 沿用上一代的跳过事实当作本次结论。触发重新验收的既有通路只有：成员集合或 `membership_revision` 变化、成员 revision/dirty 漂移、手动重建、以及 `REQ-PLN-18` 的 Story 前刷新落到「有变化或不能确认没变」分支（该分支由「成员/主工作目录/提交变化」或「上次或本次有未提交修改」触发，**不含**「当前世代存在跳过事实」这一条件，见 `REQ-PLN-18`）。两次验收之间新增的源码要等下一次触发才被发现，这是本能力已知并接受的时间窗。
 
 只读投影 SHALL 使用同一逻辑代码库的已验收世代事实，MUST NOT 扫磁盘、启动 CodeGraph 或 provider 来补标注。
 
