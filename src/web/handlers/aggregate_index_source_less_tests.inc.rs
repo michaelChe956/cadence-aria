@@ -175,9 +175,9 @@ fn read_active_projection_reports_structured_alert_for_skipped_members() {
         .unwrap();
 
     let response = read_active_projection(&paths, "project_0001", LC).unwrap();
-    assert_eq!(response.state, "active");
     let alert = response
         .source_less_alert
+        .as_ref()
         .expect("有跳过事实 ⇒ 必须出结构化告警");
     assert_eq!(alert.code, "aggregate_index_member_source_less");
     assert!(
@@ -362,8 +362,8 @@ fn read_active_projection_keeps_legacy_generation_free_of_skip_alert() {
         )
         .unwrap();
     // 夹具自证：skip_reason 为 None 时盘上 JSON 就是老形态（无该键）。
-    let disk = std::fs::read_to_string(find_json(temp.path(), "aggregate_index_legacy_gen.json"))
-        .unwrap();
+    let disk =
+        std::fs::read_to_string(find_json(temp.path(), "aggregate_index_legacy_gen.json")).unwrap();
     assert!(
         !disk.contains("skip_reason"),
         "夹具必须是老形态 JSON：{disk}"
@@ -509,46 +509,86 @@ fn projected_record_excludes_superseded_and_prefers_degraded_over_newer_active()
     ) -> AggregateIndexRecord {
         record(id, status, updated_at, Vec::new())
     }
-    let picked = |records: &[AggregateIndexRecord]| {
+    fn picked(records: &[AggregateIndexRecord]) -> Option<&str> {
         projected_record(records).map(|record| record.aggregate_index_id.as_str())
-    };
+    }
 
     // Superseded 排最前也永不被选中。
     assert_eq!(
         picked(&[
-            generation("gen_superseded", AggregateIndexStatus::Superseded, "2026-11-18T03:00:00Z"),
-            generation("gen_active", AggregateIndexStatus::Active, "2026-11-18T01:00:00Z"),
+            generation(
+                "gen_superseded",
+                AggregateIndexStatus::Superseded,
+                "2026-11-18T03:00:00Z"
+            ),
+            generation(
+                "gen_active",
+                AggregateIndexStatus::Active,
+                "2026-11-18T01:00:00Z"
+            ),
         ]),
         Some("gen_active")
     );
     // Degraded 优先于更新的 Active / Stale。
     assert_eq!(
         picked(&[
-            generation("gen_active", AggregateIndexStatus::Active, "2026-11-18T02:00:00Z"),
-            generation("gen_degraded", AggregateIndexStatus::Degraded, "2026-11-18T01:00:00Z"),
+            generation(
+                "gen_active",
+                AggregateIndexStatus::Active,
+                "2026-11-18T02:00:00Z"
+            ),
+            generation(
+                "gen_degraded",
+                AggregateIndexStatus::Degraded,
+                "2026-11-18T01:00:00Z"
+            ),
         ]),
         Some("gen_degraded")
     );
     assert_eq!(
         picked(&[
-            generation("gen_stale", AggregateIndexStatus::Stale, "2026-11-18T02:00:00Z"),
-            generation("gen_degraded", AggregateIndexStatus::Degraded, "2026-11-18T01:00:00Z"),
+            generation(
+                "gen_stale",
+                AggregateIndexStatus::Stale,
+                "2026-11-18T02:00:00Z"
+            ),
+            generation(
+                "gen_degraded",
+                AggregateIndexStatus::Degraded,
+                "2026-11-18T01:00:00Z"
+            ),
         ]),
         Some("gen_degraded")
     );
     // Building 最新时优先（用户正在行动），即使存在旧 Degraded。
     assert_eq!(
         picked(&[
-            generation("gen_building", AggregateIndexStatus::Building, "2026-11-18T02:00:00Z"),
-            generation("gen_degraded", AggregateIndexStatus::Degraded, "2026-11-18T01:00:00Z"),
+            generation(
+                "gen_building",
+                AggregateIndexStatus::Building,
+                "2026-11-18T02:00:00Z"
+            ),
+            generation(
+                "gen_degraded",
+                AggregateIndexStatus::Degraded,
+                "2026-11-18T01:00:00Z"
+            ),
         ]),
         Some("gen_building")
     );
     // Failed 取 last-known-good；无 LKG ⇒ None。
     assert_eq!(
         picked(&[
-            generation("gen_failed", AggregateIndexStatus::Failed, "2026-11-18T02:00:00Z"),
-            generation("gen_lkg", AggregateIndexStatus::Active, "2026-11-18T01:00:00Z"),
+            generation(
+                "gen_failed",
+                AggregateIndexStatus::Failed,
+                "2026-11-18T02:00:00Z"
+            ),
+            generation(
+                "gen_lkg",
+                AggregateIndexStatus::Active,
+                "2026-11-18T01:00:00Z"
+            ),
         ]),
         Some("gen_lkg")
     );

@@ -12,8 +12,15 @@ use serde::Serialize;
 use crate::product::json_store::validate_relative_id;
 use crate::product::logical_codebase::aggregate_index::codegraph_cli::codegraph_library_present;
 use crate::product::logical_codebase::aggregate_index::{
-    AggregateIndexError, AggregateIndexRecord, AggregateIndexStatus,
+    AggregateIndexError, AggregateIndexMemberSnapshot, AggregateIndexRecord, AggregateIndexStatus,
 };
+use crate::product::logical_codebase::failure_copy::{
+    SourceLessAlert, describe_envelope, member_source_less_alert,
+};
+use crate::product::logical_codebase::types::{
+    CheckoutAvailability, CheckoutKind, CodebaseMemberRecord,
+};
+use crate::product::logical_codebase::{LogicalCodebaseStore, RepositoryCheckoutId};
 use crate::web::error::ApiError;
 use crate::web::state::WebAppState;
 use crate::web::types::FailureCopyDto;
@@ -40,6 +47,12 @@ pub struct AggregateIndexActiveResponse {
     /// 文案取自 `failure_copy` 唯一码表；无失败（或封套解析不出稳定码）时缺省。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_copy: Option<FailureCopyDto>,
+    /// 结构化跳过告警（与成员行、证据 `not_searched` 同构）；无跳过事实时省略。
+    ///
+    /// **不承载成员名单**（R8）：前端只渲染 `message_zh`，点名在服务端成品里；
+    /// 同一响应不得再出现 `skipped_members` 之类的第二个同义字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_less_alert: Option<SourceLessAlert>,
 }
 
 pub async fn get_active_aggregate_index(
@@ -149,6 +162,38 @@ async fn rebuild_aggregate_index_for_lc(
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
+/// 本次「被投影的那一份」记录：卡片与成员列表（片6）共用的唯一世代选择规则。
+///
+/// 输入按 `updated_at`/`aggregate_index_id` 降序排好；本函数只做选择：
+/// Building 优先（用户正在行动）→ Degraded 优先（失败后的 LKG）→ Failed 取
+/// last-known-good → 其余取 latest；`Superseded` 永不被选中（即使排最前）。
+/// 片6 的成员列表投影必须复用本函数，不得自写「Active 优先」。
+pub(crate) fn projected_record(records: &[AggregateIndexRecord]) -> Option<&AggregateIndexRecord> {
+    let latest = records
+        .iter()
+        .find(|record| record.status != AggregateIndexStatus::Superseded)?;
+    if latest.status == AggregateIndexStatus::Building {
+        return Some(latest);
+    }
+    if let Some(degraded) = records
+        .iter()
+        .find(|record| record.status == AggregateIndexStatus::Degraded)
+    {
+        return Some(degraded);
+    }
+    if latest.status == AggregateIndexStatus::Failed {
+        return records.iter().find(|record| {
+            matches!(
+                record.status,
+                AggregateIndexStatus::Active
+                    | AggregateIndexStatus::Stale
+                    | AggregateIndexStatus::Degraded
+            )
+        });
+    }
+    Some(latest)
+}
+
 fn read_active_projection(
     paths: &crate::product::app_paths::ProductAppPaths,
     project_id: &str,
@@ -168,6 +213,7 @@ fn read_active_projection(
             .cmp(&left.updated_at)
             .then_with(|| right.aggregate_index_id.cmp(&left.aggregate_index_id))
     });
+    let projected = projected_record(&records);
 
     let latest = records.first().cloned();
     // degraded LKG 优先于 active/stale 投影：只要存在一个 degraded generation，
@@ -239,36 +285,91 @@ fn read_active_projection(
             ),
         ));
     }
+    // 跳过告警只从「被投影的那一份」记录派生（REQ-IND-06：只读投影）；
+    // 重建中不出提示（状态矩阵）；degraded 与失败三段并存，文案走历史措辞。
+    let skipped = skipped_member_names(paths, project_id, logical_codebase_id, projected)?;
+    if !skipped.is_empty() && response.state != "rebuilding" {
+        let names: Vec<&str> = skipped.iter().map(String::as_str).collect();
+        response.source_less_alert = Some(member_source_less_alert(
+            &names,
+            response.state == "degraded",
+        ));
+    }
     Ok(response)
 }
 
 /// 从持久化失败封套（`aggregate_index_failed:<code>: <message>` 或
 /// `aggregate_index_degraded:<code>: <message>`）解析出三段中文成品。
 ///
-/// 码取封套里的稳定内层码，文案查 `failure_copy` 唯一码表；封套缺失
-/// （软告警不是失败封套）或解析不出稳定码时返回 `None`。
+/// 与冷启动投影、HTTP 错误出口共用产品层唯一封套入口
+/// `failure_copy::describe_envelope`：同码同文案**同一点名**（成员名由
+/// 共用入口统一抽出，此处不得自行拼接）；封套缺失（软告警不是失败
+/// 封套）或解析不出稳定码时返回 `None`。
 fn failure_copy_from_warning(warning: Option<&str>) -> Option<FailureCopyDto> {
-    use crate::product::logical_codebase::failure_copy::{
-        FailureInput, describe, subject_from_message,
-    };
-
-    let warning = warning?;
-    let payload = warning
-        .strip_prefix("aggregate_index_failed:")
-        .or_else(|| warning.strip_prefix("aggregate_index_degraded:"))?;
-    let (code, message) = payload.split_once(": ")?;
-    if code.is_empty() || code.chars().any(char::is_whitespace) {
-        return None;
-    }
-    // 先把点到的对象抬到函数级作用域：input 借用它，describe 消费 input
-    // 必须发生在 subject 仍然存活期间。
-    let subject = subject_from_message(code, message);
-    let mut input = FailureInput::new(code).with_detail(message);
-    if let Some(subject) = subject.as_deref() {
-        input = input.with_subject(subject);
-    }
-    let copy = describe(input);
+    let (_inner_code, copy) = describe_envelope(warning?)?;
     Some(FailureCopyDto::from(&copy))
+}
+
+/// 从「被投影的那一份」记录派生被跳过的成员名单（REQ-IND-06：只读投影，
+/// 不扫盘、不启 CodeGraph、不触发 provider）。
+///
+/// 匹配口径（M4/C7）：按（成员 ID，**当前**可用的 Main checkout ID）双键
+/// 对上快照才贴标，不按显示名/别名/裸成员 ID；顺序按快照顺序
+/// （= manifest 成员顺序）。成员存储读不到 ⇒ 降级为空集（不猜、不报错）。
+fn skipped_member_names(
+    paths: &crate::product::app_paths::ProductAppPaths,
+    project_id: &str,
+    logical_codebase_id: &str,
+    record: Option<&AggregateIndexRecord>,
+) -> ApiResult<Vec<String>> {
+    let Some(record) = record else {
+        return Ok(Vec::new());
+    };
+    let skipped: Vec<&AggregateIndexMemberSnapshot> = record
+        .member_snapshots
+        .iter()
+        .filter(|snapshot| snapshot.skip_reason.is_some())
+        .collect();
+    if skipped.is_empty() {
+        return Ok(Vec::new());
+    }
+    let store = LogicalCodebaseStore::for_lc(paths.clone(), logical_codebase_id);
+    let members = store
+        .list_lc_members(project_id, logical_codebase_id)
+        .unwrap_or_default();
+    let mut names = Vec::with_capacity(skipped.len());
+    for snapshot in skipped {
+        let Some(member) = members
+            .iter()
+            .find(|member| member.logical_repository_id == snapshot.logical_repository_id)
+        else {
+            continue;
+        };
+        if is_current_main_checkout(&store, project_id, member, snapshot.checkout_id) {
+            names.push(member.alias.clone());
+        }
+    }
+    Ok(names)
+}
+
+/// 快照的 checkout 是否仍是该成员「当前可用的 Main 检出」（双键匹配）；
+/// 检出记录读不到或已不可用 ⇒ 不算（不得给换过检出的成员贴旧标）。
+fn is_current_main_checkout(
+    store: &LogicalCodebaseStore,
+    project_id: &str,
+    member: &CodebaseMemberRecord,
+    checkout_id: RepositoryCheckoutId,
+) -> bool {
+    member.checkout_ids.contains(&checkout_id)
+        && store
+            .load_checkout(project_id, checkout_id)
+            .ok()
+            .flatten()
+            .is_some_and(|checkout| {
+                checkout.kind == CheckoutKind::Main
+                    && checkout.availability == CheckoutAvailability::Available
+                    && checkout.logical_repository_id == member.logical_repository_id
+            })
 }
 
 fn projection(
@@ -285,6 +386,7 @@ fn projection(
         warning,
         evidence_copy: None,
         failure_copy,
+        source_less_alert: None,
     }
 }
 
@@ -296,6 +398,7 @@ fn missing_response(warning: Option<String>) -> AggregateIndexActiveResponse {
         failure_copy: failure_copy_from_warning(warning.as_deref()),
         warning,
         evidence_copy: None,
+        source_less_alert: None,
     }
 }
 
