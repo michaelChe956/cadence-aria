@@ -532,6 +532,32 @@ mod tests {
         let unnamed = describe_code("member_path_outside_root", None);
         assert!(!unnamed.title_zh.contains("「"), "{}", unnamed.title_zh);
     }
+    /// 覆盖失败码点名的对象是「逗号分隔的成员名清单」：按逗号切分、逐段
+    /// trim、丢空串后用中文顿号连接；不能套用路径形态的「只取最后一段」。
+    #[test]
+    fn coverage_failure_names_all_included_members() {
+        let subject = subject_from_message(
+            "aggregate_index_member_coverage_failed",
+            concat!(
+                "no indexable code file under included members ",
+                "[gray-config, msha-sdk]; ",
+                "each included member needs at least 1 indexable code file"
+            ),
+        )
+        .expect("消息里明确列出了成员名，必须能点名");
+        assert_eq!(subject, "gray-config、msha-sdk");
+    }
+
+    /// 回归：路径形态的既有分支保持不变，仍只点名路径最后一段。
+    #[test]
+    fn root_is_git_subject_still_names_last_path_segment() {
+        let subject = subject_from_message(
+            "aggregate_root_is_git",
+            "aggregate root /tmp/proj/aggregate-root is a Git repository",
+        )
+        .expect("既有 is_git 分支必须继续命中");
+        assert_eq!(subject, "aggregate-root");
+    }
 
     /// 测试点 #14 ②③：码表外未知码的两个入口形态一致（中性兜底），
     /// 且 `record.action` 永远不进主文案/动作段。

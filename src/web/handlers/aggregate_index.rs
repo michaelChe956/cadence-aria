@@ -482,6 +482,114 @@ mod projection_tests {
         );
     }
 
+    /// 失败封套（成员覆盖不足码）⇒ 投影出三段中文成品：原因段点名具体成员、
+    /// 机器码是稳定内层码；原始英文串留在 warning 里当诊断，不进成品。
+    #[test]
+    fn read_active_projection_renders_failure_copy_for_coverage_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        store
+            .create(
+                "project_0001",
+                record(
+                    "aggregate_index_failed_gen",
+                    AggregateIndexStatus::Failed,
+                    "2026-09-28T01:00:00Z",
+                ),
+            )
+            .unwrap();
+        let warning = concat!(
+            "aggregate_index_failed:aggregate_index_member_coverage_failed: ",
+            "no indexable code file under included members ",
+            "[gray-config, msha-sdk]; ",
+            "each included member needs at least 1 indexable code file"
+        )
+        .to_string();
+        store
+            .mark_status(
+                "project_0001",
+                "aggregate_index_failed_gen",
+                AggregateIndexStatus::Failed,
+                Some(warning),
+            )
+            .unwrap();
+
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
+        assert_eq!(response.state, "missing");
+        let copy = response
+            .failure_copy
+            .expect("失败封套在册 ⇒ 投影必须带三段中文成品");
+        assert_eq!(copy.machine_line, "aggregate_index_member_coverage_failed");
+        assert!(
+            copy.title_zh.contains("没有可索引的代码文件"),
+            "标题不对：{}",
+            copy.title_zh
+        );
+        assert!(
+            copy.reason_zh.contains("gray-config"),
+            "原因段：{}",
+            copy.reason_zh
+        );
+        assert!(
+            copy.reason_zh.contains("msha-sdk"),
+            "原因段：{}",
+            copy.reason_zh
+        );
+        assert!(!copy.action_zh.trim().is_empty());
+    }
+
+    /// 硬边界：Active 世代的 warning 是健康闸软告警（不是失败封套）
+    /// ⇒ 不算失败，failure_copy 必须缺省。
+    #[test]
+    fn read_active_projection_has_no_failure_copy_for_soft_health_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = ProductAppPaths::new(temp.path());
+        let store = AggregateIndexStore::for_lc(paths.clone(), "logical_codebase_0001");
+        let mut generation = record(
+            "aggregate_index_gen",
+            AggregateIndexStatus::Active,
+            "2026-09-28T01:00:00Z",
+        );
+        let aggregate_root = temp.path().join("aggregate-root");
+        std::fs::create_dir_all(aggregate_root.join(".codegraph")).unwrap();
+        generation.codegraph_root = aggregate_root;
+        generation.warning =
+            Some("codegraph 索引健康闸（不阻断激活）：跳过部分成员的索引".to_string());
+        store.create("project_0001", generation).unwrap();
+
+        let response =
+            read_active_projection(&paths, "project_0001", "logical_codebase_0001").unwrap();
+        assert_eq!(response.state, "active");
+        assert!(response.failure_copy.is_none());
+    }
+
+    /// 重建失败（第三出口）：覆盖不足码的 details.copy 原因段点名具体成员，
+    /// 机器码是稳定内层码。
+    #[test]
+    fn aggregate_index_api_error_names_members_for_coverage_failure() {
+        let message = concat!(
+            "no indexable code file under included members ",
+            "[gray-config, msha-sdk]; ",
+            "each included member needs at least 1 indexable code file"
+        )
+        .to_string();
+        let error = AggregateIndexError::Failed {
+            code: "aggregate_index_member_coverage_failed",
+            message,
+        };
+        let api_error = aggregate_index_api_error(error);
+        let copy = &api_error.details["copy"];
+        let reason_zh = copy["reason_zh"].as_str().unwrap_or_default();
+        assert!(reason_zh.contains("gray-config"), "原因段：{reason_zh}");
+        assert!(reason_zh.contains("msha-sdk"), "原因段：{reason_zh}");
+        assert_eq!(
+            copy["machine_line"].as_str(),
+            Some("aggregate_index_member_coverage_failed")
+        );
+    }
+
     /// 没有任何在册世代 ⇒ 同样不可用（mediator 无索引可钉住）。
     #[test]
     fn read_active_projection_reports_evidence_unavailable_without_any_generation() {
