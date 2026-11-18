@@ -13,7 +13,7 @@ use crate::product::logical_codebase::{
 
 use super::AggregateIndexError;
 
-const BUILTIN_EXCLUDES: [&str; 11] = [
+pub(crate) const BUILTIN_EXCLUDES: [&str; 11] = [
     "**/.worktrees/",
     "**/.aria/",
     "**/.git/",
