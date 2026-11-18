@@ -688,29 +688,41 @@ impl LogicalCodebaseBootstrapProjector {
                     None,
                 ),
                 AggregateIndexStatus::Failed => {
-                    let warning = record
+                    let envelope = record
                         .warning
                         .clone()
                         .unwrap_or_else(|| "first aggregate index build failed".to_string());
-                    // 三个业务码各自透出自己的稳定 reason_code（REQ-LAYOUT-01）：
-                    // 目录布局不被支持、成员代码覆盖不足各自有精确动作文案；
-                    // 其余 CLI 失败保持通用 aggregate_index_failed。沿既有失败
-                    // 卡通道，不新建卡型。
-                    let reason_code = if warning.contains("aggregate_index_layout_unsupported") {
-                        "aggregate_index_layout_unsupported"
-                    } else if warning.contains("aggregate_index_member_coverage_failed") {
-                        "aggregate_index_member_coverage_failed"
-                    } else {
-                        "aggregate_index_failed"
-                    };
+                    // 冷启动与 HTTP 出口**同一解析入口**（REQ-BOOT-10 /
+                    // REQ-IND-04）：持久化失败封套 → 内层稳定码 + 带点名的
+                    // 三段成品，两出口逐字一致。裸前缀判断（`contains("<code>")`）
+                    // 已删除——它会把第六条的三个补充失败码压成通用码。
+                    let (reason_code, copy) =
+                        match crate::product::logical_codebase::failure_copy::describe_envelope(
+                            &envelope,
+                        ) {
+                            Some((inner_code, copy)) => (inner_code, copy),
+                            // 解析不出封套（历史非封套告警）⇒ 落通用码兜底，
+                            // 文案仍取同一张码表。
+                            None => (
+                                "aggregate_index_failed".to_string(),
+                                crate::product::logical_codebase::failure_copy::describe_code(
+                                    "aggregate_index_failed",
+                                    Some(envelope.as_str()),
+                                ),
+                            ),
+                        };
                     (
                         LogicalCodebaseBootstrapStepStatus::Failed,
                         record.aggregate_index_id.clone(),
-                        Some(BootstrapFailure::new(
-                            reason_code.to_string(),
-                            sanitize_failure_detail(&warning, None),
+                        // `with_copy`（**不是** `new`）：`new` 内部走
+                        // `describe_code`（无 subject ⇒ 丢成员点名）；
+                        // `with_copy` 直接装已持有的成品（点名已在）。
+                        Some(BootstrapFailure::with_copy(
+                            reason_code,
+                            sanitize_failure_detail(&envelope, None),
                             true,
                             "aggregate_index_cli".to_string(),
+                            copy,
                         )),
                     )
                 }
