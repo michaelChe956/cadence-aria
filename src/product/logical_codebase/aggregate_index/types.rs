@@ -15,6 +15,13 @@ pub enum AggregateIndexStatus {
     Failed,
 }
 
+/// 跳过原因：当前只有「经有界盘检确认无源码」这一种合法值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateIndexMemberSkipReason {
+    NoSource, // wire: "no_source"
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AggregateIndexMemberSnapshot {
     pub logical_repository_id: LogicalRepositoryId,
@@ -23,6 +30,10 @@ pub struct AggregateIndexMemberSnapshot {
     pub dirty: bool,
     pub included: bool,
     pub indexed_at: String,
+    /// `Some(NoSource)` = 经盘检确认无源码，本次未纳入代码检索范围；`None` = 无跳过事实。
+    /// 无 schema_version，兼容只能靠 serde 缺省：老记录无该键 ⇒ `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<AggregateIndexMemberSkipReason>,
 }
 
 impl AggregateIndexMemberSnapshot {
@@ -40,7 +51,13 @@ impl AggregateIndexMemberSnapshot {
             dirty,
             included: true,
             indexed_at,
+            skip_reason: None,
         }
+    }
+
+    /// 记录「经有界盘检确认无源码」的跳过事实；`included` 语义不变（成员仍在快照里）。
+    pub fn mark_source_less(&mut self) {
+        self.skip_reason = Some(AggregateIndexMemberSkipReason::NoSource);
     }
 }
 
