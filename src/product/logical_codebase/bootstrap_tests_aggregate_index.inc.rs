@@ -372,7 +372,10 @@ mod aggregate_index_tests {
             .iter()
             .find(|step| step.step == LogicalCodebaseBootstrapStep::AggregateIndexActive)
             .unwrap();
-        let failure = step.failure.clone().expect("aggregate index failure detail");
+        let failure = step
+            .failure
+            .clone()
+            .expect("aggregate index failure detail");
         (step.status, failure)
     }
 
@@ -534,8 +537,7 @@ mod aggregate_index_tests {
         // 「两边都丢点名」通过的。
         let control = describe_code("aggregate_index_member_coverage_failed", Some(fact));
         assert!(
-            !control.reason_zh.contains("gray-config")
-                && !control.reason_zh.contains("msha-sdk"),
+            !control.reason_zh.contains("gray-config") && !control.reason_zh.contains("msha-sdk"),
             "对照入口不应带点名：{}",
             control.reason_zh
         );
@@ -598,8 +600,8 @@ mod aggregate_index_tests {
     fn bootstrap_projector_source_has_no_bare_prefix_failure_matching() {
         let source_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("src/product/logical_codebase/bootstrap_projector.inc.rs");
-        let source = std::fs::read_to_string(&source_path)
-            .expect("冷启动投影源码必须可读（源码守卫用）");
+        let source =
+            std::fs::read_to_string(&source_path).expect("冷启动投影源码必须可读（源码守卫用）");
         assert!(
             !source.contains(".contains(\"aggregate_index_"),
             "冷启动投影不得用裸前缀 contains 猜失败码"
