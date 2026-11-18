@@ -984,3 +984,8 @@ fn new_index_id() -> String {
 
 #[cfg(test)]
 include!("operation_tests.inc.rs");
+
+#[cfg(test)]
+mod source_scope_tests {
+    include!("source_scope_tests.inc.rs");
+}
