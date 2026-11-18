@@ -218,4 +218,65 @@ describe("AggregateIndexCard", () => {
       "索引已过期，请重建后再使用聚合上下文。",
     );
   });
+
+  it("keeps the failure face and drops the stale notice when the rebuild failed without a usable index", () => {
+    render(
+      <AggregateIndexCard
+        index={{
+          state: "stale",
+          revision: null,
+          indexed_at: null,
+          warning:
+            "aggregate_index_failed:aggregate_index_checkout_unavailable: 主检出不可用",
+          failure_copy: {
+            title_zh: "某个成员的主检出不可用",
+            reason_zh: "成员 msha-sdk 的主检出不可用。",
+            action_zh: "修复该成员的检出后点「重试」。",
+            triage: "environment",
+            machine_line: "aggregate_index_checkout_unavailable",
+          },
+        }}
+        rebuilding={false}
+        onRebuild={vi.fn()}
+      />,
+    );
+
+    // 失败面是唯一可执行面：不再叠加「索引已过期」的重建提示。
+    expect(screen.getByTestId("aggregate-index-failure")).toBeInTheDocument();
+    expect(screen.queryByTestId("aggregate-index-stale-notice")).toBeNull();
+    expect(
+      screen.queryByText("索引已过期，请重建后再使用聚合上下文。"),
+    ).toBeNull();
+
+    // 失败面自带上动作，标题行不再重复给出「重建索引」。
+    expect(screen.getAllByRole("button", { name: "重建索引" })).toHaveLength(1);
+  });
+
+  it("renders the failure face for a degraded index", () => {
+    render(
+      <AggregateIndexCard
+        index={{
+          state: "degraded",
+          revision: 7,
+          indexed_at: "2026-08-18T00:00:00Z",
+          warning: "aggregate_index_degraded:aggregate_index_checkout_unavailable",
+          failure_copy: {
+            title_zh: "某个成员的主检出不可用",
+            reason_zh: "成员 msha-sdk 的主检出不可用。",
+            action_zh: "修复该成员的检出后点「重试」。",
+            triage: "environment",
+            machine_line: "aggregate_index_checkout_unavailable",
+          },
+        }}
+        rebuilding={false}
+        onRebuild={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("aggregate-index-failure")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("aggregate-index-evidence-unavailable"),
+    ).toBeNull();
+    expect(screen.getAllByRole("button", { name: "重建索引" })).toHaveLength(1);
+  });
 });
