@@ -33,6 +33,7 @@ use crate::product::logical_codebase::aggregate_index::codegraph_coverage::{
 use crate::product::logical_codebase::aggregate_index::{
     AggregateIndexRecord, AggregateIndexStatus, AggregateIndexStore,
 };
+use crate::product::logical_codebase::failure_copy::parse_failure_envelope;
 use crate::product::provider_installation::InstallTarget;
 use crate::product::provider_installation::effective_prefix::{
     first_path_dir_with_command, npm_package_dir, npm_prefix_from_real_path, prefix_bin_is_on_path,
@@ -658,6 +659,24 @@ fn provider_health_section(health: &ProviderHealthSnapshot, degraded: bool) -> V
 
 // ------------------------------------------------------------ 聚合索引
 
+/// 诊断项的**码**口径：持久化失败封套（`aggregate_index_failed:<code>: <message>`
+/// / `aggregate_index_degraded:<code>: <message>`）里的内层稳定码。
+///
+/// 与冷启动卡片、HTTP 重建错误出口同源（同一事实同一码）：三者都走产品层
+/// 唯一封套入口 `failure_copy::parse_failure_envelope`。封套解析不出稳定码
+/// ⇒ 回落到状态级码（`aggregate_index_failed` / `aggregate_index_degraded`），
+/// **不猜码**。只改码的呈现，不改诊断结论与字段形状。
+fn aggregate_index_failure_code(status: &AggregateIndexStatus, warning: &str) -> String {
+    let status_code = match status {
+        AggregateIndexStatus::Failed => "aggregate_index_failed",
+        _ => "aggregate_index_degraded",
+    };
+    match parse_failure_envelope(warning) {
+        Some((code, _, _)) => code,
+        None => status_code.to_string(),
+    }
+}
+
 fn aggregate_index_section(paths: &ProductAppPaths) -> Value {
     let mut entries: Vec<Value> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -680,16 +699,8 @@ fn aggregate_index_section(paths: &ProductAppPaths) -> Value {
                             AggregateIndexStatus::Failed | AggregateIndexStatus::Degraded
                         ) && let Some(warning) = record.warning.as_ref()
                         {
-                            let code = if record.status == AggregateIndexStatus::Failed {
-                                "aggregate_index_failed"
-                            } else {
-                                "aggregate_index_degraded"
-                            };
-                            let candidate = (
-                                record.updated_at.clone(),
-                                code.to_string(),
-                                sanitize(warning),
-                            );
+                            let code = aggregate_index_failure_code(&record.status, warning);
+                            let candidate = (record.updated_at.clone(), code, sanitize(warning));
                             let replace = last_failure
                                 .as_ref()
                                 .map(|(updated, _, _)| {
