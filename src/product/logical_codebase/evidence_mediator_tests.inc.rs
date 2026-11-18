@@ -923,4 +923,10 @@ mod tests {
     // C2 政策读取测试段拆入子 include,共享 mod tests 作用域
     // (large_file_guard 的 1200 行上限,纯移动,不改变任何行为)。
     include!("evidence_mediator_tests_policy.inc.rs");
+
+    // 片8（REQ-COD-05 delta）测试段拆入子 include,共享 mod tests 夹具
+    // (large_file_guard 的 1200 行上限;模块路径 …::evidence_mediator::tests::not_searched)。
+    mod not_searched {
+        include!("evidence_not_searched_tests.inc.rs");
+    }
 }
