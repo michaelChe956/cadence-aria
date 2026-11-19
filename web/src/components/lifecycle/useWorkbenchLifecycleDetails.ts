@@ -45,6 +45,9 @@ export function useWorkbenchLifecycleDetails() {
         .then((response) => {
           if (batchRef.current !== batch || batch.revisions.get(issueId) !== revision) return;
           const normalized = normalizeLifecycleResponse(response, issue);
+          if (normalized.issue.project_id !== batch.projectId) {
+            throw new Error("invalid lifecycle response");
+          }
           setDetails((previous) => new Map(previous).set(issueId, normalized));
           setDetailErrors((previous) => {
             if (!previous.has(issueId)) return previous;
@@ -91,7 +94,9 @@ export function useWorkbenchLifecycleDetails() {
     // queued work and late responses from the old batch are discarded.
     batchRef.current = batch;
     setDetailErrors(new Map());
-    setDetails((previous) => new Map([...previous].filter(([id]) => batch.issues.has(id))));
+    setDetails((previous) => new Map([...previous].filter(([id, detail]) =>
+      batch.issues.has(id) && detail.issue.project_id === projectId,
+    )));
 
     drain();
   }
@@ -104,21 +109,42 @@ export function useWorkbenchLifecycleDetails() {
     drain();
   }, [drain]);
 
+  const invalidateIssue = useCallback((batch: DetailBatch, issueId: string) => {
+    batch.revisions.set(issueId, (batch.revisions.get(issueId) ?? 0) + 1);
+    batch.pending.add(issueId);
+    batch.invalidated.add(issueId);
+    drain();
+  }, [drain]);
+
+  function refreshDeletedIssueDetails(projectId: string, issueId: string) {
+    const batch = batchRef.current;
+    if (batch?.projectId !== projectId || !batch.issues.has(issueId)) return;
+    // A deletion can cascade, so none of the previous issue detail is authoritative.
+    setDetails((previous) => {
+      const next = new Map(previous);
+      next.delete(issueId);
+      return next;
+    });
+    setDetailErrors((previous) => {
+      if (!previous.has(issueId)) return previous;
+      const next = new Map(previous);
+      next.delete(issueId);
+      return next;
+    });
+    invalidateIssue(batch, issueId);
+  }
+
   useEffect(() => {
     const unsubscribe = subscribeToLifecycleInvalidation(({ issueId }) => {
       const batch = batchRef.current;
       if (!batch?.issues.has(issueId)) return;
-      // Invalidate only this issue. A burst coalesces while waiting for a slot.
-      batch.revisions.set(issueId, (batch.revisions.get(issueId) ?? 0) + 1);
-      batch.pending.add(issueId);
-      batch.invalidated.add(issueId);
-      drain();
+      invalidateIssue(batch, issueId);
     });
     return () => {
       unsubscribe();
       batchRef.current = null;
     };
-  }, [drain]);
+  }, [invalidateIssue]);
 
-  return { details, detailErrors, clearDetails, hydrateDetails, prioritizeDetails };
+  return { details, detailErrors, clearDetails, hydrateDetails, prioritizeDetails, refreshDeletedIssueDetails };
 }

@@ -173,7 +173,7 @@ export function IssueLifecycleWorkbench({
     useState<PendingWorkItemPlanLaunch | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { details, detailErrors, clearDetails, hydrateDetails, prioritizeDetails } =
+  const { details, detailErrors, clearDetails, hydrateDetails, prioritizeDetails, refreshDeletedIssueDetails } =
     useWorkbenchLifecycleDetails();
   const [pointerPublicationBusy, setPointerPublicationBusy] = useState(false);
   const [aggregateIndexRebuilding, setAggregateIndexRebuilding] =
@@ -200,8 +200,15 @@ export function IssueLifecycleWorkbench({
     Record<string, boolean>
   >({});
   const refreshRequestId = useRef(0);
+  const activeProjectId = useRef<string | null>(null);
   const pendingProjectSelection = useRef<string | null>(null);
   const createdIssuesRef = useRef<ProductIssue[]>([]);
+  // Reconcile mutation receipts only with the reads they can race.
+  const navigationIntentRef = useRef(0);
+  const refreshReconcileRef = useRef({
+    projectChanges: null as Map<string, Project | null> | null,
+    issueListGuard: null as { projectId: string; deletedIssueIds: Set<string> } | null,
+  });
   // N6：多仓 plan 一键启动的幂等 command（同动作重试复用）与在途防抖。
   const planCodingStartRef = useRef<{ planId: string; commandId: string } | null>(null);
   const planCodingStartInFlightRef = useRef(false);
@@ -253,72 +260,89 @@ export function IssueLifecycleWorkbench({
     onDrawerFocusChange(isDrawerOpen ? drawerFocusedEntityKey : null);
   }, [drawerFocusedEntityKey, isDrawerOpen, onDrawerFocusChange]);
 
+  function isCurrentProject(projectId: string) {
+    return activeProjectId.current === projectId;
+  }
+
+  // PR #91：Project 作用域 UI 重置（原 projectChanged 分支抽出，共用清单）。
+  function resetProjectScopeState() {
+    clearDetails();
+    setIssueList(null);
+    setRepositories([]);
+    setCodebases([]);
+    setDeletedLogicalCodebases([]);
+    setFocusedIssueId(null);
+    setSelectedCardKey(null);
+    setDeletingCardKey(null);
+    setSelectedLogicalCodebaseId(null);
+    setAggregateInitialization(null);
+  }
+
   async function refresh(
-    projectIdOverride?: string | null,
+    sourceProjectId?: string | null,
     optimisticIssues: readonly ProductIssue[] = [],
   ) {
+    // A completed action may refresh its own project, but cannot navigate back to it.
+    if (sourceProjectId && (!isCurrentProject(sourceProjectId) ||
+      (pendingProjectSelection.current !== null && pendingProjectSelection.current !== sourceProjectId))) return;
     const requestId = refreshRequestId.current + 1;
     refreshRequestId.current = requestId;
-    const requestedProjectId = pendingProjectSelection.current ?? projectIdOverride;
+    const requestedProjectId = pendingProjectSelection.current ?? activeProjectId.current;
 
     setBusy(true);
     setError(null);
+    const confirmedChanges = new Map<string, Project | null>();
+    refreshReconcileRef.current.projectChanges = confirmedChanges;
     try {
       const projectResponse = await listProjects();
       if (!isLatestRefresh(requestId)) {
         return;
       }
 
-      const projectId =
-        requestedProjectId ??
-        (selectedProjectId &&
-        projectResponse.projects.some(
-          (project) => project.project_id === selectedProjectId,
-        )
-          ? selectedProjectId
-          : projectResponse.projects[0]?.project_id) ??
-        null;
-      const projectChanged = projectId !== selectedProjectId;
-      setProjects(projectResponse.projects);
-      setSelectedProjectId(projectId);
-      if (projectChanged) {
-        clearDetails();
-        setIssueList(null);
-        setRepositories([]);
-        setCodebases([]);
-        setDeletedLogicalCodebases([]);
-        setFocusedIssueId(null);
-        setSelectedCardKey(null);
-        setSelectedLogicalCodebaseId(null);
-        setAggregateInitialization(null);
+      refreshReconcileRef.current.projectChanges = null;
+      pendingProjectSelection.current = null;
+      const directoryById = new Map(projectResponse.projects.map((p) => [p.project_id, p]));
+      for (const [changedId, confirmed] of confirmedChanges) {
+        if (confirmed) directoryById.set(changedId, confirmed);
+        else directoryById.delete(changedId);
       }
+      const reconciledProjects = [...directoryById.values()];
+      const projectId = requestedProjectId && reconciledProjects.some(
+        (project) => project.project_id === requestedProjectId,
+      ) ? requestedProjectId : (reconciledProjects[0]?.project_id ?? null);
+      const projectChanged = projectId !== activeProjectId.current;
+      activeProjectId.current = projectId;
+      setProjects(reconciledProjects);
+      setSelectedProjectId(projectId);
+      if (projectChanged) resetProjectScopeState();
 
       if (!projectId) {
-        setRepositories([]);
-        setCodebases([]);
-        setDeletedLogicalCodebases([]);
-        clearDetails();
-        setIssueList(null);
+        resetProjectScopeState();
         setPointerPublications([]);
         setLogicalCodebaseMembers([]);
         setAggregateIndex(null);
-        setSelectedLogicalCodebaseId(null);
-        setAggregateInitialization(null);
-        setFocusedIssueId(null);
-        setSelectedCardKey(null);
         return;
       }
 
       const loadIssues = async () => {
-        const { issues = [] } = await listProductIssues(projectId);
+        const issueGuard = { projectId, deletedIssueIds: new Set<string>() };
+        refreshReconcileRef.current.issueListGuard = issueGuard;
+        let issues: ProductIssue[];
+        try {
+          ({ issues = [] } = await listProductIssues(projectId));
+        } finally {
+          if (refreshReconcileRef.current.issueListGuard === issueGuard) {
+            refreshReconcileRef.current.issueListGuard = null;
+          }
+        }
         if (!isLatestRefresh(requestId)) return;
-
         const byId = new Map(issues.map((issue) => [issue.issue_id, issue]));
+        for (const deletedId of issueGuard.deletedIssueIds) byId.delete(deletedId);
         createdIssuesRef.current = createdIssuesRef.current.filter((issue) =>
           issue.project_id !== projectId || !byId.has(issue.issue_id),
         );
         for (const issue of [...createdIssuesRef.current, ...optimisticIssues]) {
-          if (issue.project_id === projectId && !byId.has(issue.issue_id)) {
+          if (issue.project_id === projectId && !issueGuard.deletedIssueIds.has(issue.issue_id) && !byId.has(issue.issue_id)) {
             byId.set(issue.issue_id, issue);
           }
         }
@@ -369,6 +393,7 @@ export function IssueLifecycleWorkbench({
       }
     } finally {
       if (isLatestRefresh(requestId)) {
+        refreshReconcileRef.current.projectChanges = null;
         pendingProjectSelection.current = null;
         setBusy(false);
       }
@@ -551,8 +576,6 @@ export function IssueLifecycleWorkbench({
     latestPointerPublication,
     aggregateInitialization,
     selectedLogicalCodebaseId,
-    setSelectedProjectId,
-    setFocusedIssueId,
     setSelectedCardKey,
     setSelectedLogicalCodebaseId,
     setError,
@@ -563,6 +586,7 @@ export function IssueLifecycleWorkbench({
     setAggregateInitialization,
     setAggregateInitializationBusy,
     refresh,
+    onProjectDeleted: handleProjectDeleted,
   });
   // Task 6 收尾：plan/story/design 创建入口（含 provider 快照与失败可见化）整块抽到
   // useIssueLifecycleGeneration——纯搬运，零行为变化。
@@ -642,8 +666,9 @@ export function IssueLifecycleWorkbench({
     if (projectId === selectedProjectId) {
       return;
     }
+    navigationIntentRef.current += 1;
     pendingProjectSelection.current = projectId;
-    await refresh(projectId);
+    await refresh();
   }
 
   function handleSelectCard(card: LifecycleCardData) {
@@ -906,11 +931,44 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handleCreateProject(payload: CreateProjectPayload) {
+    // PR #91：POST 前捕获导航意图；回执先落目录与和解表，仅在无更新意图且无在途显式选择时自动选中。
+    const createIntent = ++navigationIntentRef.current;
     const project = await createProject(payload);
     setProjectDialogOpen(false);
-    await refresh(project.project_id);
+    refreshReconcileRef.current.projectChanges?.set(project.project_id, project);
+    setProjects((existing) => [...existing.filter((c) => c.project_id !== project.project_id), project]);
+    if (navigationIntentRef.current === createIntent && !pendingProjectSelection.current) {
+      pendingProjectSelection.current = project.project_id;
+      await refresh();
+    }
   }
 
+  // PR #91：Project 删除确认回执——目录立即剔除并记和解表；命中当前作用域
+  function handleProjectDeleted(projectId: string) {
+    refreshReconcileRef.current.projectChanges?.set(projectId, null);
+    setProjects((existing) => existing.filter((p) => p.project_id !== projectId));
+    if (activeProjectId.current !== projectId) return false;
+    const switching = pendingProjectSelection.current !== null &&
+      pendingProjectSelection.current !== projectId;
+    activeProjectId.current = null;
+    setSelectedProjectId(null);
+    resetProjectScopeState();
+    return !switching;
+  }
+
+  // PR #91：Issue 删除确认回执——移除列表行/创建回执并挂一次性在途过滤。
+  function handleIssueDeleted(projectId: string, issueId: string) {
+    createdIssuesRef.current = createdIssuesRef.current.filter(
+      (issue) => !(issue.project_id === projectId && issue.issue_id === issueId),
+    );
+    setIssueList((current) =>
+      current?.projectId === projectId
+        ? { projectId, issues: current.issues.filter((i) => i.issue_id !== issueId) }
+        : current,
+    );
+    const guard = refreshReconcileRef.current.issueListGuard;
+    if (guard?.projectId === projectId) guard.deletedIssueIds.add(issueId);
+  }
 
   const {
     handleDeleteIssue,
@@ -919,9 +977,9 @@ export function IssueLifecycleWorkbench({
     handleDeleteAllCodingWorkspacesFromDrawer,
   } = useIssueLifecycleWorkbenchDeletion({
     selectedProjectId,
-    focusedIssueId,
-    selectedCardKey,
-    drawerFocusedEntityKey,
+    isCurrentProject,
+    onIssueDeleted: handleIssueDeleted,
+    refreshDeletedIssueDetails,
     groupCodingDeleteBusy,
     planGroupDeleteRef,
     setError,
