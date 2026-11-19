@@ -9,93 +9,116 @@ const DETAIL_CONCURRENCY = 3;
 type DetailBatch = {
   projectId: string;
   issues: ReadonlyMap<string, ProductIssue>;
-  reads: Map<string, Promise<void>>;
+  pending: Set<string>;
+  invalidated: Set<string>;
+  revisions: Map<string, number>;
+  focusedIssueId: string | null;
+  drawerIssueId: string | undefined;
 };
 
-export function useWorkbenchLifecycleDetails(onError: (message: string) => void) {
+export function useWorkbenchLifecycleDetails() {
   const [details, setDetails] = useState<ReadonlyMap<string, IssueLifecycleResponse>>(
     () => new Map(),
   );
-  const [failed, setFailed] = useState<ReadonlySet<string>>(() => new Set());
+  const [detailErrors, setDetailErrors] = useState<ReadonlyMap<string, string>>(
+    () => new Map(),
+  );
   const batchRef = useRef<DetailBatch | null>(null);
+  const activeReads = useRef(0);
 
-  const readIssue = useCallback((issueId: string, invalidate = false) => {
+  const drain = useCallback(() => {
     const batch = batchRef.current;
-    const issue = batch?.issues.get(issueId);
-    if (!batch || !issue) return;
+    if (!batch) return;
 
-    const existing = batch.reads.get(issueId);
-    if (existing && !invalidate) return existing;
-    if (invalidate) {
-      setFailed((previous) => {
-        if (!previous.has(issueId)) return previous;
-        const next = new Set(previous);
-        next.delete(issueId);
-        return next;
-      });
+    while (activeReads.current < DETAIL_CONCURRENCY && batch.pending.size > 0) {
+      const issueId = [batch.focusedIssueId, batch.drawerIssueId].find(
+        (id): id is string => id != null && batch.pending.has(id),
+      ) ?? batch.invalidated.values().next().value ?? batch.pending.values().next().value;
+      if (issueId === undefined) break;
+      batch.pending.delete(issueId);
+      batch.invalidated.delete(issueId);
+      const issue = batch.issues.get(issueId)!;
+      const revision = batch.revisions.get(issueId);
+      activeReads.current += 1;
+
+      void getIssueLifecycle(issueId, batch.projectId)
+        .then((response) => {
+          if (batchRef.current !== batch || batch.revisions.get(issueId) !== revision) return;
+          const normalized = normalizeLifecycleResponse(response, issue);
+          setDetails((previous) => new Map(previous).set(issueId, normalized));
+          setDetailErrors((previous) => {
+            if (!previous.has(issueId)) return previous;
+            const next = new Map(previous);
+            next.delete(issueId);
+            return next;
+          });
+        })
+        .catch((reason: unknown) => {
+          if (batchRef.current !== batch || batch.revisions.get(issueId) !== revision) return;
+          const message = errorMessage(reason, "").trim() || "读取 Issue 生命周期失败";
+          setDetailErrors((previous) => new Map(previous).set(issueId, message));
+        })
+        .finally(() => {
+          activeReads.current -= 1;
+          drain();
+        });
     }
-
-    // Invalidation supersedes only this issue, not the rest of the queue.
-    const read = getIssueLifecycle(issueId, batch.projectId)
-      .then((response) => {
-        if (batchRef.current !== batch || batch.reads.get(issueId) !== read) return;
-        const normalized = normalizeLifecycleResponse(response, issue);
-        setDetails((previous) => new Map(previous).set(issueId, normalized));
-      })
-      .catch((reason: unknown) => {
-        if (batchRef.current !== batch || batch.reads.get(issueId) !== read) return;
-        setFailed((previous) => new Set(previous).add(issueId));
-        onError(errorMessage(reason, "读取 Issue 生命周期失败"));
-      });
-    batch.reads.set(issueId, read);
-    return read;
-  }, [onError]);
+  }, []);
 
   function clearDetails() {
     batchRef.current = null;
     setDetails(new Map());
-    setFailed(new Set());
+    setDetailErrors(new Map());
   }
 
-  async function hydrateDetails(
+  function hydrateDetails(
     projectId: string,
     issues: readonly ProductIssue[],
     focusedIssueId: string | null,
     drawerIssueId: string | undefined,
   ) {
+    const issuesById = new Map(issues.map((issue) => [issue.issue_id, issue]));
     const batch: DetailBatch = {
       projectId,
-      issues: new Map(issues.map((issue) => [issue.issue_id, issue])),
-      reads: new Map(),
+      issues: issuesById,
+      pending: new Set(issuesById.keys()),
+      invalidated: new Set(),
+      revisions: new Map(),
+      focusedIssueId,
+      drawerIssueId,
     };
+    // Outstanding reads keep their slots on refresh or project switch. Only
+    // queued work and late responses from the old batch are discarded.
     batchRef.current = batch;
-    setFailed(new Set());
+    setDetailErrors(new Map());
     setDetails((previous) => new Map([...previous].filter(([id]) => batch.issues.has(id))));
 
-    // The focused issue and a linked drawer go first. Each slot then fills the
-    // queue in order, without waiting for another slot's slow request.
-    const order = new Set([focusedIssueId, drawerIssueId, ...batch.issues.keys()]);
-    order.delete(null);
-    order.delete(undefined);
-    const remaining = order.values();
-    const fillQueue = async () => {
-      for (const issueId of remaining) {
-        if (batchRef.current !== batch) return;
-        if (issueId) await readIssue(issueId);
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(DETAIL_CONCURRENCY, order.size) }, fillQueue));
+    drain();
   }
+
+  const prioritizeDetails = useCallback((focusedIssueId: string | null, drawerIssueId?: string) => {
+    const batch = batchRef.current;
+    if (!batch) return;
+    batch.focusedIssueId = focusedIssueId;
+    batch.drawerIssueId = drawerIssueId;
+    drain();
+  }, [drain]);
 
   useEffect(() => {
     const unsubscribe = subscribeToLifecycleInvalidation(({ issueId }) => {
-      void readIssue(issueId, true);
+      const batch = batchRef.current;
+      if (!batch?.issues.has(issueId)) return;
+      // Invalidate only this issue. A burst coalesces while waiting for a slot.
+      batch.revisions.set(issueId, (batch.revisions.get(issueId) ?? 0) + 1);
+      batch.pending.add(issueId);
+      batch.invalidated.add(issueId);
+      drain();
     });
     return () => {
       unsubscribe();
       batchRef.current = null;
     };
-  }, [readIssue]);
+  }, [drain]);
 
-  return { details, failed, clearDetails, hydrateDetails, readIssue };
+  return { details, detailErrors, clearDetails, hydrateDetails, prioritizeDetails };
 }

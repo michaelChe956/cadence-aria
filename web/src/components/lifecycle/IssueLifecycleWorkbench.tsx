@@ -173,8 +173,8 @@ export function IssueLifecycleWorkbench({
     useState<PendingWorkItemPlanLaunch | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { details, failed, clearDetails, hydrateDetails, readIssue } =
-    useWorkbenchLifecycleDetails(setError);
+  const { details, detailErrors, clearDetails, hydrateDetails, prioritizeDetails } =
+    useWorkbenchLifecycleDetails();
   const [pointerPublicationBusy, setPointerPublicationBusy] = useState(false);
   const [aggregateIndexRebuilding, setAggregateIndexRebuilding] =
     useState(false);
@@ -200,6 +200,7 @@ export function IssueLifecycleWorkbench({
     Record<string, boolean>
   >({});
   const refreshRequestId = useRef(0);
+  const pendingProjectSelection = useRef<string | null>(null);
   const createdIssuesRef = useRef<ProductIssue[]>([]);
   // N6：多仓 plan 一键启动的幂等 command（同动作重试复用）与在途防抖。
   const planCodingStartRef = useRef<{ planId: string; commandId: string } | null>(null);
@@ -231,9 +232,8 @@ export function IssueLifecycleWorkbench({
   // Promote explicit selections and drawer deep links over unselected rows.
   const drawerIssueId = (isDrawerOpen ? drawerFocusedEntityKey : focusEntityKey)?.split(":")[1];
   useEffect(() => {
-    if (focusedIssueId) void readIssue(focusedIssueId);
-    if (drawerIssueId) void readIssue(drawerIssueId);
-  }, [drawerIssueId, focusedIssueId, issueList, readIssue]);
+    prioritizeDetails(focusedIssueId, drawerIssueId);
+  }, [drawerIssueId, focusedIssueId, issueList, prioritizeDetails]);
 
   useEffect(() => {
     if (focusEntityKey === undefined) {
@@ -259,6 +259,7 @@ export function IssueLifecycleWorkbench({
   ) {
     const requestId = refreshRequestId.current + 1;
     refreshRequestId.current = requestId;
+    const requestedProjectId = pendingProjectSelection.current ?? projectIdOverride;
 
     setBusy(true);
     setError(null);
@@ -269,7 +270,7 @@ export function IssueLifecycleWorkbench({
       }
 
       const projectId =
-        projectIdOverride ??
+        requestedProjectId ??
         (selectedProjectId &&
         projectResponse.projects.some(
           (project) => project.project_id === selectedProjectId,
@@ -332,7 +333,7 @@ export function IssueLifecycleWorkbench({
         setFocusedIssueId((current) =>
           !projectChanged && current && byId.has(current) ? current : firstIssueId,
         );
-        await hydrateDetails(
+        hydrateDetails(
           projectId,
           materializedIssues,
           !projectChanged && focusedIssueId && byId.has(focusedIssueId) ? focusedIssueId : firstIssueId,
@@ -368,6 +369,7 @@ export function IssueLifecycleWorkbench({
       }
     } finally {
       if (isLatestRefresh(requestId)) {
+        pendingProjectSelection.current = null;
         setBusy(false);
       }
     }
@@ -640,6 +642,7 @@ export function IssueLifecycleWorkbench({
     if (projectId === selectedProjectId) {
       return;
     }
+    pendingProjectSelection.current = projectId;
     await refresh(projectId);
   }
 
@@ -660,7 +663,7 @@ export function IssueLifecycleWorkbench({
     setSelectedCardKey(lifecycleEntityKey("issue", issueId, issueId));
     setFocusedIssueId(issueId);
     closeDrawer();
-    void readIssue(issueId);
+    prioritizeDetails(issueId);
   }
 
   function handleGenerateStorySpecFromQueue(issueId: string) {
@@ -1037,7 +1040,7 @@ export function IssueLifecycleWorkbench({
       deletingCardKey={deletingCardKey}
       selectedIssue={selectedIssueColumns.issue[0] ?? null}
       unloadedIssue={unloadedIssue}
-      issueDetailFailed={unloadedIssue !== undefined && failed.has(unloadedIssue.issue_id)}
+      issueDetailError={focusedIssueId ? detailErrors.get(focusedIssueId) : undefined}
       issueListLoading={busy && issueList === null}
       storySpecs={selectedIssueColumns.story_spec}
       designSpecs={selectedIssueColumns.design_spec}

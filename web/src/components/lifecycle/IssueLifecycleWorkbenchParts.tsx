@@ -73,7 +73,7 @@ export function resolveGroupCodingAttempt(
 export function IssueLifecycleDetail({
   issue,
   unloadedIssue,
-  issueDetailFailed,
+  issueDetailError,
   storySpecs,
   designSpecs,
   workItems,
@@ -88,7 +88,7 @@ export function IssueLifecycleDetail({
 }: {
   issue: LifecycleCardData | null;
   unloadedIssue?: ProductIssue;
-  issueDetailFailed?: boolean;
+  issueDetailError?: string;
   storySpecs: LifecycleCardData[];
   designSpecs: LifecycleCardData[];
   workItems: LifecycleCardData[];
@@ -136,7 +136,7 @@ export function IssueLifecycleDetail({
       <section
         role="region"
         aria-label="Issue 生命周期详情"
-        aria-busy={unloadedIssue && !issueDetailFailed ? true : undefined}
+        aria-busy={unloadedIssue && !issueDetailError ? true : undefined}
         className="flex min-h-96 items-center justify-center rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-6 text-center"
       >
         <div className="max-w-sm">
@@ -145,9 +145,12 @@ export function IssueLifecycleDetail({
           </h2>
           <p className="mt-2 text-sm leading-6 text-[var(--aria-ink-muted)]">
             {unloadedIssue
-              ? issueDetailFailed ? "生命周期加载失败，可刷新重试。" : "正在加载生命周期…"
+              ? issueDetailError ? "生命周期加载失败，可刷新重试。" : "正在加载生命周期…"
               : "Story Spec、Design Spec 和 Work Item 都会作为该 Issue 的内容展示在这里。"}
           </p>
+          {issueDetailError ? (
+            <p role="alert" className="mt-2 text-sm text-[var(--aria-ink-muted)]">{issueDetailError}</p>
+          ) : null}
         </div>
       </section>
     );
@@ -241,6 +244,11 @@ export function IssueLifecycleDetail({
           />
         </div>
       </div>
+      {issueDetailError ? (
+        <p role="alert" className="px-4 py-2 text-sm text-[var(--aria-ink-muted)]">
+          生命周期更新失败，当前显示上次结果：{issueDetailError}
+        </p>
+      ) : null}
       {/* B1（用户裁决 A，2026-10-10）：issue 级交付状态常驻面板——不随阶段
           切换消失、不依赖「查看完整 Issue」抽屉入口；与抽屉内面板同组件
           同数据（后端 delivery_summary 缺失时不渲染，向后兼容）。 */}
