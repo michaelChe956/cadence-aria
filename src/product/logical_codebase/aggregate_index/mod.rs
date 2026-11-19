@@ -3,6 +3,8 @@ pub mod codegraph_coverage;
 pub mod exclude;
 pub mod freshness;
 pub mod operation;
+mod scan_acceptance;
+pub mod scan_diagnostics;
 pub mod snapshot;
 pub mod source_scan;
 pub mod store;

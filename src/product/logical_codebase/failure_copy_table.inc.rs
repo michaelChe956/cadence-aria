@@ -157,6 +157,27 @@ const TABLE: &[Entry] = &[
         FailureTriage::Environment,
     ),
     (
+        "aggregate_index_source_scan_incomplete.limit",
+        "成员{member}的盘检达到上限",
+        "聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过。这里是盘检达到上限，还不能判断这些成员有没有源码，不表示其他成员未被收录。",
+        "在本次聚合索引诊断中查看哪些成员达到时间、条目数或深度上限；核对这些成员的目录规模后重试。",
+        FailureTriage::Environment,
+    ),
+    (
+        "aggregate_index_source_scan_incomplete.read",
+        "未能完整读取成员{member}的源码范围",
+        "聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过。这些成员的文件清单或目录没有读完整，不能当作无源码跳过。",
+        "在本次聚合索引诊断中查看对应成员的读取原因，核对 Git 主检出与目录可读性后重试。",
+        FailureTriage::Environment,
+    ),
+    (
+        "aggregate_index_source_scan_incomplete.missing_coverage",
+        "成员{member}缺少覆盖结果",
+        "聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过。本次覆盖结果没有说明这些成员是否被收录，因此未对它们开始盘检。",
+        "查看本次重建的聚合索引诊断摘要，核对覆盖结果中缺少的成员；不需要为了这条提示给成员补源码。",
+        FailureTriage::Environment,
+    ),
+    (
         "aggregate_index_all_members_source_less",
         "没有可建立代码索引的源码",
         "布局规则「聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过」下，全部成员经盘检确认没有 Aria 源码，没有任何被覆盖成员，索引无法激活。",
@@ -1086,30 +1107,6 @@ pub fn canonical_key(code: &str) -> &str {
         .find(|(alias, _)| *alias == code)
         .map(|(_, canonical)| *canonical)
         .unwrap_or(code)
-}
-
-/// 覆盖失败码的同码双变体：按持久化失败事实的机器事实前缀选择模板。
-///
-/// 变体 key **只用于模板选择**：归因分支与码表查找仍用 canonical 码，
-/// `machine_line` 仍写原始稳定码（内部变体键不得替换 canonical key）。
-const COVERAGE_DISK_SOURCE_KEY: &str = "aggregate_index_member_coverage_failed.disk_source";
-
-/// 新事实前缀：磁盘上有源码，但本次索引没收录它。
-const COVERAGE_DISK_SOURCE_FACT_PREFIX: &str = "source found on disk;";
-
-/// 查表用 key：覆盖失败码遇到「磁盘上有源码」的新事实前缀时选第二成品变体。
-///
-/// 只改**模板**，不改归因、不改 `machine_line`；其余码一律原样返回。
-fn resolved_entry_key<'a>(key: &'a str, detail: Option<&str>) -> &'a str {
-    if key == "aggregate_index_member_coverage_failed"
-        && let Some(detail) = detail
-        && detail
-            .trim_start()
-            .starts_with(COVERAGE_DISK_SOURCE_FACT_PREFIX)
-    {
-        return COVERAGE_DISK_SOURCE_KEY;
-    }
-    key
 }
 
 fn table_entry(key: &str) -> Option<Entry> {

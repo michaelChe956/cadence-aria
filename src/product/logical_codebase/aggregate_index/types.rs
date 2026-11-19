@@ -84,6 +84,9 @@ pub struct AggregateIndexRecord {
     pub supersedes_aggregate_index_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// Measured on this attempt only; absence in older records means unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_scan: Option<super::scan_diagnostics::SourceScanEvidence>,
 }
 
 impl AggregateIndexRecord {
@@ -112,6 +115,7 @@ impl AggregateIndexRecord {
             command_id: None,
             supersedes_aggregate_index_id: None,
             warning: None,
+            source_scan: None,
         }
     }
 }
@@ -173,6 +177,32 @@ mod tests {
             std::path::PathBuf::from(
                 "/tmp/aria/projects/project_0001/logical-codebase/aggregate-indexes"
             )
+        );
+    }
+
+    #[test]
+    fn failed_generation_roundtrips_scan_evidence_without_inventing_it_on_legacy_records() {
+        let legacy = AggregateIndexRecord::building(
+            "aggregate_index_fixture".into(),
+            "project_0001".into(),
+            70,
+            vec![member_snapshot_fixture()],
+            "2026-11-19T03:35:21Z".into(),
+        );
+        let mut wire = serde_json::to_value(&legacy).unwrap();
+        assert!(wire.get("source_scan").is_none());
+        let evidence = serde_json::json!({
+            "coverage_elapsed_ms": 3100, "scan_elapsed_ms": 1,
+            "member_count": 2, "covered_count": 1,
+            "members": [{"member":"config", "verdict":"unknown", "reason":"deadline",
+                "remaining_ms_at_entry":0, "visibility_started":false}]
+        });
+        wire["status"] = serde_json::json!("stale");
+        wire["source_scan"] = evidence.clone();
+        let decoded: AggregateIndexRecord = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap()["source_scan"],
+            evidence
         );
     }
 

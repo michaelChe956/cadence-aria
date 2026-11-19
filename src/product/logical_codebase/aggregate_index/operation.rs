@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Utc;
 use serde_json::Value;
@@ -18,9 +19,11 @@ use super::codegraph_coverage::{
     AggregateCoverageProbe, CliFallbackCoverageProbe, CodeGraphCoverage, CoverageOutcome,
     summarize_coverage,
 };
+use super::scan_acceptance::cross_verify_uncovered;
+use super::scan_diagnostics::SourceScanEvidence;
 use super::source_scan::{
-    ARIA_SOURCE_SUFFIX_CALIBRATED_CODEGRAPH_VERSION, GitVisibleFiles, MemberSourceVerdict,
-    MemberSourceVisibility, SourceScanBudget, scan_member_source,
+    ARIA_SOURCE_SUFFIX_CALIBRATED_CODEGRAPH_VERSION, GitVisibleFiles, MemberSourceVisibility,
+    SourceScanBudget,
 };
 use super::{
     AggregateIndexError, AggregateIndexRecord, AggregateIndexSnapshotCollector,
@@ -60,8 +63,10 @@ impl AggregateIndexAcceptance {
         root: &Path,
         member_names: &[String],
         visibility: &dyn MemberSourceVisibility,
-        budget: &mut SourceScanBudget,
+        clock: &(dyn Fn() -> Instant + Sync),
+        evidence: &mut Option<SourceScanEvidence>,
     ) -> Result<Self, AggregateIndexError> {
+        let coverage_start = clock();
         let sdk_warning: Option<String>;
         // 成员覆盖优先走 codegraph SDK（hasFilesUnder 判定，载荷几百字节；
         // CLI files 的全量清单在 3.1 GB 级索引上 ~230 MB，必然截断）。
@@ -153,8 +158,20 @@ impl AggregateIndexAcceptance {
         };
         // 交叉验收（design D1：先覆盖、后盘检、再汇总）：未覆盖成员逐个
         // 有界盘检，区分「漏收 / 仅工作树 / 无法确认 / 确认无源码可跳过」。
-        let skipped_members =
-            cross_verify_uncovered(root, &member_covered, member_names, visibility, budget)?;
+        let scan_start = clock();
+        let mut budget = SourceScanBudget::new_batch_with_clock(clock);
+        let (members, decision) =
+            cross_verify_uncovered(root, &member_covered, member_names, visibility, &mut budget);
+        *evidence = Some(SourceScanEvidence {
+            member_count: member_names.len(),
+            covered_count: member_names.len() - members.len(),
+            coverage_elapsed_ms: scan_start
+                .saturating_duration_since(coverage_start)
+                .as_millis() as u64,
+            scan_elapsed_ms: clock().saturating_duration_since(scan_start).as_millis() as u64,
+            members,
+        });
+        let skipped_members = decision?;
         // 排除性查询载荷小，保持既有 CLI query_json 路径不动——交叉验收
         // 通过（含跳过成员）不放松负向排除。
         let mut excluded_queries = BTreeMap::new();
@@ -497,6 +514,17 @@ impl AggregateIndexOperation {
         mode: IndexApplicationMode,
         command_id: Option<&str>,
     ) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        self.apply_index_with_clock(project_id, manifest, mode, command_id, &Instant::now)
+    }
+
+    fn apply_index_with_clock(
+        &self,
+        project_id: &str,
+        manifest: &LogicalCodebaseManifest,
+        mode: IndexApplicationMode,
+        command_id: Option<&str>,
+        clock: &(dyn Fn() -> Instant + Sync),
+    ) -> Result<AggregateIndexRecord, AggregateIndexError> {
         let members = self.logical.list_members(project_id)?;
         let checkouts = self.logical.list_checkouts(project_id)?;
         let included = included_main_checkouts(manifest, &members, &checkouts)?;
@@ -516,7 +544,7 @@ impl AggregateIndexOperation {
         );
         let mut building = building;
         building.command_id = command_id.map(|value| value.to_string());
-        let building = self.store.create(project_id, building)?;
+        let mut building = self.store.create(project_id, building)?;
         let index_id = building.aggregate_index_id.clone();
 
         let command_result = (|| {
@@ -550,17 +578,17 @@ impl AggregateIndexOperation {
         let after = match after_result {
             Ok(after) => after,
             Err(error) => {
-                return self.fail_building(project_id, &index_id, mode, error, Vec::new());
+                return self.fail_building(project_id, building, mode, error, Vec::new());
             }
         };
         let (codegraph_version, config_digest) = match command_result {
             Ok((codegraph_version, config_digest)) => (codegraph_version, config_digest),
-            Err(error) => return self.fail_building(project_id, &index_id, mode, error, after),
+            Err(error) => return self.fail_building(project_id, building, mode, error, after),
         };
         if snapshots_differ(&building.member_snapshots, &after) {
             return self.fail_building(
                 project_id,
-                &index_id,
+                building,
                 mode,
                 AggregateIndexError::Failed {
                     code: "aggregate_index_member_drifted",
@@ -570,16 +598,23 @@ impl AggregateIndexOperation {
             );
         }
 
-        let acceptance = match AggregateIndexAcceptance::verify(
+        let result = AggregateIndexAcceptance::verify(
             &self.cli,
             self.coverage.as_ref(),
             &manifest.provider_context_root,
             &member_names,
-            // 交叉验收注入点：verify 是关联函数，可见范围与盘检预算由
-            // 调用方显式传入（每次验收一批共享预算）。
             self.source_visibility.as_ref(),
-            &mut SourceScanBudget::new_batch(),
-        ) {
+            clock,
+            &mut building.source_scan,
+        );
+        if let Some(scan) = &building.source_scan {
+            tracing::info!(project_id, %index_id, member_count = scan.member_count,
+                covered_count = scan.covered_count, coverage_elapsed_ms = scan.coverage_elapsed_ms,
+                scan_elapsed_ms = scan.scan_elapsed_ms,
+                visibility_started_count = scan.members.iter().filter(|m| m.visibility_started).count(),
+                "aggregate index source scan");
+        }
+        let acceptance = match result {
             Ok(acceptance) => {
                 let summary = summarize_coverage(&acceptance.member_covered);
                 // 一条 info：验收结论（成功 + 成员汇总 + 是否有健康闸 warning）。
@@ -595,7 +630,7 @@ impl AggregateIndexOperation {
                 );
                 acceptance
             }
-            Err(error) => return self.fail_building(project_id, &index_id, mode, error, after),
+            Err(error) => return self.fail_building(project_id, building, mode, error, after),
         };
 
         let now = Utc::now().to_rfc3339();
@@ -654,11 +689,12 @@ impl AggregateIndexOperation {
     fn fail_building(
         &self,
         project_id: &str,
-        index_id: &str,
+        mut record: AggregateIndexRecord,
         mode: IndexApplicationMode,
         error: AggregateIndexError,
         after: Vec<super::AggregateIndexMemberSnapshot>,
     ) -> Result<AggregateIndexRecord, AggregateIndexError> {
+        let index_id = record.aggregate_index_id.as_str();
         let failure_code = error_code(&error);
         let status = match mode {
             IndexApplicationMode::Initialize => AggregateIndexStatus::Failed,
@@ -703,22 +739,14 @@ impl AggregateIndexOperation {
                 "codegraph files output truncated: file list incomplete"
             );
         }
-        self.store
-            .mark_status(project_id, index_id, status, Some(error.to_string()))?;
-        if lkg_degraded {
-            self.store
-                .degrade_last_known_good(project_id, error.to_string())?;
-        }
-        if !after.is_empty() {
-            let mut record = self.store.get(project_id, index_id)?.ok_or_else(|| {
-                AggregateIndexError::Failed {
-                    code: "aggregate_index_not_found",
-                    message: format!("aggregate index {index_id} was not found"),
-                }
-            })?;
-            record.observed_after_member_snapshots = after;
-            record.warning = Some(error.to_string());
-            self.store.update_record(project_id, record)?;
+        // Expose one consistent terminal record, including this attempt's partial evidence.
+        record.status = status;
+        record.warning = Some(error.to_string());
+        record.observed_after_member_snapshots = after;
+        record.updated_at = Utc::now().to_rfc3339();
+        let record = self.store.update_record(project_id, record)?;
+        if lkg_degraded && let Some(warning) = record.warning {
+            self.store.degrade_last_known_good(project_id, warning)?;
         }
         Err(error)
     }
@@ -900,60 +928,6 @@ fn verify_member_coverage(
     Ok(result)
 }
 
-/// 交叉验收：对未覆盖成员做有界盘检，按四值结论分桶汇总（design D1/D3）。
-///
-/// `visibility` 与 `budget` 都由调用方传入（**明确的注入点**）：测试直调
-/// 本函数即可注入耗尽预算/失败可见范围，不依赖真实 sleep 或竞态。
-/// 返回「经盘检确认无源码、可跳过」的成员名单（manifest 顺序）。
-fn cross_verify_uncovered(
-    root: &Path,
-    member_covered: &BTreeMap<String, bool>,
-    member_names: &[String],
-    visibility: &dyn MemberSourceVisibility,
-    budget: &mut SourceScanBudget,
-) -> Result<Vec<String>, AggregateIndexError> {
-    let mut disk_source = Vec::new();
-    let mut worktree_only = Vec::new();
-    let mut scan_unknown = Vec::new();
-    let mut coverage_unknown = Vec::new();
-    let mut no_source = Vec::new();
-    for name in member_names {
-        match member_covered.get(name) {
-            Some(true) => {}
-            Some(false) => match scan_member_source(&root.join(name), visibility, budget) {
-                MemberSourceVerdict::SourceInNormalPath => disk_source.push(name.clone()),
-                MemberSourceVerdict::SourceOnlyInWorktrees => worktree_only.push(name.clone()),
-                MemberSourceVerdict::Unknown => scan_unknown.push(name.clone()),
-                MemberSourceVerdict::NoSource => no_source.push(name.clone()),
-            },
-            // 覆盖键缺失：连覆盖状态都不知道 ⇒ 无法确认，不得进任何盘检
-            // 桶、不得计入「全员确认无源码」（S1/R1）。
-            None => coverage_unknown.push(name.clone()),
-        }
-    }
-    // 失败主码优先级（一条文案不得混类点名，每桶只点名同类成员）：
-    // 普通路径漏收 > .worktrees/ 独有源码 > 盘检无法确认 > 覆盖状态未知。
-    if !disk_source.is_empty() {
-        return Err(member_coverage_failed_on_disk(&disk_source));
-    }
-    if !worktree_only.is_empty() {
-        return Err(member_source_excluded(&worktree_only));
-    }
-    if !scan_unknown.is_empty() {
-        return Err(source_scan_incomplete(&scan_unknown));
-    }
-    if !coverage_unknown.is_empty() {
-        return Err(member_coverage_state_unknown(&coverage_unknown));
-    }
-    // 无上述阻断且至少一个成员被覆盖 ⇒ 通过，返回可跳过名单；
-    // 全员确认无源码（无任何被覆盖成员）⇒ 失败，不发布空索引当成功。
-    if member_covered.values().any(|covered| *covered) {
-        Ok(no_source)
-    } else {
-        Err(all_members_source_less(member_names))
-    }
-}
-
 /// 健康闸：SDK 返回的 index.state / pending / stale / stats.fileCount 有
 /// 异常信号时记 warning（不阻断激活——保持「不因健康问题阻断」语义；
 /// codegraph 1.6 实测健康 state 为 "complete"，未知 state 值也计入信号，
@@ -1027,73 +1001,6 @@ fn codegraph_version_drift_warning(observed: &str) -> Option<String> {
          复校准：按 cadence/notes/2026-11-18_校准_CodeGraph源码后缀清单_1.6.3_v1.0.md \
          的测量命令重跑后缀收录表，更新 ARIA_SOURCE_EXTENSIONS 与基线常量"
     ))
-}
-
-/// 五个失败构造函数（design D3）：message 必须含 `included members [`，
-/// 供 `failure_copy.rs` 的 `subject_from_message` 抽成员名；中文成品只在
-/// 码表（`failure_copy_table.inc.rs`），这里只写机器事实。
-/// 漏收：普通路径 git 可见范围内有 Aria 源码，索引却未收录。复用覆盖
-/// 失败码；`source found on disk;` 事实前缀选择码表的磁盘事实成品变体
-/// （MUST NOT 说用户没放源码）。
-fn member_coverage_failed_on_disk(uncovered: &[String]) -> AggregateIndexError {
-    AggregateIndexError::Failed {
-        code: "aggregate_index_member_coverage_failed",
-        message: format!(
-            "source found on disk; no indexed files under included members [{}]; check member \
-             paths and ignore rules, then rebuild",
-            uncovered.join(", ")
-        ),
-    }
-}
-
-/// 源码只在被排除的 `.worktrees/` 子树（第二段诊断）：专属失败码。
-fn member_source_excluded(members: &[String]) -> AggregateIndexError {
-    AggregateIndexError::Failed {
-        code: "aggregate_index_member_source_excluded",
-        message: format!(
-            "source exists only under .worktrees/ for included members [{}]; move it into the \
-             member main checkout",
-            members.join(", ")
-        ),
-    }
-}
-
-/// 盘检无法确认（权限/IO/深度/条目数/时限/取消）：MUST NOT 断言该成员
-/// 没有源码。
-fn source_scan_incomplete(members: &[String]) -> AggregateIndexError {
-    AggregateIndexError::Failed {
-        code: "aggregate_index_source_scan_incomplete",
-        message: format!(
-            "source scan incomplete (permission/io/depth/entry/time limit) for included members \
-             [{}]; cannot confirm absence of source",
-            members.join(", ")
-        ),
-    }
-}
-
-/// 覆盖键缺失（连覆盖状态都不知道）：按「无法确认」处理，复用无法确认
-/// 码（R1：不得复用覆盖失败码，也不得当「已确认无源码」）。
-fn member_coverage_state_unknown(members: &[String]) -> AggregateIndexError {
-    AggregateIndexError::Failed {
-        code: "aggregate_index_source_scan_incomplete",
-        message: format!(
-            "coverage state unknown for included members [{}]; no indexed files and no disk \
-             scan evidence",
-            members.join(", ")
-        ),
-    }
-}
-
-/// 全部成员经盘检确认无源码：没有任何被覆盖成员，索引不可激活。
-fn all_members_source_less(members: &[String]) -> AggregateIndexError {
-    AggregateIndexError::Failed {
-        code: "aggregate_index_all_members_source_less",
-        message: format!(
-            "no source found after bounded disk scan under included members [{}]; add a member \
-             that contains source",
-            members.join(", ")
-        ),
-    }
 }
 
 fn is_empty_query_result(value: &Value) -> bool {

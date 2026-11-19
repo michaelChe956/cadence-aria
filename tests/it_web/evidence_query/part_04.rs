@@ -171,6 +171,7 @@ impl FiftyMemberFixture {
                     updated_at: NOW.to_string(),
                     supersedes_aggregate_index_id: None,
                     warning: None,
+                    source_scan: None,
                 },
             )
             .expect("save synthetic aggregate index");

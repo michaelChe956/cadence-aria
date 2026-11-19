@@ -50,6 +50,22 @@ fn scan_incomplete_code_says_unconfirmed_not_absent() {
     assert_eq!(copy.machine_line, "aggregate_index_source_scan_incomplete");
 }
 
+#[test]
+fn source_scan_copies_distinguish_measured_limit_read_error_and_legacy_mixed_facts() {
+    let code = "aggregate_index_source_scan_incomplete";
+    for (fact, expected) in [
+        ("source scan limit reached; for included members [a]", "盘检达到上限"),
+        ("source scan read incomplete; for included members [a]", "未能完整读取"),
+        ("coverage state unknown for included members [a]; no indexed files and no disk scan evidence", "缺少覆盖结果"),
+        ("source scan incomplete (permission/io/depth/entry/time limit) for included members [a]", "没能确认"),
+    ] {
+        let copy = describe(FailureInput::new(code).with_detail(fact).with_subject("a"));
+        assert!(copy.title_zh.contains(expected), "{fact}: {}", copy.title_zh);
+        assert!(copy.title_zh.contains('a'));
+        assert_eq!(copy.machine_line, code);
+    }
+}
+
 /// 新失败码 `aggregate_index_all_members_source_less`：全员确认无源码 ⇒ 索引不可激活；
 /// 动作必须给出「加入含源码的成员」这一步。
 #[test]

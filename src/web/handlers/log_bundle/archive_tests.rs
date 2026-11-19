@@ -17,8 +17,9 @@ use tempfile::{TempDir, tempdir};
 
 use super::archive::{
     self, ARIA_INPUT_CLASS_BYTES, ARIA_OUTPUT_CLASS_BYTES, Budget, HostPaths,
-    MANIFEST_OUTPUT_BYTES, ProviderRoot, RUNTIME_INFO_OUTPUT_BYTES, SOURCE_ENV, TOTAL_BUDGET_BYTES,
-    TRACE_INPUT_PER_PROVIDER_BYTES, TRACE_OUTPUT_PER_PROVIDER_BYTES,
+    MANIFEST_OUTPUT_BYTES, ProviderRoot, RUNTIME_INFO_OUTPUT_BYTES, SOURCE_DEFAULT_HOME,
+    SOURCE_ENV, TOTAL_BUDGET_BYTES, TRACE_INPUT_PER_PROVIDER_BYTES,
+    TRACE_OUTPUT_PER_PROVIDER_BYTES,
 };
 use super::sessions::Session;
 
@@ -584,4 +585,362 @@ fn budget_grants_respect_class_and_total_caps() {
     assert_eq!(o.grant_trace_output(2, 1), 0);
     assert_eq!(o.exhausted_reason(), Some("budget_exhausted"));
     assert_eq!(o.grant_trace_input(3, 1024), 1024, "输入侧独立计量");
+}
+
+/// 聚合索引世代记录：只收白名单投影，身份对不上/坏文件按稳定原因记清单。
+#[test]
+fn aggregate_index_generations_are_projected_by_allowlist_and_identity() {
+    let home = tempdir().expect("home");
+    let projects = home.path().join(".aria").join("projects");
+
+    // 失败的一代（旧项目级别名布局）：带失败封套与敏感/路径字段。
+    write_file(
+        &projects,
+        "project_0001/logical-codebase/aggregate-indexes/aggregate_index_v018.json",
+        &serde_json::to_vec(&json!({
+            "aggregate_index_id": "aggregate_index_v018",
+            "project_id": "project_0001",
+            "membership_revision": 7,
+            "status": "failed",
+            "created_at": "2026-11-19T09:00:00Z",
+            "updated_at": "2026-11-19T09:00:03Z",
+            "warning": "aggregate_index_failed:aggregate_index_source_scan_incomplete: included members [gray-config, msha-sdk]",
+            "codegraph_root": "/abs/private/root",
+            "member_snapshots": [{"logical_repository_id": "r1", "checkout_id": "c1", "revision": "deadbeef"}],
+            "token": "sk-live-CANARY-GEN",
+        }))
+        .unwrap(),
+    );
+    // 新布局的一代（带类型化盘检证据）。
+    write_file(
+        &projects,
+        "project_0001/logical-codebases/lc_0001/aggregate-indexes/agg_typed.json",
+        &serde_json::to_vec(&json!({
+            "aggregate_index_id": "agg_typed",
+            "project_id": "project_0001",
+            "membership_revision": 9,
+            "status": "active",
+            "created_at": "2026-11-19T10:00:00Z",
+            "updated_at": "2026-11-19T10:00:07Z",
+            "source_scan": {
+                "member_count": 69,
+                "covered_count": 64,
+                "coverage_elapsed_ms": 1345,
+                "scan_elapsed_ms": 2000,
+                "members": [
+                    {"member": "gray-config", "verdict": "unknown", "reason": "deadline", "visibility_started": true, "remaining_ms_at_entry": 1500},
+                    {"member": "msha-sdk", "verdict": "source_in_normal_path", "visibility_started": true},
+                ],
+            },
+        }))
+        .unwrap(),
+    );
+    // 身份对不上：基名 ≠ 世代 ID、正文项目 ≠ 目录项目。
+    write_file(
+        &projects,
+        "project_0001/logical-codebase/aggregate-indexes/mismatch.json",
+        &serde_json::to_vec(&json!({
+            "aggregate_index_id": "other_id",
+            "project_id": "project_0001",
+            "status": "active",
+        }))
+        .unwrap(),
+    );
+    write_file(
+        &projects,
+        "project_0002/logical-codebase/aggregate-indexes/wrong_project.json",
+        &serde_json::to_vec(&json!({
+            "aggregate_index_id": "wrong_project",
+            "project_id": "project_0001",
+            "status": "active",
+        }))
+        .unwrap(),
+    );
+    // 坏 JSON 与嵌套一层（嵌套的不该被收录）。
+    write_file(
+        &projects,
+        "project_0001/logical-codebase/aggregate-indexes/broken.json",
+        b"{not json",
+    );
+    write_file(
+        &projects,
+        "project_0001/logical-codebase/aggregate-indexes/nested/deep.json",
+        &serde_json::to_vec(&json!({
+            "aggregate_index_id": "deep",
+            "project_id": "project_0001",
+            "status": "active",
+        }))
+        .unwrap(),
+    );
+    // 旧世代：缺可选字段（不得伪造原因）。
+    write_file(
+        &projects,
+        "project_0001/logical-codebase/aggregate-indexes/old.json",
+        &serde_json::to_vec(&json!({
+            "aggregate_index_id": "old",
+            "project_id": "project_0001",
+            "status": "active",
+        }))
+        .unwrap(),
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        symlink(
+            "/etc/hostname",
+            projects
+                .join("project_0001/logical-codebase/aggregate-indexes")
+                .join("linked.json"),
+        )
+        .expect("symlink");
+    }
+
+    let host = HostPaths::from_home_default(home.path());
+    let mut file = archive::build(json!({"v": 1}), &host).expect("bundle");
+    let members = unpack_all(&mut file);
+
+    let failed_member =
+        "aria/projects/project_0001/logical-codebase/aggregate-indexes/aggregate_index_v018.json";
+    let typed_member =
+        "aria/projects/project_0001/logical-codebases/lc_0001/aggregate-indexes/agg_typed.json";
+    let paths: Vec<String> = members.iter().map(|m| m.path.clone()).collect();
+    assert!(
+        try_path(&members, failed_member).is_some(),
+        "失败的一代必须进包: {paths:?}"
+    );
+    assert!(try_path(&members, typed_member).is_some());
+    // 嵌套一层、链接、坏文件都不进包。
+    assert!(
+        try_path(
+            &members,
+            "aria/projects/project_0001/logical-codebase/aggregate-indexes/nested/deep.json"
+        )
+        .is_none()
+    );
+    assert!(
+        try_path(
+            &members,
+            "aria/projects/project_0001/logical-codebase/aggregate-indexes/linked.json"
+        )
+        .is_none()
+    );
+    assert!(
+        try_path(
+            &members,
+            "aria/projects/project_0001/logical-codebase/aggregate-indexes/broken.json"
+        )
+        .is_none()
+    );
+    assert!(
+        try_path(
+            &members,
+            "aria/projects/project_0001/logical-codebase/aggregate-indexes/mismatch.json"
+        )
+        .is_none()
+    );
+    assert!(
+        try_path(
+            &members,
+            "aria/projects/project_0002/logical-codebase/aggregate-indexes/wrong_project.json"
+        )
+        .is_none()
+    );
+
+    let failed: Value = serde_json::from_slice(&by_path(&members, failed_member).bytes).unwrap();
+    assert_eq!(failed["kind"], "aggregate_index_generation");
+    assert_eq!(failed["aggregate_index_id"], "aggregate_index_v018");
+    assert_eq!(failed["project_id"], "project_0001");
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["membership_revision"], 7);
+    assert_eq!(failed["created_at"], "2026-11-19T09:00:00+00:00");
+    assert_eq!(
+        failed["failure"]["code"],
+        "aggregate_index_source_scan_incomplete"
+    );
+    assert_eq!(failed["failure"]["scope"], "own_rebuild");
+    assert!(
+        failed["failure"]["class"].as_str().is_some_and(|class| [
+            "environment",
+            "product_defect",
+            "retry_only"
+        ]
+        .contains(&class)),
+        "失败分诊类必须是已知枚举: {failed:?}"
+    );
+    assert!(failed.get("codegraph_root").is_none(), "绝对路径不进包");
+    assert!(failed.get("member_snapshots").is_none(), "成员快照不进包");
+    assert!(failed.get("warning").is_none(), "warning 正文不进包");
+    assert!(failed.get("token").is_none(), "未知字段不原样回退");
+
+    let typed: Value = serde_json::from_slice(&by_path(&members, typed_member).bytes).unwrap();
+    assert_eq!(typed["layout"], "logical_codebase_scope");
+    assert_eq!(typed["logical_codebase_id"], "lc_0001");
+    assert_eq!(typed["source_scan"]["member_count"], 69);
+    assert_eq!(typed["source_scan"]["covered_count"], 64);
+    assert_eq!(typed["source_scan"]["coverage_elapsed_ms"], 1345);
+    assert_eq!(typed["source_scan"]["scan_elapsed_ms"], 2000);
+    assert_eq!(typed["source_scan"]["members"][0]["member"], "gray-config");
+    assert_eq!(typed["source_scan"]["members"][0]["verdict"], "unknown");
+    assert_eq!(typed["source_scan"]["members"][0]["reason"], "deadline");
+    assert_eq!(
+        typed["source_scan"]["members"][0]["remaining_ms_at_entry"],
+        1500
+    );
+    assert_eq!(
+        typed["source_scan"]["members"][1]["verdict"],
+        "source_in_normal_path"
+    );
+
+    // 清单：未收录与局部缺失分别如实记录。
+    let manifest = manifest_of(&members);
+    let skipped = manifest["aria"]["skipped"]
+        .as_array()
+        .expect("skipped")
+        .clone();
+    assert!(
+        skipped.iter().any(|entry| {
+            entry["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("mismatch.json"))
+                && entry["reason"] == "identity_mismatch"
+        }),
+        "身份对不上要记稳定原因: {skipped:?}"
+    );
+    assert!(
+        skipped.iter().any(|entry| {
+            entry["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("wrong_project.json"))
+                && entry["reason"] == "identity_mismatch"
+        }),
+        "跨项目世代要记稳定原因: {skipped:?}"
+    );
+    assert!(
+        skipped.iter().any(|entry| {
+            entry["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("broken.json"))
+                && entry["reason"] == "invalid_json"
+        }),
+        "坏 JSON 要记稳定原因: {skipped:?}"
+    );
+    let notes = manifest["aria"]["notes"].as_array().expect("notes").clone();
+    assert!(
+        notes.iter().any(|entry| {
+            entry["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("old.json"))
+                && entry["reason"] == "membership_revision_missing"
+        }),
+        "旧世代缺字段要如实记缺失: {notes:?}"
+    );
+    assert!(
+        manifest["content_policy"]["aggregate_index_generations"]
+            .as_str()
+            .is_some_and(|policy| policy.contains("diagnostic summaries")),
+        "清单要说明世代条目是诊断摘要: {manifest:?}"
+    );
+    assert_eq!(
+        manifest["aria"]["generation_layouts"][0],
+        "<project>/logical-codebase/aggregate-indexes/<id>.json"
+    );
+
+    // 没有任何 canary 泄进包里。
+    let text = String::from_utf8_lossy(&bundle_bytes(&members)).into_owned();
+    assert!(!text.contains("sk-live-CANARY-GEN"));
+    assert!(!text.contains("/abs/private/root"));
+    assert!(!text.contains("included members ["));
+    assert!(!text.contains("deadbeef"));
+}
+
+/// Pi 会话根的选择：进程环境优先，其次启动期缓存的登录 shell 探测值，
+/// 相对路径等无效覆盖失败关闭；显式会话目录变量优先于主目录变量。
+#[test]
+fn pi_root_precedence_follows_process_env_then_cached_shell_probe() {
+    let pi = &archive::PROVIDERS[2];
+    let claude = &archive::PROVIDERS[0];
+    let home = Path::new("/home/tester");
+    let none = |_: &str| None;
+    let process = |var: &str| match var {
+        "PI_CODING_AGENT_DIR" => Some(PathBuf::from("/abs/pi")),
+        "PI_CODING_AGENT_SESSION_DIR" => Some(PathBuf::from("/abs/pi-sessions")),
+        _ => None,
+    };
+
+    let root = archive::resolve_provider_root(pi, Some(home), &process, &none);
+    assert_eq!(root.path, Some(PathBuf::from("/abs/pi-sessions")));
+    assert_eq!(root.source, SOURCE_ENV);
+    assert_eq!(root.invalid_var, None);
+
+    let root = archive::resolve_provider_root(pi, Some(home), &none, &|var: &str| match var {
+        "PI_CODING_AGENT_DIR" => Some(PathBuf::from("/probe/pi")),
+        _ => None,
+    });
+    assert_eq!(root.path, Some(PathBuf::from("/probe/pi/sessions")));
+    assert_eq!(root.source, SOURCE_ENV);
+
+    // A present-but-empty inherited value suppresses the launcher's shell injection.
+    let empty = |key: &str| (key == "PI_CODING_AGENT_DIR").then(PathBuf::new);
+    let cached = |key: &str| (key == "PI_CODING_AGENT_DIR").then(|| PathBuf::from("/probe/pi"));
+    let root = archive::resolve_provider_root(pi, Some(home), &empty, &cached);
+    assert_eq!(root.path, Some(home.join(".pi/agent/sessions")));
+    assert_eq!(root.source, SOURCE_DEFAULT_HOME);
+
+    // 相对路径：失败关闭，不回退默认根。
+    let root = archive::resolve_provider_root(
+        pi,
+        Some(home),
+        &|var: &str| match var {
+            "PI_CODING_AGENT_DIR" => Some(PathBuf::from("relative/pi")),
+            _ => None,
+        },
+        &none,
+    );
+    assert_eq!(root.path, None);
+    assert_eq!(root.source, "invalid_env");
+    assert_eq!(root.invalid_var, Some("PI_CODING_AGENT_DIR"));
+
+    // 都没有：HOME 默认根。
+    let root = archive::resolve_provider_root(pi, Some(home), &none, &none);
+    assert_eq!(
+        root.path,
+        Some(PathBuf::from("/home/tester/.pi/agent/sessions"))
+    );
+    assert_eq!(root.source, SOURCE_DEFAULT_HOME);
+
+    // 其它 provider 不受登录 shell 探测值影响（不改既有选根行为）。
+    let root = archive::resolve_provider_root(claude, Some(home), &none, &|_: &str| {
+        Some(PathBuf::from("/probe/claude"))
+    });
+    assert_eq!(
+        root.path,
+        Some(PathBuf::from("/home/tester/.claude/projects"))
+    );
+    assert_eq!(root.source, SOURCE_DEFAULT_HOME);
+}
+
+/// Pi 有候选文件但认不出原生会话身份时，状态必须与「没有候选」分开。
+#[test]
+fn pi_unrecognized_candidates_are_distinguished_from_no_records() {
+    let home = empty_home();
+    let pi_root = tempdir().expect("pi root");
+    // 候选文件能读、但没有可识别的原生会话头。
+    write_file(
+        pi_root.path(),
+        "workspace/notes.jsonl",
+        b"{\"type\":\"message\",\"message\":{\"content\":\"CANARY-PI\"}}\n",
+    );
+    let mut host = HostPaths::from_home_default(home.path());
+    host.pi = env_root(pi_root.path());
+    let mut file = archive::build(json!({"v": 1}), &host).expect("bundle");
+    let members = unpack_all(&mut file);
+    let manifest = manifest_of(&members);
+    assert_eq!(
+        manifest["providers"]["pi"]["status"], "no_matching_sessions",
+        "候选存在但未识别 ⇒ no_matching_sessions: {manifest:?}"
+    );
+    // 别的 provider 没有根：仍是 no_records。
+    assert_eq!(manifest["providers"]["codex"]["status"], "no_records");
+    let text = String::from_utf8_lossy(&bundle_bytes(&members)).into_owned();
+    assert!(!text.contains("CANARY-PI"), "未识别的候选正文不进包");
 }

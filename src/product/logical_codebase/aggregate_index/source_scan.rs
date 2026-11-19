@@ -3,6 +3,10 @@
 //! 用途：判定「成员主 checkout 的磁盘上是否存在 Aria 口径的源码」，供聚合索引
 //! 验收阶段区分「有源码却没被索引」（漏收 ⇒ 失败）与「没有源码」（⇒ 跳过）。
 //!
+//! 返回值是 [`MemberScanObservation`]：**只报告现场观测到的事实**（判定值 +
+//! 无法确认时的具体原因 + 是否已开始可见范围探测），不夹带从成员名或历史
+//! 推测出来的结论。
+//!
 //! 口径：**源码 = git 可见范围 ∩ `ARIA_SOURCE_EXTENSIONS` ∩ 非 Aria 自身排除**。
 //!
 //! - **可见范围**：`git ls-files --cached --others --exclude-standard`（跟踪的 +
@@ -11,6 +15,8 @@
 //!   codegraph 排除集，同源）：目录级剪枝 + 4 条非目录模式在文件级同样扣除。
 //! - **非 git 仓**：回落「该根下全部文件」（非 git 目录没有 ignore 语义）；
 //!   git 不可用 / 命令失败 / 超时 / 取消 ⇒ **无法确认**（不得回落成全部文件）。
+//! - **时限与截断**：每个 git 子进程的超时按批预算剩余时间封顶；剩余归零后
+//!   不再发出子进程；清单输出被截断 ⇒ 无法确认（截断处之后可能还有源码）。
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::cross_cutting::bounded_command_runner::{
@@ -28,6 +35,7 @@ use crate::cross_cutting::bounded_command_runner::{
 
 use super::AggregateIndexError;
 use super::exclude::BUILTIN_EXCLUDES;
+use super::scan_diagnostics::ScanUnknownReason;
 
 /// `git` 可见范围探测的超时与输出上限。
 const GIT_TIMEOUT_SECS: u64 = 10;
@@ -66,7 +74,7 @@ pub const ARIA_SOURCE_EXTENSIONS: &[&str] = &[
 ///   `codegraph init .` ⇒ `codegraph sync .` ⇒ `codegraph files --json`，
 ///   样本出现在收录结果里 ⇒ 该版本会收录该后缀（生产 argv 以
 ///   `codegraph_cli.rs` 为准）。
-/// - **复校准步骤**：换 codegraph 版本 ⇒ 重跑上面的测量 ⇒ 更新
+/// - **复校准步骤**：换 codegraph 版本后 ⇒ 重跑上面的测量 ⇒ 更新
 ///   `ARIA_SOURCE_EXTENSIONS` ⇒ 更新本常量 ⇒ 在校准 notes 追加新基线 ⇒
 ///   同步更新 `source_scope_tests` 的期望。
 /// - **漂移后果**：新版若不再收录清单内某后缀，该类仓会被判「漏收」而失败；
@@ -83,7 +91,8 @@ pub const SOURCE_SCAN_MAX_ENTRIES_PER_BATCH: usize = 100_000;
 pub const SOURCE_SCAN_DEADLINE: Duration = Duration::from_secs(2);
 
 /// 单个成员的源码判定结果（四值）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MemberSourceVerdict {
     /// 可见范围的普通路径上存在 Aria 源码。
     SourceInNormalPath,
@@ -95,6 +104,18 @@ pub enum MemberSourceVerdict {
     Unknown,
 }
 
+/// `scan_member_source` 的现场观测结果：只携带观测到的事实。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemberScanObservation {
+    /// 该成员的源码判定值。
+    pub verdict: MemberSourceVerdict,
+    /// `Unknown` 时的具体原因（观测到的第一手事实；其它判定值恒为 `None`）。
+    pub reason: Option<ScanUnknownReason>,
+    /// 是否已经开始可见范围探测（含 git 子进程 / 非 git 回落枚举）。
+    /// `false` ⇔ 入口时预算已耗尽，连探测都没发起。
+    pub visibility_started: bool,
+}
+
 /// 单段扫描的结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StageOutcome {
@@ -102,33 +123,65 @@ enum StageOutcome {
     Found,
     /// 该段完整走完且没有候选。
     Clean,
-    /// 该段未能完整走完（权限 / IO / 深度 / 条目数 / 超时 / 取消 / 预算不足）。
-    Incomplete,
+    /// 该段未能完整走完，携带第一手的无法确认原因。
+    ///
+    /// 已记录的具体 IO/权限错误**不会**被后来的预算到点覆盖
+    /// （先到先得，见 [`StageOutcome::or_incomplete`]）。
+    Incomplete(ScanUnknownReason),
 }
 
-/// 可注入预算：batch 级共享「剩余条目 + deadline + 取消信号」，测试不依赖真实 sleep。
-pub struct SourceScanBudget {
+impl StageOutcome {
+    /// 只在当前仍是 `Clean` 时降级为 `Incomplete`：保留最先观测到的具体原因，
+    /// 不让 deadline / 条目耗尽之类的事后预算事实顶替它。
+    fn or_incomplete(self, reason: ScanUnknownReason) -> Self {
+        match self {
+            StageOutcome::Clean => StageOutcome::Incomplete(reason),
+            resolved => resolved,
+        }
+    }
+}
+
+/// 可注入预算：batch 级共享「剩余条目 + deadline + 取消信号 + 单调时钟」，
+/// 测试注入假时钟即可确定性触发时限路径，不依赖真实 sleep。
+///
+/// 时钟以 `&dyn Fn` 形式注入一次（无逐条目分配）；预算是**一次性**的，
+/// 消耗后不会被重置。
+pub struct SourceScanBudget<'a> {
     remaining_entries: usize,
     deadline: Option<Instant>,
     cancelled: AtomicBool,
+    clock: &'a (dyn Fn() -> Instant + Sync),
 }
 
-impl SourceScanBudget {
-    /// 生产口径：整批 10 万条目 + 2 秒时限。
-    pub fn new_batch() -> Self {
-        Self {
+impl SourceScanBudget<'_> {
+    /// 生产口径：整批 10 万条目 + 2 秒时限，单调时钟取 `Instant::now`。
+    pub fn new_batch() -> SourceScanBudget<'static> {
+        Self::new_batch_with_clock(&Instant::now)
+    }
+
+    /// 生产口径 + 注入单调时钟（deadline = 首次取时 + [`SOURCE_SCAN_DEADLINE`]）。
+    pub(super) fn new_batch_with_clock(
+        clock: &(dyn Fn() -> Instant + Sync),
+    ) -> SourceScanBudget<'_> {
+        SourceScanBudget {
             remaining_entries: SOURCE_SCAN_MAX_ENTRIES_PER_BATCH,
-            deadline: Some(Instant::now() + SOURCE_SCAN_DEADLINE),
+            deadline: Some(clock() + SOURCE_SCAN_DEADLINE),
             cancelled: AtomicBool::new(false),
+            clock,
         }
     }
 
-    /// 测试口径：显式给定剩余条目数与 deadline（`None` = 不限时）。
-    pub fn for_tests(remaining_entries: usize, deadline: Option<Instant>) -> Self {
-        Self {
+    /// 测试口径：显式给定剩余条目数与 deadline（`None` = 不限时），时钟取
+    /// `Instant::now`。语义与生产一致：预算一次性消耗，**不会**被重置。
+    pub fn for_tests(
+        remaining_entries: usize,
+        deadline: Option<Instant>,
+    ) -> SourceScanBudget<'static> {
+        SourceScanBudget {
             remaining_entries,
             deadline,
             cancelled: AtomicBool::new(false),
+            clock: &Instant::now,
         }
     }
 
@@ -142,18 +195,41 @@ impl SourceScanBudget {
         self.remaining_entries
     }
 
+    /// 剩余时限毫秒数（无 deadline ⇒ `None`；已到点 ⇒ `Some(0)`）。
+    /// 供调用方在成员入口处拍照取证（`remaining_ms_at_entry`）。
+    pub(super) fn remaining_ms(&self) -> Option<u64> {
+        self.remaining_time()
+            .map(|remaining| remaining.as_millis() as u64)
+    }
+
+    /// 剩余时限（无 deadline ⇒ `None`）；git 子进程的超时封顶以此为准。
+    fn remaining_time(&self) -> Option<Duration> {
+        self.deadline
+            .map(|deadline| deadline.saturating_duration_since((self.clock)()))
+    }
+
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
 
     fn deadline_passed(&self) -> bool {
         self.deadline
-            .is_some_and(|deadline| Instant::now() > deadline)
+            .is_some_and(|deadline| (self.clock)() > deadline)
     }
 
-    /// 预算耗尽（取消 / 超时 / 条目用尽）⇒ 该段不再可信。
-    fn exhausted(&self) -> bool {
-        self.is_cancelled() || self.deadline_passed() || self.remaining_entries == 0
+    /// 预算耗尽的原因（取消 / 超时 / 条目用尽）⇒ 该段不再可信。
+    /// 优先级：deadline 到点 ⇒ 取消 ⇒ 条目用尽。
+    fn exhaustion_reason(&self) -> Option<ScanUnknownReason> {
+        if self.deadline_passed() {
+            return Some(ScanUnknownReason::Deadline);
+        }
+        if self.is_cancelled() {
+            return Some(ScanUnknownReason::Cancelled);
+        }
+        if self.remaining_entries == 0 {
+            return Some(ScanUnknownReason::BatchEntries);
+        }
+        None
     }
 
     /// 消耗一个条目；预算耗尽时返回 `false`。
@@ -173,10 +249,15 @@ impl SourceScanBudget {
 pub trait MemberSourceVisibility: Send + Sync {
     /// 返回该成员主 checkout 内 git 可见的文件（相对成员根的路径）。
     ///
-    /// **非 git 仓** ⇒ 返回该根下的全部文件（非 git 目录没有 ignore 语义）。
-    /// git 不可用 / 命令失败 / 超时 / 取消 ⇒ `Err`（⇒ 该成员落 `Unknown`，
-    /// **不得**当作「无源码」）。
-    fn visible_files(&self, member_root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError>;
+    /// **非 git 仓** ⇒ 返回该根下的全部文件（非 git 目录没有 ignore 语义，
+    /// 回落枚举器同样受 `budget` 约束）。
+    /// git 不可用 / 命令失败 / 超时 / 取消 / 输出截断 ⇒ `Err`（⇒ 该成员落
+    /// `Unknown`，**不得**当作「无源码」）。
+    fn visible_files(
+        &self,
+        member_root: &Path,
+        budget: &SourceScanBudget<'_>,
+    ) -> Result<Vec<PathBuf>, AggregateIndexError>;
 }
 
 /// 生产实现：经 `BoundedCommandRunner` 跑 `git`。
@@ -199,7 +280,31 @@ impl GitVisibleFiles {
     }
 
     /// 跑一条 `git` 命令（平台受信禁桥参数 + 净化环境 + 超时 + 输出上限）。
-    fn git(&self, cwd: &Path, argv: &[&str]) -> Result<BoundedCommandResult, AggregateIndexError> {
+    ///
+    /// - 超时按 `remaining` 封顶：剩余时间少于 [`GIT_TIMEOUT_SECS`] 时按剩余时间
+    ///   掐子进程；剩余归零时**不发子进程**直接报 deadline。
+    /// - 被批预算掐掉的子进程超时 ⇒ `aggregate_index_source_scan_deadline`
+    ///   （[`ScanUnknownReason::Deadline`]）；批预算没介入、git 自己超时 ⇒
+    ///   `aggregate_index_source_scan_git_timeout`（[`ScanUnknownReason::GitTimeout`]）。
+    fn git(
+        &self,
+        cwd: &Path,
+        argv: &[&str],
+        remaining: Option<Duration>,
+    ) -> Result<BoundedCommandResult, AggregateIndexError> {
+        let git_limit = Duration::from_secs(GIT_TIMEOUT_SECS);
+        let (timeout, capped_by_batch) = match remaining {
+            None => (git_limit, false),
+            Some(remaining) if remaining.is_zero() => {
+                // 批预算已到点：不再发出 git 子进程。
+                return Err(AggregateIndexError::Failed {
+                    code: "aggregate_index_source_scan_deadline",
+                    message: "batch deadline expired before issuing git".to_string(),
+                });
+            }
+            Some(remaining) if remaining < git_limit => (remaining, true),
+            Some(_) => (git_limit, false),
+        };
         // 平台受信启动面：argv 前置禁桥参数（与 cross_cutting::git_command
         // 同源），避免仓库 hooks / fsmonitor 探针借平台进程自动执行。
         let mut full_argv: Vec<String> = crate::cross_cutting::git_command::TRUSTED_GIT_BRIDGE_ARGS
@@ -211,14 +316,15 @@ impl GitVisibleFiles {
             executable: "git".to_string(),
             argv: full_argv,
             working_dir: cwd.to_path_buf(),
-            timeout: Duration::from_secs(GIT_TIMEOUT_SECS),
+            timeout,
             cancellation: CancellationToken::new(),
             environment: sanitized_environment(),
             stdout_limit: GIT_OUTPUT_LIMIT_BYTES,
             stderr_limit: GIT_OUTPUT_LIMIT_BYTES,
         };
         let runner = self.runner.clone();
-        std::thread::spawn(
+        let command = argv.first().copied().unwrap_or("git");
+        let result = std::thread::spawn(
             move || -> Result<BoundedCommandResult, AggregateIndexError> {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -236,35 +342,54 @@ impl GitVisibleFiles {
         .map_err(|_| AggregateIndexError::Failed {
             code: "aggregate_index_source_scan_git_panic",
             message: "bounded Git runner thread panicked".to_string(),
-        })?
+        })??;
+        if result.timed_out {
+            return Err(AggregateIndexError::Failed {
+                code: if capped_by_batch {
+                    // 批预算掐掉的子进程：算 deadline，不算独立 git 超时。
+                    "aggregate_index_source_scan_deadline"
+                } else {
+                    "aggregate_index_source_scan_git_timeout"
+                },
+                message: format!("git {command} timed out"),
+            });
+        }
+        Ok(result)
     }
 }
 
 impl MemberSourceVisibility for GitVisibleFiles {
-    fn visible_files(&self, member_root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
-        let probe = self.git(member_root, &["rev-parse", "--is-inside-work-tree"])?;
-        if probe.timed_out {
-            return Err(AggregateIndexError::Failed {
-                code: "aggregate_index_source_scan_git_timeout",
-                message: "git rev-parse --is-inside-work-tree timed out".to_string(),
-            });
-        }
+    fn visible_files(
+        &self,
+        member_root: &Path,
+        budget: &SourceScanBudget<'_>,
+    ) -> Result<Vec<PathBuf>, AggregateIndexError> {
+        let probe = self.git(
+            member_root,
+            &["rev-parse", "--is-inside-work-tree"],
+            budget.remaining_time(),
+        )?;
         if probe.cancelled {
             return Err(AggregateIndexError::Failed {
                 code: "aggregate_index_source_scan_git_cancelled",
                 message: "git rev-parse --is-inside-work-tree was cancelled".to_string(),
             });
         }
-        if probe.exit_code != Some(0) {
-            // 只有「确定不是 git 仓」才回落全部文件；其它失败一律「无法确认」。
-            let stderr = probe.stderr.to_lowercase();
-            if probe.exit_code == Some(128) && stderr.contains("not a git repository") {
-                return collect_all_files(member_root);
+        // rev-parse 探针必须给出干净、未截断的「true」才算站在工作树里；
+        // 异常输出一律 fail closed（Err ⇒ Unknown，绝不回落成全部文件）。
+        let inside_work_tree =
+            probe.exit_code == Some(0) && !probe.stdout_truncated && probe.stdout.trim() == "true";
+        // 只有「确定不是 git 仓」才回落全部文件。
+        let definitively_not_a_repository = probe.exit_code == Some(128)
+            && probe.stderr.to_lowercase().contains("not a git repository");
+        if !inside_work_tree {
+            if definitively_not_a_repository {
+                return collect_all_files(member_root, budget);
             }
             return Err(AggregateIndexError::Failed {
                 code: "aggregate_index_source_scan_git_failed",
                 message: format!(
-                    "git rev-parse --is-inside-work-tree exited with {:?}",
+                    "git rev-parse --is-inside-work-tree did not produce a usable verdict (exit {:?})",
                     probe.exit_code
                 ),
             });
@@ -272,14 +397,29 @@ impl MemberSourceVisibility for GitVisibleFiles {
         let listing = self.git(
             member_root,
             &["ls-files", "--cached", "--others", "--exclude-standard"],
+            budget.remaining_time(),
         )?;
-        if listing.timed_out || listing.cancelled || listing.exit_code != Some(0) {
+        if listing.cancelled {
+            return Err(AggregateIndexError::Failed {
+                code: "aggregate_index_source_scan_git_cancelled",
+                message: "git ls-files --cached --others --exclude-standard was cancelled"
+                    .to_string(),
+            });
+        }
+        if listing.exit_code != Some(0) {
             return Err(AggregateIndexError::Failed {
                 code: "aggregate_index_source_scan_git_failed",
                 message: format!(
                     "git ls-files --cached --others --exclude-standard exited with {:?}",
                     listing.exit_code
                 ),
+            });
+        }
+        // 截断的清单不完整：截断处之后可能还有源码 ⇒ 成功退出码也不接受。
+        if listing.stdout_truncated {
+            return Err(AggregateIndexError::Failed {
+                code: "aggregate_index_source_scan_git_truncated",
+                message: "git ls-files output was truncated at the capture cap".to_string(),
             });
         }
         Ok(listing
@@ -406,41 +546,45 @@ fn is_source_path(relative: &Path) -> bool {
 /// 枚举成员根下的全部普通文件（不含符号链接、不跟随符号链接目录）。
 ///
 /// 这是「非 git 仓 ⇒ 回落全部文件」的实现：非 git 目录没有 ignore 语义，
-/// 枚举其全部普通文件后由扫描阶段按后缀与排除规则判定。
-fn collect_all_files(root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
+/// 枚举其全部普通文件后由扫描阶段按后缀与排除规则判定。回落枚举器同样
+/// 受 `budget` 约束（deadline / 取消 / 整批剩余条目数），耗尽即 `Err`。
+fn collect_all_files(
+    root: &Path,
+    budget: &SourceScanBudget<'_>,
+) -> Result<Vec<PathBuf>, AggregateIndexError> {
+    if let Some(reason) = budget.exhaustion_reason() {
+        return Err(budget_exhaustion_error(reason));
+    }
+    // 枚举上限 = 内建上限与整批剩余条目数的较小者（回落枚举器同样有界）。
+    let entry_cap = SOURCE_SCAN_MAX_ENTRIES_PER_BATCH.min(budget.remaining_entries());
     let mut files = Vec::new();
     let mut pending = vec![(root.to_path_buf(), 0usize)];
     while let Some((directory, depth)) = pending.pop() {
+        if let Some(reason) = budget.exhaustion_reason() {
+            return Err(budget_exhaustion_error(reason));
+        }
         if depth > SOURCE_SCAN_MAX_DEPTH {
             return Err(AggregateIndexError::Failed {
-                code: "aggregate_index_source_scan_incomplete",
+                code: "aggregate_index_source_scan_depth",
                 message: format!("directory depth limit exceeded under {}", root.display()),
             });
         }
-        let entries = fs::read_dir(&directory).map_err(|error| AggregateIndexError::Failed {
-            code: "aggregate_index_source_scan_io",
-            message: format!("{}: {error}", directory.display()),
-        })?;
+        let entries =
+            fs::read_dir(&directory).map_err(|error| io_scan_error(&directory, &error))?;
         for entry in entries {
-            let entry = entry.map_err(|error| AggregateIndexError::Failed {
-                code: "aggregate_index_source_scan_io",
-                message: format!("{}: {error}", directory.display()),
-            })?;
+            let entry = entry.map_err(|error| io_scan_error(&directory, &error))?;
             let path = entry.path();
             let metadata =
-                fs::symlink_metadata(&path).map_err(|error| AggregateIndexError::Failed {
-                    code: "aggregate_index_source_scan_io",
-                    message: format!("{}: {error}", path.display()),
-                })?;
+                fs::symlink_metadata(&path).map_err(|error| io_scan_error(&path, &error))?;
             if metadata.file_type().is_symlink() {
                 continue;
             }
             if metadata.is_dir() {
                 pending.push((path, depth + 1));
             } else if metadata.is_file() {
-                if files.len() >= SOURCE_SCAN_MAX_ENTRIES_PER_BATCH {
+                if files.len() >= entry_cap {
                     return Err(AggregateIndexError::Failed {
-                        code: "aggregate_index_source_scan_incomplete",
+                        code: "aggregate_index_source_scan_batch_entries",
                         message: format!("file count limit exceeded under {}", root.display()),
                     });
                 }
@@ -451,44 +595,89 @@ fn collect_all_files(root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
     Ok(files)
 }
 
-/// 扫描成员主 checkout 的 Aria 源码情况。
+/// 扫描成员主 checkout 的 Aria 源码情况，返回**现场观测**。
 ///
 /// 行为表：
 ///
 /// | 情况 | 返回值 |
 /// |---|---|
+/// | 入口预算已耗尽 | `Unknown`（原因 = deadline/取消/条目耗尽），`visibility_started = false`（连 git 都不发） |
 /// | 可见范围（git 可见 ∩ 清单 ∩ 非排除）内找到源码 | `SourceInNormalPath`（立即停，不再扫 `.worktrees/`） |
 /// | 可见范围内无源码且无错误、`.worktrees/` 子树内找到源码 | `SourceOnlyInWorktrees` |
 /// | 两段都完成且都无候选 | `NoSource` |
-/// | 可见范围探测失败（git 不可用）或任一段因权限/IO/深度/条目数/超时/取消/预算不足未能完成，且**没有**普通路径源码正证据 | `Unknown` |
+/// | 可见范围探测失败（git 不可用/超时/取消/截断/权限/IO）或任一段因权限/IO/深度/条目数/超时/取消/预算不足未能完成，且**没有**普通路径源码正证据 | `Unknown` + 第一手 `reason` |
 /// | 已找到普通路径源码后才出现的错误 | 仍 `SourceInNormalPath`（正证据优先） |
+///
+/// 具体权限 / IO 错误一旦观测到就是最终原因，不会被之后的预算到点
+/// （deadline / 条目耗尽）顶替。
 pub fn scan_member_source(
     member_root: &Path,
     visibility: &dyn MemberSourceVisibility,
-    budget: &mut SourceScanBudget,
-) -> MemberSourceVerdict {
-    if budget.exhausted() {
-        return MemberSourceVerdict::Unknown;
+    budget: &mut SourceScanBudget<'_>,
+) -> MemberScanObservation {
+    if let Some(reason) = budget.exhaustion_reason() {
+        // 入口即耗尽：不发 git、不枚举，直接报告观测到的耗尽原因。
+        return MemberScanObservation {
+            verdict: MemberSourceVerdict::Unknown,
+            reason: Some(reason),
+            visibility_started: false,
+        };
     }
-    let visible = match visibility.visible_files(member_root) {
+    let visible = match visibility.visible_files(member_root, budget) {
         Ok(visible) => visible,
-        // git 不可用 / 命令失败 / 权限问题 ⇒ 无法确认（不得当作「无源码」）。
-        Err(_) => return MemberSourceVerdict::Unknown,
+        // git 不可用 / 命令失败 / 截断 / 权限 / IO ⇒ 无法确认（不得当作「无源码」）；
+        // 保留 callee 的第一手错误，不用预算事实顶替。
+        Err(error) => {
+            return MemberScanObservation {
+                verdict: MemberSourceVerdict::Unknown,
+                reason: Some(reason_from_error(&error)),
+                visibility_started: true,
+            };
+        }
     };
-    if budget.exhausted() {
-        return MemberSourceVerdict::Unknown;
+    if let Some(reason) = budget.exhaustion_reason() {
+        // 可见范围探测耗尽了剩余预算（例如 git 刚好跑完时到点）。
+        return MemberScanObservation {
+            verdict: MemberSourceVerdict::Unknown,
+            reason: Some(reason),
+            visibility_started: true,
+        };
     }
     let mut member_entries = 0usize;
     match scan_visible_range(member_root, &visible, budget, &mut member_entries) {
         // 正证据优先：普通路径命中源码后不再扫描 `.worktrees/`。
-        StageOutcome::Found => return MemberSourceVerdict::SourceInNormalPath,
-        StageOutcome::Incomplete => return MemberSourceVerdict::Unknown,
+        StageOutcome::Found => {
+            return MemberScanObservation {
+                verdict: MemberSourceVerdict::SourceInNormalPath,
+                reason: None,
+                visibility_started: true,
+            };
+        }
+        StageOutcome::Incomplete(reason) => {
+            return MemberScanObservation {
+                verdict: MemberSourceVerdict::Unknown,
+                reason: Some(reason),
+                visibility_started: true,
+            };
+        }
         StageOutcome::Clean => {}
     }
     match scan_worktrees_tree(member_root, budget, &mut member_entries) {
-        StageOutcome::Found => MemberSourceVerdict::SourceOnlyInWorktrees,
-        StageOutcome::Incomplete => MemberSourceVerdict::Unknown,
-        StageOutcome::Clean => MemberSourceVerdict::NoSource,
+        StageOutcome::Found => MemberScanObservation {
+            verdict: MemberSourceVerdict::SourceOnlyInWorktrees,
+            reason: None,
+            visibility_started: true,
+        },
+        StageOutcome::Incomplete(reason) => MemberScanObservation {
+            verdict: MemberSourceVerdict::Unknown,
+            reason: Some(reason),
+            visibility_started: true,
+        },
+        StageOutcome::Clean => MemberScanObservation {
+            verdict: MemberSourceVerdict::NoSource,
+            reason: None,
+            visibility_started: true,
+        },
     }
 }
 
@@ -496,17 +685,21 @@ pub fn scan_member_source(
 fn scan_visible_range(
     root: &Path,
     visible: &[PathBuf],
-    budget: &mut SourceScanBudget,
+    budget: &mut SourceScanBudget<'_>,
     member_entries: &mut usize,
 ) -> StageOutcome {
     let rules = exclude_rules();
     for relative in visible {
+        // 每个条目（含被排除的）都先过预算：deadline / 取消 / 条目耗尽即停。
+        if let Some(reason) = budget.exhaustion_reason() {
+            return StageOutcome::Incomplete(reason);
+        }
         if !budget.consume_entry() {
-            return StageOutcome::Incomplete;
+            return StageOutcome::Incomplete(ScanUnknownReason::BatchEntries);
         }
         *member_entries += 1;
         if *member_entries > SOURCE_SCAN_MAX_ENTRIES_PER_MEMBER {
-            return StageOutcome::Incomplete;
+            return StageOutcome::Incomplete(ScanUnknownReason::MemberEntries);
         }
         let joined = root.join(relative);
         let metadata = match fs::symlink_metadata(&joined) {
@@ -514,7 +707,7 @@ fn scan_visible_range(
             // 已跟踪但已从工作区删除（或稀疏检出）：正常，跳过。
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             // 权限 / IO 失败 ⇒ 证据不足，不得当作「无源码」。
-            Err(_) => return StageOutcome::Incomplete,
+            Err(error) => return StageOutcome::Incomplete(io_reason(&error)),
         };
         // 符号链接一律跳过（不跟随、也不算源码）。
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -527,8 +720,9 @@ fn scan_visible_range(
             return StageOutcome::Found;
         }
     }
-    if budget.remaining_entries() == 0 {
-        return StageOutcome::Incomplete;
+    // 负面判定（Clean ⇒ NoSource）前再核一次预算：耗尽即降级。
+    if let Some(reason) = budget.exhaustion_reason() {
+        return StageOutcome::Incomplete(reason);
     }
     StageOutcome::Clean
 }
@@ -536,7 +730,7 @@ fn scan_visible_range(
 /// 第二段：`.worktrees/` 子树的物理扫描（独立诊断段，不计入普通路径判定）。
 fn scan_worktrees_tree(
     root: &Path,
-    budget: &mut SourceScanBudget,
+    budget: &mut SourceScanBudget<'_>,
     member_entries: &mut usize,
 ) -> StageOutcome {
     let worktrees = root.join(".worktrees");
@@ -546,7 +740,7 @@ fn scan_worktrees_tree(
             // 入口不存在 ⇒ 该段「已完成且无候选」（诊断段，不是主段）。
             return StageOutcome::Clean;
         }
-        Err(_) => return StageOutcome::Incomplete,
+        Err(error) => return StageOutcome::Incomplete(io_reason(&error)),
     };
     // 入口是符号链接 ⇒ 不跟随、无候选（也不是无法确认）。
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -559,35 +753,39 @@ fn scan_worktrees_tree(
 fn walk_directory(
     directory: &Path,
     depth: usize,
-    budget: &mut SourceScanBudget,
+    budget: &mut SourceScanBudget<'_>,
     member_entries: &mut usize,
 ) -> StageOutcome {
-    if budget.exhausted() {
-        return StageOutcome::Incomplete;
+    if let Some(reason) = budget.exhaustion_reason() {
+        return StageOutcome::Incomplete(reason);
     }
     let rules = exclude_rules();
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
-        Err(_) => return StageOutcome::Incomplete,
+        Err(error) => return StageOutcome::Incomplete(io_reason(&error)),
     };
     let mut outcome = StageOutcome::Clean;
     for entry in entries {
+        if let Some(reason) = budget.exhaustion_reason() {
+            return outcome.or_incomplete(reason);
+        }
         let entry = match entry {
             Ok(entry) => entry,
-            Err(_) => {
-                outcome = StageOutcome::Incomplete;
+            Err(error) => {
+                // 记下第一手 IO/权限原因，继续看剩余条目（不覆盖已记录原因）。
+                outcome = outcome.or_incomplete(io_reason(&error));
                 continue;
             }
         };
         let child_depth = depth + 1;
         if child_depth > SOURCE_SCAN_MAX_DEPTH {
-            return StageOutcome::Incomplete;
+            return outcome.or_incomplete(ScanUnknownReason::Depth);
         }
         let path = entry.path();
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
-            Err(_) => {
-                outcome = StageOutcome::Incomplete;
+            Err(error) => {
+                outcome = outcome.or_incomplete(io_reason(&error));
                 continue;
             }
         };
@@ -601,15 +799,15 @@ fn walk_directory(
                 continue;
             }
             if !budget.consume_entry() {
-                return StageOutcome::Incomplete;
+                return outcome.or_incomplete(ScanUnknownReason::BatchEntries);
             }
             *member_entries += 1;
             if *member_entries > SOURCE_SCAN_MAX_ENTRIES_PER_MEMBER {
-                return StageOutcome::Incomplete;
+                return outcome.or_incomplete(ScanUnknownReason::MemberEntries);
             }
             match walk_directory(&path, child_depth, budget, member_entries) {
                 StageOutcome::Found => return StageOutcome::Found,
-                StageOutcome::Incomplete => outcome = StageOutcome::Incomplete,
+                StageOutcome::Incomplete(reason) => outcome = outcome.or_incomplete(reason),
                 StageOutcome::Clean => {}
             }
         } else if metadata.is_file() {
@@ -617,11 +815,11 @@ fn walk_directory(
                 continue;
             }
             if !budget.consume_entry() {
-                return StageOutcome::Incomplete;
+                return outcome.or_incomplete(ScanUnknownReason::BatchEntries);
             }
             *member_entries += 1;
             if *member_entries > SOURCE_SCAN_MAX_ENTRIES_PER_MEMBER {
-                return StageOutcome::Incomplete;
+                return outcome.or_incomplete(ScanUnknownReason::MemberEntries);
             }
             if is_source_name(&name) {
                 return StageOutcome::Found;
@@ -629,8 +827,9 @@ fn walk_directory(
         }
         // 其它类型（socket / fifo / 设备文件）跳过。
     }
-    if budget.remaining_entries() == 0 {
-        outcome = StageOutcome::Incomplete;
+    // 负面判定前再核一次预算；已记录的具体 IO 原因优先于预算事实。
+    if let Some(reason) = budget.exhaustion_reason() {
+        outcome = outcome.or_incomplete(reason);
     }
     outcome
 }
@@ -663,502 +862,65 @@ fn map_runner_error(error: BoundedCommandError) -> AggregateIndexError {
     }
 }
 
+/// 盘检路径上的 IO 错误 → 聚合索引错误（权限与一般 IO 用可区分的稳定码）。
+fn io_scan_error(path: &Path, error: &std::io::Error) -> AggregateIndexError {
+    AggregateIndexError::Failed {
+        code: if error.kind() == std::io::ErrorKind::PermissionDenied {
+            "aggregate_index_source_scan_permission"
+        } else {
+            "aggregate_index_source_scan_io"
+        },
+        message: format!("{}: {error}", path.display()),
+    }
+}
+
+/// 盘检路径上的 IO 错误 → 无法确认原因（权限 / IO 分开）。
+fn io_reason(error: &std::io::Error) -> ScanUnknownReason {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        ScanUnknownReason::Permission
+    } else {
+        ScanUnknownReason::Io
+    }
+}
+
+/// 预算耗尽（deadline / 取消 / 条目）→ 聚合索引错误。
+fn budget_exhaustion_error(reason: ScanUnknownReason) -> AggregateIndexError {
+    let code = match reason {
+        ScanUnknownReason::Deadline => "aggregate_index_source_scan_deadline",
+        ScanUnknownReason::Cancelled => "aggregate_index_source_scan_cancelled",
+        _ => "aggregate_index_source_scan_batch_entries",
+    };
+    AggregateIndexError::Failed {
+        code,
+        message: format!("source scan budget exhausted before completion ({reason:?})"),
+    }
+}
+
+/// 把可见范围探测的第一手错误映射成无法确认原因（durable reason 只取
+/// 稳定枚举，不带原始 stderr / 路径等易变细节）。
+fn reason_from_error(error: &AggregateIndexError) -> ScanUnknownReason {
+    let AggregateIndexError::Failed { code, .. } = error else {
+        return ScanUnknownReason::Io;
+    };
+    match *code {
+        "aggregate_index_source_scan_deadline" => ScanUnknownReason::Deadline,
+        "aggregate_index_source_scan_cancelled" | "aggregate_index_source_scan_git_cancelled" => {
+            ScanUnknownReason::Cancelled
+        }
+        "aggregate_index_source_scan_permission" => ScanUnknownReason::Permission,
+        "aggregate_index_source_scan_git_timeout" => ScanUnknownReason::GitTimeout,
+        "aggregate_index_source_scan_git_failed" | "aggregate_index_source_scan_git_missing" => {
+            ScanUnknownReason::GitFailed
+        }
+        "aggregate_index_source_scan_git_truncated" => ScanUnknownReason::OutputTruncated,
+        "aggregate_index_source_scan_depth" => ScanUnknownReason::Depth,
+        "aggregate_index_source_scan_batch_entries" => ScanUnknownReason::BatchEntries,
+        // io / git_io / git_runtime / git_panic 及未知码 ⇒ 保守归 Io。
+        _ => ScanUnknownReason::Io,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    /// 全可见提供者：与生产「非 git 仓 ⇒ 回落全部文件」口径一致。
-    struct AllVisible;
-
-    impl MemberSourceVisibility for AllVisible {
-        fn visible_files(&self, member_root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
-            collect_all_files(member_root)
-        }
-    }
-
-    /// 固定可见范围的提供者（模拟 `git ls-files` 的输出）。
-    struct VisibleFiles(Vec<PathBuf>);
-
-    impl MemberSourceVisibility for VisibleFiles {
-        fn visible_files(&self, _member_root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
-            Ok(self.0.clone())
-        }
-    }
-
-    fn write_file(root: &Path, relative: &str) {
-        let path = root.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(path, b"sample").unwrap();
-    }
-
-    fn scan(root: &Path) -> MemberSourceVerdict {
-        let mut budget = SourceScanBudget::new_batch();
-        scan_member_source(root, &AllVisible, &mut budget)
-    }
-
-    fn init_git_repo(root: &Path) {
-        let status = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(root)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git init failed");
-    }
-
-    fn git_add(root: &Path, paths: &[&str]) {
-        let status = std::process::Command::new("git")
-            .args(["add", "--"])
-            .args(paths)
-            .current_dir(root)
-            .status()
-            .unwrap();
-        assert!(status.success(), "git add failed");
-    }
-
-    fn deep_worktrees_file(root: &Path, levels: usize) -> PathBuf {
-        let mut path = root.join(".worktrees").join("wt");
-        for index in 0..levels {
-            path = path.join(format!("d{index}"));
-        }
-        path.join("main.rs")
-    }
-
-    /// 1：只有配置与文档 ⇒ 无源码。
-    #[test]
-    fn scan_reports_no_source_when_only_config_and_docs() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "limits.json");
-        write_file(root, "README.md");
-        write_file(root, "deploy.yaml");
-        assert_eq!(scan(root), MemberSourceVerdict::NoSource);
-    }
-
-    /// 2：清单内每个后缀都能命中源码。
-    #[test]
-    fn scan_reports_source_in_normal_path_for_aria_extensions() {
-        for extension in ARIA_SOURCE_EXTENSIONS {
-            let temp = TempDir::new().unwrap();
-            let root = temp.path();
-            write_file(root, &format!("src/sample.{extension}"));
-            assert_eq!(
-                scan(root),
-                MemberSourceVerdict::SourceInNormalPath,
-                "extension {extension} must be an Aria source"
-            );
-        }
-    }
-
-    /// 3：普通路径干净、`.worktrees/` 内有源码 ⇒ 只在工作树命中。
-    #[test]
-    fn scan_reports_source_only_in_worktrees_when_normal_path_clean() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "limits.json");
-        write_file(root, ".worktrees/wt/src/main.rs");
-        assert_eq!(scan(root), MemberSourceVerdict::SourceOnlyInWorktrees);
-    }
-
-    /// 4：普通路径命中源码后不再触碰 `.worktrees/`。
-    #[test]
-    fn scan_stops_at_normal_path_source_without_touching_worktrees() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "src/main.rs");
-        let locked = root.join(".worktrees/locked");
-        fs::create_dir_all(&locked).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
-        }
-        // git 可见范围不含被忽略的 `.worktrees/` 子树（生产口径）。
-        let visible = VisibleFiles(vec![PathBuf::from("src/main.rs")]);
-        let mut budget = SourceScanBudget::new_batch();
-        assert_eq!(
-            scan_member_source(root, &visible, &mut budget),
-            MemberSourceVerdict::SourceInNormalPath
-        );
-    }
-
-    /// 5：时限已过且无正证据 ⇒ 无法确认。
-    #[test]
-    fn scan_returns_unknown_when_deadline_passed_without_positive_evidence() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "src/main.rs");
-        let mut budget =
-            SourceScanBudget::for_tests(usize::MAX, Some(Instant::now() - Duration::from_secs(1)));
-        assert_eq!(
-            scan_member_source(root, &AllVisible, &mut budget),
-            MemberSourceVerdict::Unknown
-        );
-    }
-
-    /// 6：条目预算耗尽且无正证据 ⇒ 无法确认（不等于无源码）。
-    #[test]
-    fn scan_returns_unknown_when_entry_budget_exhausted_without_positive_evidence() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "a/b/c/limits.json");
-        let mut budget = SourceScanBudget::for_tests(1, None);
-        assert_eq!(
-            scan_member_source(root, &AllVisible, &mut budget),
-            MemberSourceVerdict::Unknown
-        );
-    }
-
-    /// 7：取消信号 ⇒ 无法确认。
-    #[test]
-    fn scan_returns_unknown_on_cancel() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "src/main.rs");
-        let mut budget = SourceScanBudget::new_batch();
-        budget.cancel();
-        assert_eq!(
-            scan_member_source(root, &AllVisible, &mut budget),
-            MemberSourceVerdict::Unknown
-        );
-    }
-
-    /// 8：不可读的成员根 ⇒ 无法确认（不得当成无源码）。
-    #[test]
-    #[cfg(unix)]
-    fn scan_returns_unknown_on_unreadable_member_root() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().join("member");
-        fs::create_dir_all(&root).unwrap();
-        write_file(&root, "src/main.rs");
-        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
-        if fs::read_dir(&root).is_ok() {
-            eprintln!("skip: 当前进程仍可读该目录（root 身份），不判定权限语义");
-            return;
-        }
-        let mut budget = SourceScanBudget::new_batch();
-        assert_eq!(
-            scan_member_source(&root, &AllVisible, &mut budget),
-            MemberSourceVerdict::Unknown
-        );
-    }
-
-    /// 9：符号链接文件与符号链接目录都不算源码。
-    #[test]
-    #[cfg(unix)]
-    fn scan_ignores_symlinked_files_and_dirs() {
-        let outside = TempDir::new().unwrap();
-        write_file(outside.path(), "main.rs");
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().join("member");
-        fs::create_dir_all(&root).unwrap();
-        std::os::unix::fs::symlink(outside.path().join("main.rs"), root.join("link.rs")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.join("linkdir")).unwrap();
-        assert_eq!(scan(&root), MemberSourceVerdict::NoSource);
-    }
-
-    /// 10：指向成员根之外的符号链接目录不被跟随。
-    #[test]
-    #[cfg(unix)]
-    fn scan_does_not_follow_symlink_escape_out_of_member_root() {
-        let outside = TempDir::new().unwrap();
-        write_file(outside.path(), "src/escaped.rs");
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().join("member");
-        fs::create_dir_all(root.join("inner")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), root.join("inner/escape")).unwrap();
-        assert_eq!(scan(&root), MemberSourceVerdict::NoSource);
-    }
-
-    /// 11：内建排除目录被剪枝，但同仓其它位置的源码仍命中。
-    #[test]
-    fn scan_prunes_builtin_excluded_directories_but_keeps_nested_source() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "node_modules/x/a.js");
-        write_file(root, "target/a.rs");
-        write_file(root, "build/a.py");
-        write_file(root, ".aria/a.ts");
-        assert_eq!(scan(root), MemberSourceVerdict::NoSource);
-        write_file(root, "src/a.ts");
-        assert_eq!(scan(root), MemberSourceVerdict::SourceInNormalPath);
-    }
-
-    /// 12：4 条非目录模式按目录名剪枝；排除表是单一来源。
-    #[test]
-    fn scan_prunes_non_directory_builtin_patterns_as_directory_names() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "credentials/src/a.rs");
-        write_file(root, "secret-notes/src/b.ts");
-        write_file(root, ".env.d/c.rs");
-        assert_eq!(scan(root), MemberSourceVerdict::NoSource);
-        assert_eq!(super::super::exclude::BUILTIN_EXCLUDES.len(), 11);
-    }
-
-    /// 13：命中非目录模式的文件不算源码候选。
-    #[test]
-    fn scan_ignores_source_files_matching_non_directory_builtin_patterns() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "credentials.rs");
-        write_file(root, "secret_manager.ts");
-        assert_eq!(scan(root), MemberSourceVerdict::NoSource);
-    }
-
-    /// 14：整批预算在成员之间共享。
-    #[test]
-    fn scan_batch_budget_is_shared_across_members() {
-        let temp = TempDir::new().unwrap();
-        let first = temp.path().join("first");
-        let second = temp.path().join("second");
-        write_file(&first, "src/main.rs");
-        write_file(&second, "src/main.rs");
-        let mut budget = SourceScanBudget::for_tests(1, None);
-        assert_eq!(
-            scan_member_source(&first, &AllVisible, &mut budget),
-            MemberSourceVerdict::SourceInNormalPath
-        );
-        assert_eq!(
-            scan_member_source(&second, &AllVisible, &mut budget),
-            MemberSourceVerdict::Unknown
-        );
-    }
-
-    /// 15：单成员条目上限独立于整批上限。
-    #[test]
-    fn scan_enforces_per_member_entry_cap() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().join("many");
-        fs::create_dir_all(&root).unwrap();
-        for index in 0..=SOURCE_SCAN_MAX_ENTRIES_PER_MEMBER {
-            fs::write(root.join(format!("f{index}.txt")), b"x").unwrap();
-        }
-        let mut budget = SourceScanBudget::new_batch();
-        assert_eq!(
-            scan_member_source(&root, &AllVisible, &mut budget),
-            MemberSourceVerdict::Unknown
-        );
-    }
-
-    /// 16：物理扫描段的深度上限 = 32。
-    #[test]
-    fn scan_enforces_depth_limit_32_on_physical_scan_stage() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        let allowed = deep_worktrees_file(root, 30);
-        if let Some(parent) = allowed.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&allowed, b"fn main() {}").unwrap();
-        assert_eq!(scan(root), MemberSourceVerdict::SourceOnlyInWorktrees);
-
-        let too_deep = TempDir::new().unwrap();
-        let deep_root = too_deep.path();
-        let deep = deep_worktrees_file(deep_root, 31);
-        if let Some(parent) = deep.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(&deep, b"fn main() {}").unwrap();
-        assert_eq!(scan(deep_root), MemberSourceVerdict::Unknown);
-    }
-
-    /// 17：`.worktrees/` 缺失或为符号链接 ⇒ 该段无候选（不是无法确认）。
-    #[test]
-    #[cfg(unix)]
-    fn scan_treats_missing_or_symlinked_worktrees_entry_as_no_candidate() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path().join("member");
-        fs::create_dir_all(&root).unwrap();
-        write_file(&root, "limits.json");
-        assert_eq!(scan(&root), MemberSourceVerdict::NoSource);
-
-        let outside = TempDir::new().unwrap();
-        write_file(outside.path(), "src/main.rs");
-        std::os::unix::fs::symlink(outside.path(), root.join(".worktrees")).unwrap();
-        assert_eq!(scan(&root), MemberSourceVerdict::NoSource);
-    }
-
-    /// 18：后缀匹配大小写不敏感（只看最后一段）。
-    #[test]
-    fn scan_matches_extension_case_insensitively_on_last_segment() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "SRC/MAIN.RS");
-        assert_eq!(scan(root), MemberSourceVerdict::SourceInNormalPath);
-    }
-
-    /// 19：被 `.gitignore` 忽略的文件不算源码。
-    #[test]
-    fn scan_ignores_gitignored_source_files() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        init_git_repo(root);
-        write_file(root, ".gitignore");
-        fs::write(root.join(".gitignore"), b"sandbox/\n").unwrap();
-        write_file(root, "src/tracked.ts");
-        git_add(root, &["src/tracked.ts", ".gitignore"]);
-        write_file(root, "sandbox/ignored.ts");
-        let mut budget = SourceScanBudget::new_batch();
-        assert_eq!(
-            scan_member_source(root, &GitVisibleFiles::production(), &mut budget),
-            MemberSourceVerdict::SourceInNormalPath
-        );
-
-        let only_ignored = TempDir::new().unwrap();
-        let ignored_root = only_ignored.path();
-        init_git_repo(ignored_root);
-        fs::write(ignored_root.join(".gitignore"), b"sandbox/\n").unwrap();
-        write_file(ignored_root, "sandbox/ignored.ts");
-        let mut budget = SourceScanBudget::new_batch();
-        assert_eq!(
-            scan_member_source(ignored_root, &GitVisibleFiles::production(), &mut budget),
-            MemberSourceVerdict::NoSource
-        );
-    }
-
-    /// 20：未跟踪但未被忽略的文件在可见范围内。
-    #[test]
-    fn scan_reports_visible_source_that_codegraph_missed() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        init_git_repo(root);
-        write_file(root, "src/visible.ts");
-        let mut budget = SourceScanBudget::new_batch();
-        assert_eq!(
-            scan_member_source(root, &GitVisibleFiles::production(), &mut budget),
-            MemberSourceVerdict::SourceInNormalPath
-        );
-    }
-
-    /// 21：清单是校准 notes 的 1.6.3 实测收录集的子集，且不含配置/文档后缀。
-    #[test]
-    fn aria_source_extensions_are_subset_of_calibrated_1_6_3_set() {
-        let notes =
-            fs::read_to_string("cadence/notes/2026-11-18_校准_CodeGraph源码后缀清单_1.6.3_v1.0.md")
-                .expect("calibration notes must exist");
-        for extension in ARIA_SOURCE_EXTENSIONS {
-            let row = format!("| .{extension} |");
-            let line = notes
-                .lines()
-                .find(|line| line.starts_with(&row))
-                .unwrap_or_else(|| panic!("{extension} missing from calibration notes"));
-            assert!(
-                line.ends_with("| 是 |"),
-                "{extension} is not collected by codegraph 1.6.3: {line}"
-            );
-        }
-        for excluded in [
-            "json", "md", "toml", "txt", "csv", "html", "yaml", "yml", "xml",
-        ] {
-            assert!(
-                !ARIA_SOURCE_EXTENSIONS.contains(&excluded),
-                "{excluded} must not be an Aria source extension"
-            );
-        }
-    }
-
-    /// 22：非 git 成员 ⇒ 回落全部文件。
-    #[test]
-    fn visibility_falls_back_to_all_files_for_non_git_member() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "src/a.ts");
-        let visible = GitVisibleFiles::production()
-            .visible_files(root)
-            .expect("non git member falls back to all files");
-        assert!(
-            visible.iter().any(|path| path.ends_with("src/a.ts")),
-            "fallback must list every file: {visible:?}"
-        );
-        let mut budget = SourceScanBudget::new_batch();
-        assert_eq!(
-            scan_member_source(root, &GitVisibleFiles::production(), &mut budget),
-            MemberSourceVerdict::SourceInNormalPath
-        );
-    }
-
-    /// 23：git 失败 ⇒ 无法确认，不得回落成「全部文件」。
-    #[test]
-    fn visibility_returns_err_on_git_failure_instead_of_all_files() {
-        struct FailingRunner {
-            timed_out: bool,
-        }
-
-        #[async_trait::async_trait]
-        impl BoundedCommandRunner for FailingRunner {
-            async fn run(
-                &self,
-                _request: BoundedCommandRequest,
-            ) -> Result<BoundedCommandResult, BoundedCommandError> {
-                Ok(BoundedCommandResult {
-                    exit_code: Some(1),
-                    stdout: String::new(),
-                    stderr: "boom".to_string(),
-                    timed_out: self.timed_out,
-                    cancelled: false,
-                    stdout_truncated: false,
-                    stderr_truncated: false,
-                    duration_ms: 0,
-                })
-            }
-        }
-
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        write_file(root, "src/a.ts");
-        let failing = GitVisibleFiles::with_runner(Arc::new(FailingRunner { timed_out: false }));
-        assert!(
-            failing.visible_files(root).is_err(),
-            "git failure must not fall back to all files"
-        );
-        let timing_out = GitVisibleFiles::with_runner(Arc::new(FailingRunner { timed_out: true }));
-        assert!(
-            timing_out.visible_files(root).is_err(),
-            "git timeout must not fall back to all files"
-        );
-        let mut budget = SourceScanBudget::new_batch();
-        assert_eq!(
-            scan_member_source(root, &failing, &mut budget),
-            MemberSourceVerdict::Unknown
-        );
-    }
-
-    /// 24：被跟踪源码文件所在目录不可读 ⇒ 无法确认，不得判「无源码」。
-    /// `git ls-files --cached` 直读 index（不需要目录可读）仍会列出该文件，
-    /// 但进程 stat 得到 EACCES——证据不足必须落 `Unknown`（契约：无法确认
-    /// MUST NOT 等同于无源码）。
-    #[cfg(unix)]
-    #[test]
-    fn scan_reports_unknown_when_tracked_source_dir_is_unreadable() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        init_git_repo(root);
-        write_file(root, "src/lib.rs");
-        git_add(root, &["src/lib.rs"]);
-        let visibility = GitVisibleFiles::production();
-        let src_dir = root.join("src");
-        // 目录 0o000：git 仍从 index 列出被跟踪文件；stat 因 EACCES 失败。
-        fs::set_permissions(&src_dir, fs::Permissions::from_mode(0o000)).unwrap();
-        let visible = visibility.visible_files(root).unwrap();
-        let mut budget = SourceScanBudget::new_batch();
-        let verdict = scan_member_source(root, &visibility, &mut budget);
-        // 无论结论如何都先恢复目录权限，保证 TempDir 清理能删除目录内文件。
-        fs::set_permissions(&src_dir, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(
-            visible.contains(&PathBuf::from("src/lib.rs")),
-            "fixture premise broken: git must still list the tracked file, got {visible:?}"
-        );
-        assert_eq!(
-            verdict,
-            MemberSourceVerdict::Unknown,
-            "unreadable directory is insufficient evidence, not NoSource"
-        );
-    }
+    include!("source_scan_tests.inc.rs");
 }

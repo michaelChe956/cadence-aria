@@ -56,7 +56,7 @@ struct ScriptedVisibility {
 }
 
 impl MemberSourceVisibility for ScriptedVisibility {
-    fn visible_files(&self, _member_root: &Path) -> Result<Vec<PathBuf>, AggregateIndexError> {
+    fn visible_files(&self, _member_root: &Path, _budget: &SourceScanBudget<'_>) -> Result<Vec<PathBuf>, AggregateIndexError> {
         self.files.clone()
     }
 }
@@ -311,6 +311,7 @@ impl BoundedCommandRunner for SourceScopeRunner {
             {
                 Some("api") => "a".repeat(40),
                 Some("web") => "b".repeat(40),
+                Some(name) if name.starts_with("synthetic_") => "c".repeat(40),
                 name => panic!("unexpected fake Git checkout: {name:?}"),
             },
             [status, porcelain] if status == "status" && porcelain == "--porcelain=v1" => {
@@ -457,6 +458,7 @@ fn scan_incomplete_fails_without_claiming_no_source() {
         },
         &mut exhausted,
     )
+    .1
     .unwrap_err();
     let AggregateIndexError::Failed { code, message } = &error else {
         panic!("expected failed error, got: {error}");
@@ -479,7 +481,7 @@ fn scan_incomplete_fails_without_claiming_no_source() {
         }),
     };
     let error =
-        super::cross_verify_uncovered(&root, &covered, &names, &failing, &mut fresh).unwrap_err();
+        super::cross_verify_uncovered(&root, &covered, &names, &failing, &mut fresh).1.unwrap_err();
     assert!(
         matches!(&error, AggregateIndexError::Failed { code, .. }
             if *code == "aggregate_index_source_scan_incomplete"),
@@ -809,3 +811,5 @@ fn codegraph_version_drift_records_auditable_warning_without_blocking() {
         "告警须含复校准指引, got: {warning}"
     );
 }
+
+include!("scan_timing_tests.inc.rs");
