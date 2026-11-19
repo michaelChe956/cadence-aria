@@ -21,6 +21,7 @@ const GROUP_LABEL: Record<IssueQueueGroupKey, string> = {
   blocked: "阻塞",
   coding: "编码中",
   completed: "已完成",
+  unloaded: "生命周期待查看",
 };
 
 function queueRow(overrides: Partial<IssueQueueRowData> = {}): IssueQueueRowData {
@@ -164,19 +165,27 @@ describe("IssueQueue 结构", () => {
     expect(header).toHaveClass("sticky", "top-0");
   });
 
-  it("六个组按 ISSUE_QUEUE_GROUP_ORDER 渲染并使用中文组名", () => {
-    const shuffled = [...defaultGroups()].reverse();
+  it("将待查看议题放在六个已知阶段分组之后", () => {
+    const unloaded = queueGroup("unloaded", [queueRow({
+      issueId: "issue_unloaded",
+      title: "标题已加载",
+      group: "unloaded",
+      stagePips: [],
+    })]);
+    const shuffled = [unloaded, ...defaultGroups().reverse()];
     renderQueue({ groups: shuffled });
 
     const list = screen.getByTestId("issue-queue-group-list");
     const keys = Array.from(
       list.querySelectorAll('[data-testid="issue-queue-group"]'),
     ).map((node) => node.getAttribute("data-group-key"));
-    expect(keys).toEqual(ISSUE_QUEUE_GROUP_ORDER);
+    expect(keys).toEqual(["needs_story", "needs_design", "needs_work_item", "blocked", "coding", "completed", "unloaded"]);
 
     for (const key of ISSUE_QUEUE_GROUP_ORDER) {
       expect(groupHeader(key)).toHaveTextContent(GROUP_LABEL[key]);
     }
+    expect(screen.getByRole("button", { name: "选择 Issue 标题已加载" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "生成 Story Spec 标题已加载" })).toBeNull();
   });
 
   it("空分组时渲染空态提示且总数 chip 为 0", () => {

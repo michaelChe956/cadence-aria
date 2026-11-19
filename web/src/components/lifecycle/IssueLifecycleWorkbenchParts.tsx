@@ -72,6 +72,8 @@ export function resolveGroupCodingAttempt(
 
 export function IssueLifecycleDetail({
   issue,
+  unloadedIssue,
+  issueDetailFailed,
   storySpecs,
   designSpecs,
   workItems,
@@ -85,6 +87,8 @@ export function IssueLifecycleDetail({
   onGenerateForStage,
 }: {
   issue: LifecycleCardData | null;
+  unloadedIssue?: ProductIssue;
+  issueDetailFailed?: boolean;
   storySpecs: LifecycleCardData[];
   designSpecs: LifecycleCardData[];
   workItems: LifecycleCardData[];
@@ -132,15 +136,17 @@ export function IssueLifecycleDetail({
       <section
         role="region"
         aria-label="Issue 生命周期详情"
+        aria-busy={unloadedIssue && !issueDetailFailed ? true : undefined}
         className="flex min-h-96 items-center justify-center rounded-md border border-dashed border-[var(--aria-line)] bg-[var(--aria-panel)] p-6 text-center"
       >
         <div className="max-w-sm">
           <h2 className="text-sm font-semibold text-[var(--aria-ink)]">
-            选择一个 Issue
+            {unloadedIssue?.title ?? "选择一个 Issue"}
           </h2>
           <p className="mt-2 text-sm leading-6 text-[var(--aria-ink-muted)]">
-            Story Spec、Design Spec 和 Work Item 都会作为该 Issue
-            的内容展示在这里。
+            {unloadedIssue
+              ? issueDetailFailed ? "生命周期加载失败，可刷新重试。" : "正在加载生命周期…"
+              : "Story Spec、Design Spec 和 Work Item 都会作为该 Issue 的内容展示在这里。"}
           </p>
         </div>
       </section>

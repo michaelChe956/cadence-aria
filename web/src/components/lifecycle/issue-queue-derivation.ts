@@ -1,6 +1,6 @@
 // Task 1（队列派生层）：从 IssueLifecycleResponse 列表派生 workbench 队列分组的纯函数。
 // 无 React 依赖、无副作用；分组判定与 stagePips 规则与 Plan 逐字一致。
-import type { CodingAttempt, IssueLifecycleResponse } from "../../api/types";
+import type { CodingAttempt, IssueLifecycleResponse, ProductIssue } from "../../api/types";
 import { workItemWaitingReason } from "../../state/lifecycle-workbench-store";
 
 export type IssueStageKey = "story" | "design" | "work_item" | "coding";
@@ -13,7 +13,8 @@ export type IssueQueueGroupKey =
   | "needs_work_item"
   | "blocked"
   | "coding"
-  | "completed";
+  | "completed"
+  | "unloaded";
 
 export interface StagePip {
   stage: IssueStageKey;
@@ -44,6 +45,7 @@ export const ISSUE_QUEUE_GROUP_ORDER: IssueQueueGroupKey[] = [
   "blocked",
   "coding",
   "completed",
+  "unloaded",
 ];
 
 // perGroupLimit 默认值：rows 截断到上限，total 保留组内真实总数。
@@ -71,21 +73,15 @@ export function defaultCollapsedGroups(): IssueQueueGroupKey[] {
 
 export function deriveIssueQueue(
   lifecycles: IssueLifecycleResponse[],
-  options?: { filterText?: string; perGroupLimit?: number },
+  options?: { filterText?: string; perGroupLimit?: number; pendingIssues?: readonly ProductIssue[] },
 ): IssueQueueGroup[] {
-  const filterText = options?.filterText ?? "";
+  const filterText = (options?.filterText ?? "").toLowerCase();
   const perGroupLimit = options?.perGroupLimit ?? DEFAULT_PER_GROUP_LIMIT;
 
   // 过滤在分组之前应用：filterText 非空时大小写不敏感匹配 title 或 issueId。
-  const candidates =
-    filterText.length > 0
-      ? lifecycles.filter((lifecycle) =>
-          matchesFilterText(lifecycle, filterText),
-        )
-      : lifecycles;
-
   const rowsByGroup = new Map<IssueQueueGroupKey, IssueQueueRowData[]>();
-  for (const lifecycle of candidates) {
+  for (const lifecycle of lifecycles) {
+    if (!matchesFilterText(lifecycle.issue, filterText)) continue;
     const row = deriveIssueQueueRow(lifecycle);
     const bucket = rowsByGroup.get(row.group);
     if (bucket === undefined) {
@@ -94,6 +90,19 @@ export function deriveIssueQueue(
       bucket.push(row);
     }
   }
+  const unloadedRows = (options?.pendingIssues ?? [])
+    .filter((issue) => matchesFilterText(issue, filterText))
+    .map((issue): IssueQueueRowData => ({
+      issueId: issue.issue_id,
+      title: issue.title,
+      status: issue.status,
+      group: "unloaded",
+      stagePips: [],
+      storyCount: 0,
+      designCount: 0,
+      workItemCount: 0,
+    }));
+  if (unloadedRows.length > 0) rowsByGroup.set("unloaded", unloadedRows);
 
   // 只返回非空分组，按 ISSUE_QUEUE_GROUP_ORDER 排序；
   // rows 截断到 perGroupLimit（组内保持输入顺序），total 保留组内真实总数。
@@ -110,14 +119,10 @@ export function deriveIssueQueue(
 }
 
 function matchesFilterText(
-  lifecycle: IssueLifecycleResponse,
-  filterText: string,
+  issue: ProductIssue,
+  needle: string,
 ): boolean {
-  const needle = filterText.toLowerCase();
-  return (
-    lifecycle.issue.title.toLowerCase().includes(needle) ||
-    lifecycle.issue.issue_id.toLowerCase().includes(needle)
-  );
+  return !needle || issue.title.toLowerCase().includes(needle) || issue.issue_id.toLowerCase().includes(needle);
 }
 
 function deriveIssueQueueRow(

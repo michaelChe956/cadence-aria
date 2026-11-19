@@ -7,7 +7,6 @@ import {
   createProductIssue,
   deleteProject,
   deleteRepository,
-  getIssueLifecycle,
   getPlanCodingProgress,
   listProductIssues,
   listProjects,
@@ -46,7 +45,7 @@ import {
   type LifecycleCard as LifecycleCardData,
 } from "../../state/lifecycle-workbench-store";
 import { useWorkbenchOverlayDirectory } from "../../state/workbench-overlay-store";
-import { useLifecycleInvalidationRefresh } from "./useLifecycleInvalidationRefresh";
+import { useWorkbenchLifecycleDetails } from "./useWorkbenchLifecycleDetails";
 import { WorkbenchSurface } from "../shell/WorkbenchSurface";
 import {
   CreateProjectDialog,
@@ -93,7 +92,6 @@ import {
   lifecycleCardKey,
   lifecycleEntityKey,
   lifecycleWorkItemCard,
-  normalizeLifecycleResponse,
   resolveGroupCodingAttempt,
   selectedLifecycleColumns,
 } from "./IssueLifecycleWorkbenchParts";
@@ -103,6 +101,7 @@ export { defaultLaunchTitle } from "./IssueLifecycleWorkbenchParts";
 
 // 稳定空数组引用：避免每次 render 新建 [] 使 useMemo 依赖失效。
 const EMPTY_GROUP_KEYS: IssueQueueGroupKey[] = [];
+const EMPTY_ISSUES: ProductIssue[] = [];
 
 // N6（REQ-CS-01）：多仓 plan 判定——plan 的 work items 落在 ≥2 个非兼容投影
 // target 仓时走新一键 coding-start；单仓/无分仓投影保持 v1 旧路径不变。
@@ -155,7 +154,7 @@ export function IssueLifecycleWorkbench({
   const [deletedLogicalCodebases, setDeletedLogicalCodebases] = useState<
     LogicalCodebaseListEntryDto[]
   >([]);
-  const [lifecycles, setLifecycles] = useState<IssueLifecycleResponse[]>([]);
+  const [issueList, setIssueList] = useState<{ projectId: string; issues: ProductIssue[] } | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
   );
@@ -174,6 +173,8 @@ export function IssueLifecycleWorkbench({
     useState<PendingWorkItemPlanLaunch | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { details, failed, clearDetails, hydrateDetails, readIssue } =
+    useWorkbenchLifecycleDetails(setError);
   const [pointerPublicationBusy, setPointerPublicationBusy] = useState(false);
   const [aggregateIndexRebuilding, setAggregateIndexRebuilding] =
     useState(false);
@@ -220,24 +221,19 @@ export function IssueLifecycleWorkbench({
   const syncWorkbenchOverlayDirectory = useWorkbenchOverlayDirectory(
     (state) => state.syncWorkbenchOverlayDirectory,
   );
-  useEffect(() => {
-    syncWorkbenchOverlayDirectory(lifecycles);
-  }, [lifecycles, syncWorkbenchOverlayDirectory]);
 
   useEffect(() => {
     void refresh();
+    return () => { refreshRequestId.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // F-29：confirm 成功后的 lifecycle invalidation 订阅——定向刷新对应 issue。
-  useLifecycleInvalidationRefresh({
-    selectedProjectId,
-    lifecycles,
-    refreshRequestId,
-    setLifecycles,
-    setError,
-    setBusy,
-  });
+  // Promote explicit selections and drawer deep links over unselected rows.
+  const drawerIssueId = (isDrawerOpen ? drawerFocusedEntityKey : focusEntityKey)?.split(":")[1];
+  useEffect(() => {
+    if (focusedIssueId) void readIssue(focusedIssueId);
+    if (drawerIssueId) void readIssue(drawerIssueId);
+  }, [drawerIssueId, focusedIssueId, issueList, readIssue]);
 
   useEffect(() => {
     if (focusEntityKey === undefined) {
@@ -284,12 +280,24 @@ export function IssueLifecycleWorkbench({
       const projectChanged = projectId !== selectedProjectId;
       setProjects(projectResponse.projects);
       setSelectedProjectId(projectId);
+      if (projectChanged) {
+        clearDetails();
+        setIssueList(null);
+        setRepositories([]);
+        setCodebases([]);
+        setDeletedLogicalCodebases([]);
+        setFocusedIssueId(null);
+        setSelectedCardKey(null);
+        setSelectedLogicalCodebaseId(null);
+        setAggregateInitialization(null);
+      }
 
       if (!projectId) {
         setRepositories([]);
         setCodebases([]);
         setDeletedLogicalCodebases([]);
-        setLifecycles([]);
+        clearDetails();
+        setIssueList(null);
         setPointerPublications([]);
         setLogicalCodebaseMembers([]);
         setAggregateIndex(null);
@@ -300,71 +308,56 @@ export function IssueLifecycleWorkbench({
         return;
       }
 
-      const [
-        repositoryResponse,
-        codebaseResponse,
-        logicalCodebaseResponse,
-        issueResponse,
-      ] = await Promise.all([
-        listRepositories(projectId),
-        listCodebases(projectId),
-        listLogicalCodebases(projectId, { includeDeleted: true }),
-        listProductIssues(projectId),
-      ]);
-      if (!isLatestRefresh(requestId)) {
-        return;
-      }
+      const loadIssues = async () => {
+        const { issues = [] } = await listProductIssues(projectId);
+        if (!isLatestRefresh(requestId)) return;
 
-      const listedIssues = issueResponse.issues ?? [];
-      const pendingCreatedIssues = createdIssuesRef.current.filter(
-        (createdIssue) => !listedIssues.some((issue) => issue.issue_id === createdIssue.issue_id),
-      );
-      createdIssuesRef.current = pendingCreatedIssues;
-      const materializedIssues = [...listedIssues, ...pendingCreatedIssues, ...optimisticIssues]
-        .reduce<ProductIssue[]>((issues, issue) =>
-          issues.some((candidate) => candidate.issue_id === issue.issue_id)
-            ? issues
-            : [...issues, issue],
-        []);
-      if (optimisticIssues.length > 0) {
-        materializedIssues.sort((left, right) =>
-          (right.updated_at ?? right.created_at).localeCompare(left.updated_at ?? left.created_at),
+        const byId = new Map(issues.map((issue) => [issue.issue_id, issue]));
+        createdIssuesRef.current = createdIssuesRef.current.filter((issue) =>
+          issue.project_id !== projectId || !byId.has(issue.issue_id),
         );
-      }
-      const lifecycleResponses = await Promise.all(
-        materializedIssues.map(async (issue) =>
-          normalizeLifecycleResponse(
-            await getIssueLifecycle(issue.issue_id, projectId),
-            issue,
-          ),
-        ),
-      );
-      if (!isLatestRefresh(requestId)) {
-        return;
-      }
+        for (const issue of [...createdIssuesRef.current, ...optimisticIssues]) {
+          if (issue.project_id === projectId && !byId.has(issue.issue_id)) {
+            byId.set(issue.issue_id, issue);
+          }
+        }
+        const materializedIssues = [...byId.values()];
+        if (optimisticIssues.length > 0) {
+          materializedIssues.sort((left, right) =>
+            (right.updated_at ?? right.created_at).localeCompare(left.updated_at ?? left.created_at),
+          );
+        }
+        const firstIssueId = materializedIssues[0]?.issue_id ?? null;
+        setIssueList({ projectId, issues: materializedIssues });
+        setFocusedIssueId((current) =>
+          !projectChanged && current && byId.has(current) ? current : firstIssueId,
+        );
+        await hydrateDetails(
+          projectId,
+          materializedIssues,
+          !projectChanged && focusedIssueId && byId.has(focusedIssueId) ? focusedIssueId : firstIssueId,
+          drawerIssueId,
+        );
+      };
 
-      setRepositories(repositoryResponse.repositories ?? []);
-      setCodebases(codebaseResponse.codebases ?? []);
-      // 存活 LC 仍在 /codebases 投影里（顺序与选择语义不变），这里只取墓碑条目。
-      setDeletedLogicalCodebases(
-        (logicalCodebaseResponse.logical_codebases ?? []).filter(
-          (codebase) => codebase.deleted,
-        ),
-      );
-      setLifecycles(lifecycleResponses);
-      setFocusedIssueId(
-        focusedIssueId &&
-          lifecycleResponses.some(
-            (lifecycle) => lifecycle.issue.issue_id === focusedIssueId,
-          )
-          ? focusedIssueId
-          : (lifecycleResponses[0]?.issue.issue_id ?? null),
-      );
-      if (projectChanged) {
-        setSelectedCardKey(null);
-        setSelectedLogicalCodebaseId(null);
-        setAggregateInitialization(null);
-      }
+      const loadProjectMetadata = async () => {
+        const [repositoryResponse, codebaseResponse, logicalCodebaseResponse] =
+          await Promise.all([
+            listRepositories(projectId),
+            listCodebases(projectId),
+            listLogicalCodebases(projectId, { includeDeleted: true }),
+          ]);
+        if (!isLatestRefresh(requestId)) return;
+
+        setRepositories(repositoryResponse.repositories ?? []);
+        setCodebases(codebaseResponse.codebases ?? []);
+        // 存活 LC 仍从 /codebases 读取，此处只保留墓碑条目。
+        setDeletedLogicalCodebases(
+          (logicalCodebaseResponse.logical_codebases ?? []).filter((codebase) => codebase.deleted),
+        );
+      };
+
+      await Promise.all([loadIssues(), loadProjectMetadata()]);
     } catch (reason) {
       if (isLatestRefresh(requestId)) {
         setError(
@@ -383,6 +376,20 @@ export function IssueLifecycleWorkbench({
   function isLatestRefresh(requestId: number) {
     return requestId === refreshRequestId.current;
   }
+
+  const issues = issueList?.projectId === selectedProjectId ? issueList.issues : EMPTY_ISSUES;
+  const lifecycles = useMemo(() => issues.flatMap((issue) => {
+    const lifecycle = details.get(issue.issue_id);
+    return lifecycle ? [lifecycle] : [];
+  }), [details, issues]);
+  const pendingIssues = useMemo(
+    () => issues.filter((issue) => !details.has(issue.issue_id)),
+    [details, issues],
+  );
+  const unloadedIssue = pendingIssues.find((issue) => issue.issue_id === focusedIssueId);
+  useEffect(() => {
+    syncWorkbenchOverlayDirectory(lifecycles);
+  }, [lifecycles, syncWorkbenchOverlayDirectory]);
 
   const allColumns = useMemo(
     () => groupLifecycleCards(lifecycles),
@@ -447,7 +454,7 @@ export function IssueLifecycleWorkbench({
   const selectedProject = projects.find(
     (project) => project.project_id === selectedProjectId,
   );
-  const issueCount = allColumns.issue.length;
+  const issueCount = issues.length;
   // Task 7：队列派生与双密度状态的有效值。内存 Map 优先，缺失时从 localStorage 回填
   // （分组折叠缺省 defaultCollapsedGroups()）。轮询只写 lifecycles，不碰这些 Map。
   const queueCollapsed = selectedProjectId
@@ -473,6 +480,7 @@ export function IssueLifecycleWorkbench({
   const issueQueueGroups = useMemo(() => {
     const baseGroups = deriveIssueQueue(lifecycles, {
       filterText: queueFilterText,
+      pendingIssues,
     });
     if (showMoreQueueGroups.length === 0) {
       return baseGroups;
@@ -480,6 +488,7 @@ export function IssueLifecycleWorkbench({
     const expandedByKey = new Map(
       deriveIssueQueue(lifecycles, {
         filterText: queueFilterText,
+        pendingIssues,
         perGroupLimit: Number.MAX_SAFE_INTEGER,
       }).map((group) => [group.key, group]),
     );
@@ -488,7 +497,7 @@ export function IssueLifecycleWorkbench({
         ? (expandedByKey.get(group.key) ?? group)
         : group,
     );
-  }, [lifecycles, queueFilterText, showMoreQueueGroups]);
+  }, [lifecycles, pendingIssues, queueFilterText, showMoreQueueGroups]);
   const queueTotalCount = issueQueueGroups.reduce(
     (sum, group) => sum + group.total,
     0,
@@ -631,7 +640,6 @@ export function IssueLifecycleWorkbench({
     if (projectId === selectedProjectId) {
       return;
     }
-    setSelectedProjectId(projectId);
     await refresh(projectId);
   }
 
@@ -648,15 +656,11 @@ export function IssueLifecycleWorkbench({
     openDrawer(cardKey);
   }
 
-  // Task 7：队列行选择——找到对应 Issue 卡后复用 handleSelectCard（选择语义单一入口）。
   function handleSelectIssueFromQueue(issueId: string) {
-    const card = allColumns.issue.find(
-      (candidate) => candidate.issueId === issueId,
-    );
-    if (!card) {
-      return;
-    }
-    handleSelectCard(card);
+    setSelectedCardKey(lifecycleEntityKey("issue", issueId, issueId));
+    setFocusedIssueId(issueId);
+    closeDrawer();
+    void readIssue(issueId);
   }
 
   function handleGenerateStorySpecFromQueue(issueId: string) {
@@ -1032,6 +1036,9 @@ export function IssueLifecycleWorkbench({
       selectedCardKey={selectedCardKey}
       deletingCardKey={deletingCardKey}
       selectedIssue={selectedIssueColumns.issue[0] ?? null}
+      unloadedIssue={unloadedIssue}
+      issueDetailFailed={unloadedIssue !== undefined && failed.has(unloadedIssue.issue_id)}
+      issueListLoading={busy && issueList === null}
       storySpecs={selectedIssueColumns.story_spec}
       designSpecs={selectedIssueColumns.design_spec}
       workItems={selectedIssueColumns.work_item}

@@ -96,7 +96,7 @@ export function IssueQueueRow(props: {
           {row.title}
         </span>
       </button>
-      <StageMiniGraph pips={row.stagePips} />
+      {row.stagePips.length > 0 ? <StageMiniGraph pips={row.stagePips} /> : null}
       {onGenerateStorySpec ? (
         <button
           type="button"
