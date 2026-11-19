@@ -155,7 +155,7 @@ export function CockpitLogBundleButton(): JSX.Element {
       if (!response.ok) {
         setPhase("awaiting");
         setStatusMessage(
-          "下载被服务拒绝：若尚未批准，请在宿主终端完成 aria diagnostics approve 后重试；若授权已过期，请重新申请授权。",
+          "下载被服务拒绝：若尚未批准，请在宿主终端执行上方展示的 npx @cadence-aria/cli diagnostics approve 命令后重试；若授权已过期，请重新申请授权。",
         );
         return;
       }
@@ -240,10 +240,10 @@ export function CockpitLogBundleButton(): JSX.Element {
                   data-testid="cockpit-log-bundle-approve-command"
                   className="block break-all rounded-lg border border-[var(--aria-line-strong)] bg-[var(--aria-panel-muted)] px-3 py-2 font-mono text-xs text-[var(--aria-ink)]"
                 >
-                  aria diagnostics approve {requestId}
+                  npx @cadence-aria/cli diagnostics approve {requestId}
                 </code>
                 <p>请在宿主终端核对命令与来源后执行批准；授权自申请起 5 分钟内有效，逾期需重新申请。</p>
-                <p>若用 npx 启动 Aria，将命令中的 aria 换成 npx @cadence-aria/cli。</p>
+                <p>{"若已全局安装 Aria，也可直接运行 aria diagnostics approve <申请号>。"}</p>
               </section>
             ) : null}
 

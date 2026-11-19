@@ -115,7 +115,7 @@ describe("CockpitLogBundleButton", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("申请授权后展示宿主批准命令与 npx 提示，句柄不进入界面或 URL", async () => {
+  it("申请授权后展示 npx 批准命令与全局安装提示，句柄不进入界面或 URL", async () => {
     const user = userEvent.setup();
     render(<CockpitLogBundleButton />);
 
@@ -123,10 +123,15 @@ describe("CockpitLogBundleButton", () => {
     await grantAuthorization();
 
     const command = screen.getByTestId("cockpit-log-bundle-approve-command");
-    expect(command.textContent).toBe(`aria diagnostics approve ${REQUEST_ID}`);
+    expect(command.textContent).toBe(
+      `npx @cadence-aria/cli diagnostics approve ${REQUEST_ID}`,
+    );
     expect(screen.getByText(/宿主终端/)).toBeInTheDocument();
     expect(screen.getByText(/5 分钟/)).toBeInTheDocument();
-    expect(screen.getByText(/npx @cadence-aria\/cli/)).toBeInTheDocument();
+    expect(screen.getByText(/全局安装/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/aria diagnostics approve <申请号>/),
+    ).toBeInTheDocument();
     expect(document.body.textContent).not.toContain(HANDLE);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
