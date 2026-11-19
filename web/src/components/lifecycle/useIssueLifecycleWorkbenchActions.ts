@@ -1,6 +1,6 @@
-import type { Dispatch, SetStateAction } from "react";
+import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 import { ApiRequestError, deleteProject, deleteRepository } from "../../api/client";
-import { rebuildAggregateIndex } from "../../api/aggregate-index";
+import { getActiveAggregateIndex, rebuildAggregateIndex } from "../../api/aggregate-index";
 import { cancelAggregateInitialization, reinitializeAggregateInitialization, startAggregateInitialization } from "../../api/aggregate-initialization";
 import { deleteLogicalCodebase, purgeLogicalCodebase, restoreLogicalCodebase } from "../../api/codebases";
 import { createPointerPublication, retryPointerPublicationRepo, revokePointerPublication } from "../../api/pointer-publication";
@@ -39,6 +39,24 @@ export function useIssueLifecycleWorkbenchActions({
   setPointerPublicationBusy, setPointerPublications, setAggregateIndex, setAggregateIndexRebuilding,
   setAggregateInitialization, setAggregateInitializationBusy, refresh,
 }: Args) {
+  // 2026-11-19：重建聚合索引的在途失效令牌与挂载位——作用域切换（含 A→B→A）
+  // 或新一次重建开始都会作废旧请求的全部逻辑写入（busy/错误/卡片）；卸载后
+  // 同样不再回写（fetch 层无中止通道，只拦逻辑写入）。
+  const rebuildRequestIdRef = useRef(0);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    // 作用域切换：作废在途重建并复位重建 busy，避免旧 LC 的进行态黏在
+    // 新选中 LC 的「重建索引」按钮上。
+    rebuildRequestIdRef.current += 1;
+    setAggregateIndexRebuilding(false);
+  }, [selectedProjectId, activeLogicalCodebaseId, setAggregateIndexRebuilding]);
+
   function upsertPointerPublication(publication: PointerPublicationDto) {
     setPointerPublications((existing) => [
       ...existing.filter((item) => item.id !== publication.id),
@@ -103,19 +121,48 @@ export function useIssueLifecycleWorkbenchActions({
     }
   }
 
+  // 2026-11-19：重建失败后的卡片回读——客户实测截图显示 POST 失败后卡片仍残留
+  // 旧告警（此前 catch 只 setError）。失败时对本次捕获的作用域补读一次 GET
+  // active 刷新卡片；补读失败保留原 POST 错误与旧卡片，不重试、不轮询。
+  // 成功路径直接采用 POST 响应，不额外 GET。
   async function handleRebuildAggregateIndex() {
     if (!selectedProjectId || !activeLogicalCodebaseId) {
       setError("缺少 Project 或逻辑代码库");
       return;
     }
+    const projectId = selectedProjectId;
+    const logicalCodebaseId = activeLogicalCodebaseId;
+    const requestId = rebuildRequestIdRef.current + 1;
+    rebuildRequestIdRef.current = requestId;
+    // 写入仅在：组件仍挂载，且本次请求仍是最新一次重建（作用域切换或新一次
+    // 重建都会使旧请求的 busy/错误/卡片写入全部作废）。
+    const canWrite = () =>
+      mountedRef.current && requestId === rebuildRequestIdRef.current;
     setAggregateIndexRebuilding(true);
     setError(null);
     try {
-      setAggregateIndex(await rebuildAggregateIndex(selectedProjectId, activeLogicalCodebaseId));
+      const rebuilt = await rebuildAggregateIndex(projectId, logicalCodebaseId);
+      if (!canWrite()) {
+        return;
+      }
+      setAggregateIndex(rebuilt);
     } catch (reason) {
+      if (!canWrite()) {
+        return;
+      }
       setError(reason instanceof ApiRequestError ? reason.message : errorMessage(reason, "重建聚合索引失败"));
+      try {
+        const active = await getActiveAggregateIndex(projectId, logicalCodebaseId);
+        if (canWrite()) {
+          setAggregateIndex(active);
+        }
+      } catch {
+        // 补读失败：保留原 POST 错误与旧卡片。
+      }
     } finally {
-      setAggregateIndexRebuilding(false);
+      if (canWrite()) {
+        setAggregateIndexRebuilding(false);
+      }
     }
   }
 
