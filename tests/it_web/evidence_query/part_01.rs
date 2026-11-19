@@ -383,6 +383,7 @@ pub(crate) fn index_record(
         project_id: PROJECT_ID.to_string(),
         membership_revision: 1,
         status: AggregateIndexStatus::Active,
+        source_scan: None,
         member_snapshots: vec![
             AggregateIndexMemberSnapshot::indexed(
                 api_id,

@@ -225,8 +225,9 @@ export function CockpitLogBundleButton(): JSX.Element {
               <h3 className="text-sm font-semibold">将收集的内容</h3>
               <ul className="list-disc space-y-1 pl-5">
                 <li>仅针对运行 Aria 的宿主账号本机数据，由宿主操作者授权；浏览器访客身份不能代替。</li>
-                <li>宿主 $HOME/.aria/projects 下 aggregate-initializations 与 aggregate-recipe-receipts 两类 JSON。</li>
-                <li>Claude Code、Codex、Pi、Kimi Code 四家各最近 3 个会话的诊断轨迹。</li>
+                <li>宿主 $HOME/.aria/projects 下的聚合初始化记录（aggregate-initializations）与配方回执（aggregate-recipe-receipts）。</li>
+                <li>同一目录下的聚合索引世代（aggregate-indexes）只导出诊断摘要：状态、覆盖数、盘检耗时与未收录成员的结论（若有）；不导出成员路径、快照或原始错误正文。</li>
+                <li>Claude Code、Codex、Pi、Kimi Code 四家各最近最多 3 个可识别会话的诊断轨迹。</li>
                 <li>当前运行信息 runtime-info.json（含绝对 workspace_root 工作区路径）。</li>
               </ul>
               <p>会话仅导出白名单诊断轨迹（时间、类型、模型、工具类型、退出码、错误类型），不含对话、源码或命令正文；无法解析的内容不会原文写入。</p>

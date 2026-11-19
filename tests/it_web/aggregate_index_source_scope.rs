@@ -1105,6 +1105,7 @@ async fn http_and_bootstrap_projection_share_copy_for_same_envelope() {
         updated_at: NOW.to_string(),
         supersedes_aggregate_index_id: None,
         warning: Some(envelope.to_string()),
+        source_scan: None,
     };
     AggregateIndexStore::for_lc(fixture.paths.clone(), fixture.lc_id.clone())
         .create(PROJECT_ID, record)

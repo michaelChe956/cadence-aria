@@ -148,6 +148,41 @@ impl<'a> From<&'a AggregateInitializationErrorRecord> for FailureInput<'a> {
 
 include!("failure_copy_table.inc.rs");
 
+/// 覆盖失败码的同码双变体：按持久化失败事实的机器事实前缀选择模板。
+///
+/// 变体 key **只用于模板选择**：归因分支与码表查找仍用 canonical 码，
+/// `machine_line` 仍写原始稳定码（内部变体键不得替换 canonical key）。
+const COVERAGE_DISK_SOURCE_KEY: &str = "aggregate_index_member_coverage_failed.disk_source";
+
+/// 新事实前缀：磁盘上有源码，但本次索引没收录它。
+const COVERAGE_DISK_SOURCE_FACT_PREFIX: &str = "source found on disk;";
+
+/// Select copy only for a producer's exact, measured fact prefix. All other
+/// callers (including historical and mixed-cause failures) keep canonical copy.
+fn resolved_entry_key<'a>(key: &'a str, detail: Option<&str>) -> &'a str {
+    use super::aggregate_index::scan_diagnostics::{ScanFailureFact, scan_failure_fact};
+
+    if let Some(kind) = detail.and_then(|fact| scan_failure_fact(key, fact)) {
+        return match kind {
+            ScanFailureFact::LimitReached => "aggregate_index_source_scan_incomplete.limit",
+            ScanFailureFact::ReadIncomplete => "aggregate_index_source_scan_incomplete.read",
+            ScanFailureFact::CoverageUnknown => {
+                "aggregate_index_source_scan_incomplete.missing_coverage"
+            }
+            ScanFailureFact::ScanIncomplete => key,
+        };
+    }
+    if key == "aggregate_index_member_coverage_failed"
+        && let Some(detail) = detail
+        && detail
+            .trim_start()
+            .starts_with(COVERAGE_DISK_SOURCE_FACT_PREFIX)
+    {
+        return COVERAGE_DISK_SOURCE_KEY;
+    }
+    key
+}
+
 /// 模板占位符替换。缺省值只做「不编造事实」的中性填充，不引入新结论。
 fn fill(template: &str, input: &FailureInput<'_>) -> String {
     if !template.contains('{') {
@@ -284,6 +319,16 @@ pub fn describe(input: FailureInput<'_>) -> FailureCopy {
     apply_confirmed_cause(&mut copy, canonical, &input);
     copy.machine_line = input.reason_code.to_string();
     copy
+}
+
+/// For bundle export accept only registered codes; a suffix match or neutral
+/// fallback for UI copy must not turn arbitrary input into a machine code.
+pub(crate) fn registered_diagnostic_triage(code: &str, fact: &str) -> Option<FailureTriage> {
+    let key = resolved_entry_key(canonical_key(code), Some(fact));
+    TABLE
+        .iter()
+        .find(|entry| entry.0 == key)
+        .map(|entry| entry.4)
 }
 
 /// `BootstrapFailure` / `AggregateIndexError` 形态（无 `action` 字段）的入口：

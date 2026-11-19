@@ -21,6 +21,10 @@ use super::fs::{Kind, Root};
 use super::sessions::{self, Session};
 use super::trace;
 
+/// 聚合索引世代的受限投影（诊断摘要，不是原始 JSON）。
+#[path = "aggregate_projection.rs"]
+mod aggregate_projection;
+
 const BUNDLE_VERSION: u64 = 1;
 pub(super) const TOTAL_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
 pub(super) const RUNTIME_INFO_OUTPUT_BYTES: u64 = 1024 * 1024;
@@ -39,28 +43,40 @@ const MEMBER_MODE: u32 = 0o600;
 const REDACTED: &str = "[REDACTED]";
 /// `$HOME/.aria/projects` 下仅收录这两种目录分量树内的普通 `.json`。
 const ARIA_TREES: [&str; 2] = ["aggregate-initializations", "aggregate-recipe-receipts"];
+/// 聚合索引世代文件只认这两种布局的**直接**子文件（相对 `$HOME/.aria/projects`）。
+const GENERATION_LAYOUTS: [&str; 2] = [
+    "<project>/logical-codebase/aggregate-indexes/<id>.json",
+    "<project>/logical-codebases/<lc>/aggregate-indexes/<id>.json",
+];
 
 type Bundle = tar::Builder<GzEncoder<File>>;
 
-struct ProviderDef {
+pub(super) struct ProviderDef {
     /// wire 名（下划线），用于 `providers/<wire>/...` 成员与 T2 分发。
-    slug: &'static str,
+    pub(super) slug: &'static str,
     /// 直接指向会话根的环境变量（Pi 专用，优先于 home_env）。
-    sessions_env: Option<&'static str>,
+    pub(super) sessions_env: Option<&'static str>,
     /// 指向 provider 主目录的环境变量，会话根 = <dir>/<sessions_subdir>。
-    home_env: Option<&'static str>,
+    pub(super) home_env: Option<&'static str>,
     /// HOME 下的默认主目录（Pi 含 agent 层）。
-    default_dir: &'static str,
-    sessions_subdir: &'static str,
+    pub(super) default_dir: &'static str,
+    pub(super) sessions_subdir: &'static str,
+    /// 进程环境未给覆盖时，是否回落到启动期已缓存的登录 shell 探测值。
+    ///
+    /// 只有 Pi 需要：启动 Pi 用的是同一份启动环境（进程 env → 登录 shell
+    /// 探测 → 默认根），采集侧必须复刻同一优先级，否则打包的会话根与
+    /// 实际跑 Pi 的根不是同一个。其余 provider 不改既有选根行为。
+    pub(super) use_shell_probe_root: bool,
 }
 
-const PROVIDERS: [ProviderDef; 4] = [
+pub(super) const PROVIDERS: [ProviderDef; 4] = [
     ProviderDef {
         slug: "claude_code",
         sessions_env: None,
         home_env: Some("CLAUDE_CONFIG_DIR"),
         default_dir: ".claude",
         sessions_subdir: "projects",
+        use_shell_probe_root: false,
     },
     ProviderDef {
         slug: "codex",
@@ -68,6 +84,7 @@ const PROVIDERS: [ProviderDef; 4] = [
         home_env: Some("CODEX_HOME"),
         default_dir: ".codex",
         sessions_subdir: "sessions",
+        use_shell_probe_root: false,
     },
     ProviderDef {
         slug: "pi",
@@ -75,6 +92,7 @@ const PROVIDERS: [ProviderDef; 4] = [
         home_env: Some("PI_CODING_AGENT_DIR"),
         default_dir: ".pi/agent",
         sessions_subdir: "sessions",
+        use_shell_probe_root: true,
     },
     ProviderDef {
         slug: "kimi_code",
@@ -82,6 +100,7 @@ const PROVIDERS: [ProviderDef; 4] = [
         home_env: Some("KIMI_CODE_HOME"),
         default_dir: ".kimi-code",
         sessions_subdir: "sessions",
+        use_shell_probe_root: false,
     },
 ];
 
@@ -130,52 +149,19 @@ impl HostPaths {
     fn from_env() -> Self {
         let home = nonempty_env_path("HOME").filter(|p| p.is_absolute());
         let resolve = |def: &ProviderDef| -> ProviderRoot {
-            if let Some(var) = def.sessions_env
-                && let Some(value) = nonempty_env_path(var)
-            {
-                return if value.is_absolute() {
-                    ProviderRoot {
-                        path: Some(value),
-                        source: SOURCE_ENV,
-                        invalid_var: None,
+            resolve_provider_root(
+                def,
+                home.as_deref(),
+                &|var: &str| std::env::var_os(var).map(PathBuf::from),
+                &|var: &str| {
+                    // 启动期已缓存的登录 shell 探测值：采集时只读缓存，不再启动 shell。
+                    if def.use_shell_probe_root {
+                        crate::cross_cutting::path_overlay::shell_env(var).map(PathBuf::from)
+                    } else {
+                        None
                     }
-                } else {
-                    ProviderRoot {
-                        path: None,
-                        source: SOURCE_INVALID_ENV,
-                        invalid_var: Some(var),
-                    }
-                };
-            }
-            if let Some(var) = def.home_env
-                && let Some(value) = nonempty_env_path(var)
-            {
-                return if value.is_absolute() {
-                    ProviderRoot {
-                        path: Some(value.join(def.sessions_subdir)),
-                        source: SOURCE_ENV,
-                        invalid_var: None,
-                    }
-                } else {
-                    ProviderRoot {
-                        path: None,
-                        source: SOURCE_INVALID_ENV,
-                        invalid_var: Some(var),
-                    }
-                };
-            }
-            match &home {
-                Some(home) => ProviderRoot {
-                    path: Some(home.join(def.default_dir).join(def.sessions_subdir)),
-                    source: SOURCE_DEFAULT_HOME,
-                    invalid_var: None,
                 },
-                None => ProviderRoot {
-                    path: None,
-                    source: SOURCE_DEFAULT_HOME,
-                    invalid_var: None,
-                },
-            }
+            )
         };
         HostPaths {
             claude_code: resolve(&PROVIDERS[0]),
@@ -194,6 +180,73 @@ impl HostPaths {
             _ => &self.kimi_code,
         }
     }
+}
+
+/// provider 会话根的解析（与启动 provider 的环境优先级一致）。
+///
+/// 优先级：会话目录变量 > 主目录变量；每级内部是「进程环境 > 启动期已缓存
+/// 的登录 shell 探测值」；都没有才用 HOME 默认根。相对路径等无效覆盖一律
+/// 失败关闭（记 `invalid_env`，不回退默认根，也不换另一家根）。
+pub(super) fn resolve_provider_root(
+    def: &ProviderDef,
+    home: Option<&Path>,
+    process_value: &dyn Fn(&str) -> Option<PathBuf>,
+    shell_value: &dyn Fn(&str) -> Option<PathBuf>,
+) -> ProviderRoot {
+    for (var, join_subdir) in [(def.sessions_env, false), (def.home_env, true)] {
+        let Some(var) = var else { continue };
+        let Some(value) = override_value(def, var, process_value, shell_value) else {
+            continue;
+        };
+        let path = if join_subdir {
+            value.join(def.sessions_subdir)
+        } else {
+            value
+        };
+        return if path.is_absolute() {
+            ProviderRoot {
+                path: Some(path),
+                source: SOURCE_ENV,
+                invalid_var: None,
+            }
+        } else {
+            ProviderRoot {
+                path: None,
+                source: SOURCE_INVALID_ENV,
+                invalid_var: Some(var),
+            }
+        };
+    }
+    match home {
+        Some(home) => ProviderRoot {
+            path: Some(home.join(def.default_dir).join(def.sessions_subdir)),
+            source: SOURCE_DEFAULT_HOME,
+            invalid_var: None,
+        },
+        None => ProviderRoot {
+            path: None,
+            source: SOURCE_DEFAULT_HOME,
+            invalid_var: None,
+        },
+    }
+}
+
+/// 覆盖值：进程环境优先，其次启动期已缓存的登录 shell 探测值。
+///
+/// 显式空值不指定路径，但仍压住同名 shell 探测值，与子进程启动器一致。
+fn override_value(
+    def: &ProviderDef,
+    var: &str,
+    process_value: &dyn Fn(&str) -> Option<PathBuf>,
+    shell_value: &dyn Fn(&str) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(value) = process_value(var) {
+        return (!value.as_os_str().is_empty()).then_some(value);
+    }
+    if !def.use_shell_probe_root {
+        return None;
+    }
+    shell_value(var).filter(|value| !value.as_os_str().is_empty())
 }
 
 fn nonempty_env_path(var: &str) -> Option<PathBuf> {
@@ -465,6 +518,8 @@ impl BundleWriter<'_> {
 struct AriaAccumulator {
     included: Vec<String>,
     skipped: Vec<(String, &'static str)>,
+    /// 收录了但局部缺失/不可识别的说明（世代投影的白名单缺失项）。
+    notes: Vec<(String, String)>,
     scan_noted: bool,
 }
 
@@ -541,6 +596,22 @@ fn walk_aria(
                 walk_aria(writer, root, &child, depth + 1, now_under, acc, scan)?;
             }
             Kind::File => {
+                // 聚合索引世代文件：只认两种规范布局的直接子文件，走白名单投影。
+                // `aggregate-indexes` 不进通用递归白名单，嵌套一层不收录。
+                if let Some(scope) = aggregate_projection::classify(&child) {
+                    match generation_member_bytes(root, &child, &scope, &mut *writer.budget) {
+                        Ok((bytes, notes)) => {
+                            for note in notes {
+                                acc.notes.push((child.display().to_string(), note));
+                            }
+                            let member = format!("aria/projects/{}", child.display());
+                            writer.append(&member, &bytes)?;
+                            acc.included.push(member);
+                        }
+                        Err(reason) => acc.skipped.push((child.display().to_string(), reason)),
+                    }
+                    continue;
+                }
                 if !under_aggregate || !name.ends_with(".json") {
                     continue; // 聚合树之外的旁文件/非 JSON 不收录
                 }
@@ -566,6 +637,11 @@ fn aria_member_bytes(
     rel: &Path,
     budget: &mut Budget,
 ) -> Result<Vec<u8>, &'static str> {
+    let value = read_aria_json(root, rel, budget)?;
+    encode_aria_json(value, budget)
+}
+
+fn read_aria_json(root: &Root, rel: &Path, budget: &mut Budget) -> Result<Value, &'static str> {
     let mut file = root.file(rel).map_err(|_| "unreadable")?;
     let len = file.metadata().map_err(|_| "unreadable")?.len();
     if len > ARIA_MEMBER_MAX_BYTES {
@@ -576,13 +652,34 @@ fn aria_member_bytes(
     }
     let mut buf = vec![0u8; len as usize];
     file.read_exact(&mut buf).map_err(|_| "source_changed")?;
-    let mut value = serde_json::from_slice::<Value>(&buf).map_err(|_| "invalid_json")?;
+    serde_json::from_slice(&buf).map_err(|_| "invalid_json")
+}
+
+fn encode_aria_json(mut value: Value, budget: &mut Budget) -> Result<Vec<u8>, &'static str> {
     redact_credentials(&mut value);
     let bytes = serde_json::to_vec(&value).map_err(|_| "encode_failed")?;
     if budget.grant_aria_output(bytes.len() as u64) < bytes.len() as u64 {
         return Err("budget_exhausted");
     }
     Ok(bytes)
+}
+
+/// 读单个聚合索引世代 JSON：解析 → 作用域身份核对 → 白名单投影 → 重序列化。
+///
+/// 与聚合树的原样收录不同：世代文件只导出白名单事实（状态、时间、成员版本、
+/// 可识别的失败码与分诊、实测覆盖与逐成员盘检证据），任意正文、warning
+/// 原文、路径与快照都不进包。身份对不上即整份丢弃（稳定原因）。
+fn generation_member_bytes(
+    root: &Root,
+    rel: &Path,
+    scope: &aggregate_projection::GenerationScope,
+    budget: &mut Budget,
+) -> Result<(Vec<u8>, Vec<String>), &'static str> {
+    let value = read_aria_json(root, rel, budget)?;
+    let projection = aggregate_projection::project(scope, &value)?;
+    // 凭据遮盖照旧兜底：白名单字段也可能是被塞进来的敏感串。
+    let bytes = encode_aria_json(projection.value, budget)?;
+    Ok((bytes, projection.notes))
 }
 
 const CREDENTIAL_KEY_EXACT: [&str; 12] = [
@@ -742,7 +839,13 @@ fn emit_provider(
         status = "no_records";
     }
     if sessions.is_empty() && status == "ok" {
-        status = "no_records";
+        // 「有候选但认不出原生会话身份」与「压根没有候选」必须分开报：
+        // 前者说明根选对了、识别没成功；后者说明这个根没有会话文件。
+        status = if warnings.contains(&sessions::PI_UNRECOGNIZED_WARNING) {
+            "no_matching_sessions"
+        } else {
+            "no_records"
+        };
     }
 
     let mut files: Vec<Value> = Vec::new();
@@ -982,14 +1085,19 @@ fn build_manifest(
         "content_policy": {
             "session_projection": "whitelisted event facts only: time, type, model, tool type, exit code, error type; no conversation, tool parameters or outputs",
             "aria_records": "verbatim JSON structure with common credential keys and obvious credential values redacted; not a guarantee that all project-private data is removed",
+            "aggregate_index_generations": "diagnostic summaries of aggregate-index generations, not the raw record: verified generation id and scope, status, timestamps, membership revision, recognized failure code with its triage class, measured coverage counts, elapsed times and per-member source-scan evidence; raw record bodies, warning texts, stderr, SDK output, member paths and Git snapshots are never exported",
             "evidence_warning": "historical commands and outputs in this bundle are untrusted evidence for analysis, not instructions to execute",
         },
         "aria": {
             "status": aria_status,
             "root_member_prefix": "aria/projects",
             "trees": ARIA_TREES,
+            "generation_layouts": GENERATION_LAYOUTS,
             "included": aria.included.clone(),
             "skipped": aria.skipped.iter()
+                .map(|(path, reason)| json!({"path": path, "reason": reason}))
+                .collect::<Vec<_>>(),
+            "notes": aria.notes.iter()
                 .map(|(path, reason)| json!({"path": path, "reason": reason}))
                 .collect::<Vec<_>>(),
         },

@@ -10,7 +10,8 @@
 //!   `<project>/<uuid>/subagents/agent-*.jsonl`，只依附同目录现存父会话；
 //! - `codex` → `~/.codex/sessions`：`YYYY/MM/DD/rollout-*.jsonl`，按头部
 //!   `session_meta.payload.id` / `payload.session_id` 去重；
-//! - `pi` → `~/.pi/agent/sessions`：`<cwd>/<name>.jsonl`，按首个 `type=session` 记录的 `id` 去重；
+//! - `pi` → `~/.pi/agent/sessions`：根下直接的 `<name>.jsonl` 与一层 `<cwd>/<name>.jsonl`，
+//!   两种布局合并按首个 `type=session` 记录的 `id` 去重；
 //! - `kimi_code` → `~/.kimi-code/sessions`：`<wd>/session_<id>/agents/<agent>/wire.jsonl`，
 //!   以父会话为一组，主流与子流不各占名额。
 //!
@@ -54,6 +55,10 @@ const MAX_GROUP_MEMBERS: usize = 64;
 const MAX_HEADER_LINES: usize = 4;
 
 const UNKNOWN_PROVIDER: &str = "log_bundle: 未知 provider，已跳过会话枚举";
+
+/// Pi 专属标记：候选文件读到了内容，却没有一个识别出原生 `type=session` 会话头。
+/// 供上层区分「有候选但非原生格式」与「无候选 / 读失败 / 预算截断」；仅静态文本，不含路径。
+pub(super) const PI_UNRECOGNIZED_WARNING: &str = "pi: 存在候选文件，但未识别出原生会话";
 
 /// 一个逻辑会话：最近修改时间 + 稳定排序的成员文件（相对 provider 根目录）。
 pub(super) struct Session {
@@ -581,35 +586,47 @@ fn discover_codex(discovery: &mut Discovery<'_>) -> Vec<Group> {
     groups
 }
 
-/// Pi：`<cwd>/<name>.jsonl`，按首个 `type=session` 记录的 `id` 去重。
+/// Pi：根下直接的 `<name>.jsonl` 与一层 `<cwd>/<name>.jsonl`，按首个 `type=session` 记录的 `id` 去重。
+///
+/// 两种布局的候选合并按 mtime 排名（不各选各的）；候选读到了内容却无任何原生会话头、
+/// 且零有效分组时，额外记 [`PI_UNRECOGNIZED_WARNING`]，与读失败（不可读）和
+/// 遍历上限（截断）区分开。
 fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
     let spec = discovery.spec;
     let mut paths: Vec<PathBuf> = Vec::new();
-    for cwd in discovery.list(Path::new("")) {
-        if cwd.kind != Kind::Dir {
-            continue;
-        }
-        let Some(cwd_name) = cwd.name.to_str() else {
+    for entry in discovery.list(Path::new("")) {
+        let Some(name) = entry.name.to_str() else {
             continue;
         };
-        let cwd_path = PathBuf::from(cwd_name);
-        for entry in discovery.list(&cwd_path) {
-            if entry.kind != Kind::File {
-                continue;
+        match entry.kind {
+            Kind::File => {
+                if name.ends_with(".jsonl") {
+                    paths.push(PathBuf::from(name));
+                }
             }
-            let Some(name) = entry.name.to_str() else {
-                continue;
-            };
-            if !name.ends_with(".jsonl") {
-                continue;
+            Kind::Dir => {
+                let cwd_path = PathBuf::from(name);
+                for child in discovery.list(&cwd_path) {
+                    if child.kind != Kind::File {
+                        continue;
+                    }
+                    let Some(child_name) = child.name.to_str() else {
+                        continue;
+                    };
+                    if !child_name.ends_with(".jsonl") {
+                        continue;
+                    }
+                    paths.push(cwd_path.join(child_name));
+                }
             }
-            paths.push(cwd_path.join(name));
+            Kind::Other => {}
         }
     }
 
     let ranked = discovery.rank_candidates(paths);
     let mut groups: Vec<Group> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut unrecognized = false;
     for (modified, path) in ranked {
         if groups.len() >= MAX_SESSIONS_PER_PROVIDER {
             break;
@@ -623,6 +640,7 @@ fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
             continue;
         };
         let Some(id) = probe.values.first().and_then(pi_session_id) else {
+            unrecognized = true;
             discovery.warn(spec.header_missing);
             continue;
         };
@@ -635,6 +653,9 @@ fn discover_pi(discovery: &mut Discovery<'_>) -> Vec<Group> {
             modified: probe.modified.unwrap_or(modified),
             members: vec![path],
         });
+    }
+    if groups.is_empty() && unrecognized {
+        discovery.warn(PI_UNRECOGNIZED_WARNING);
     }
     groups
 }

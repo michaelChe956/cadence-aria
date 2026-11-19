@@ -170,14 +170,10 @@ export function useLogicalCodebaseScopeData({
         setLogicalCodebaseMembers(membersResponse.members ?? []);
         setAggregateInitialization(activeInitialization);
         setPointerPublications(publicationResponse ?? []);
-        setAggregateIndex(
-          (membersResponse.members ?? []).length > 0
-            ? await getActiveAggregateIndex(
-                selectedProjectId,
-                activeLogicalCodebaseId,
-              )
-            : null,
-        );
+        const projection = (membersResponse.members ?? []).length > 0
+          ? await getActiveAggregateIndex(selectedProjectId, activeLogicalCodebaseId)
+          : null;
+        if (!disposed) setAggregateIndex(projection);
       } catch {
         // LC 作用域数据加载失败保持现状，交由全局 refresh 重试。
       }

@@ -243,6 +243,7 @@ mod tests {
             command_id: None,
             supersedes_aggregate_index_id: None,
             warning: None,
+            source_scan: None,
         }
     }
 

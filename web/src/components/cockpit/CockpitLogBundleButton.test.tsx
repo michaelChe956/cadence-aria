@@ -90,8 +90,8 @@ describe("CockpitLogBundleButton", () => {
 
     expect(screen.getByText("将收集的内容")).toBeInTheDocument();
     expect(screen.getByText(/运行 Aria 的宿主账号/)).toBeInTheDocument();
-    expect(screen.getByText(/两类 JSON/)).toBeInTheDocument();
-    expect(screen.getByText(/四家各最近 3 个会话/)).toBeInTheDocument();
+    expect(screen.getByText(/聚合索引世代.*诊断摘要/)).toBeInTheDocument();
+    expect(screen.getByText(/四家各最近最多 3 个可识别会话/)).toBeInTheDocument();
     expect(screen.getByText(/不含对话、源码或命令正文/)).toBeInTheDocument();
     expect(screen.getByText(/workspace_root/)).toBeInTheDocument();
     expect(screen.getByText(/自行分享/)).toBeInTheDocument();

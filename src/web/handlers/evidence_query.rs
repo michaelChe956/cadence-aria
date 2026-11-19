@@ -483,6 +483,7 @@ mod tests {
             project_id: PROJECT_ID.to_string(),
             membership_revision: 1,
             status: AggregateIndexStatus::Active,
+            source_scan: None,
             command_id: None,
             member_snapshots: vec![
                 AggregateIndexMemberSnapshot::indexed(
