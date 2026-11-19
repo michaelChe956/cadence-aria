@@ -2,7 +2,7 @@
 
 ### Requirement: 同一实例与限定记录
 
-归档 MUST 含与该实例 `GET /api/runtime-info` 同一来源、字段和值一致的 `runtime-info.json`。Aria 记录只读取宿主 `$HOME/.aria/projects` 下允许的普通 JSON：`aggregate-initializations` 和 `aggregate-recipe-receipts` 树按原规则；另对项目作用域下 `aggregate-indexes` 的世代文件仅导出诊断字段白名单投影。不得导出任意 warning 正文、成员路径、Git 快照正文、配置或命令；原有授权、大小预算、manifest 和不跟随链接的约束不变。
+归档 MUST 含与该实例 `GET /api/runtime-info` 同源且值相同的 `runtime-info.json`。Aria 记录 MUST 仅来自宿主 `$HOME/.aria/projects` 下的普通 `.json`：目录分量为 `aggregate-initializations` 或 `aggregate-recipe-receipts` 的树仍按既有规则收录；新增一类仅限 `<project>/logical-codebase/aggregate-indexes/<id>.json` 与 `<project>/logical-codebases/<lc>/aggregate-indexes/<id>.json` 的直接世代摘要。新增投影只允许已核实的世代身份、状态、时间、成员版本、可识别的失败码/事实类型、实测覆盖数量、耗时及逐成员盘检证据。不导出任意 warning 正文、stderr、SDK 输出、成员路径或 Git 快照正文；授权、大小预算与不跟随链接的约束不变。
 
 #### Scenario: 嵌套回执与其他旁文件
 
@@ -13,6 +13,7 @@
 
 - **WHEN** 索引世代保存了失败事实与盘检诊断
 - **THEN** 下载包能对上同一次重建的 ID、状态、时间、已知失败类型和诊断；缺字段的旧世代不得伪造原因，未知字段不原样回退，清单区分未收录与收录
+- **AND** 清单应说明这类条目是诊断摘要而非原始 JSON。保留实际世代状态；被写入 LKG 的另一代错误不是该 LKG 自身的盘检证据。
 
 ## ADDED Requirements
 
