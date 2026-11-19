@@ -311,3 +311,101 @@ fn describe_envelope_keeps_member_naming_from_the_envelope_fact() {
     );
     assert!(!plain.reason_zh.contains("msha-sdk"), "{}", plain.reason_zh);
 }
+
+/// 多个可读世代并存（`aggregate_index_active_ambiguous`）：成因是**连续重建失败**
+/// 留下的多条同状态记录，不是「内部状态异常」；处置是修好失败原因后成功重建一次。
+#[test]
+fn active_ambiguous_code_blames_failed_rebuilds_not_internal_corruption() {
+    let copy = describe_code("aggregate_index_active_ambiguous", None);
+    assert!(
+        copy.title_zh.contains("可读索引世代"),
+        "标题应点名可读世代：{}",
+        copy.title_zh
+    );
+    assert!(
+        !copy.title_zh.contains("多个活跃聚合索引"),
+        "标题不得沿用旧措辞：{}",
+        copy.title_zh
+    );
+    assert!(
+        copy.reason_zh.contains("连续重建失败"),
+        "原因应点名连续重建失败：{}",
+        copy.reason_zh
+    );
+    assert!(
+        !copy.reason_zh.contains("内部状态异常"),
+        "原因不得沿用「内部状态异常」：{}",
+        copy.reason_zh
+    );
+    assert!(
+        copy.action_zh.contains("重建索引"),
+        "动作应指向重建索引：{}",
+        copy.action_zh
+    );
+    assert!(
+        copy.action_zh.contains("不会自动收敛"),
+        "动作应说明失败重建不会自动收敛：{}",
+        copy.action_zh
+    );
+    assert!(
+        copy.action_zh.contains("不要手工删除"),
+        "动作应禁止手工删除记录：{}",
+        copy.action_zh
+    );
+    assert_eq!(copy.triage, FailureTriage::Environment);
+    assert_eq!(copy.machine_line, "aggregate_index_active_ambiguous");
+}
+
+/// 没有任何可读世代（`aggregate_index_active_missing`）：必须已登记，
+/// 不得落进中性兜底。
+#[test]
+fn active_missing_code_is_registered_and_not_neutral_fallback() {
+    let copy = describe_code("aggregate_index_active_missing", None);
+    assert!(
+        copy.title_zh.contains("没有可用的聚合索引"),
+        "标题应说明当前没有可用索引：{}",
+        copy.title_zh
+    );
+    assert!(
+        copy.reason_zh.contains("可读的索引世代"),
+        "原因应说明没有可读世代：{}",
+        copy.reason_zh
+    );
+    assert!(
+        !copy.reason_zh.contains("当前无法确定具体原因"),
+        "已登记的码不得落进中性兜底原因：{}",
+        copy.reason_zh
+    );
+    assert!(
+        !copy.action_zh.contains("请重试；连续两次仍失败时"),
+        "已登记的码不得落进中性兜底动作：{}",
+        copy.action_zh
+    );
+    assert!(
+        copy.action_zh.contains("重建索引"),
+        "动作应指向重建索引：{}",
+        copy.action_zh
+    );
+    assert_eq!(copy.triage, FailureTriage::Environment);
+    assert_eq!(copy.machine_line, "aggregate_index_active_missing");
+}
+
+/// 这两个码都不是布局码：不得进布局规则表（十个布局码的集合与断言保持不变）。
+#[test]
+fn active_ambiguous_and_missing_are_not_layout_codes() {
+    for code in [
+        "aggregate_index_active_ambiguous",
+        "aggregate_index_active_missing",
+    ] {
+        assert!(
+            !LAYOUT_RULES.iter().any(|rule| rule.codes.contains(&code)),
+            "{code} 不得出现在布局规则表里"
+        );
+        let copy = describe_code(code, None);
+        assert!(
+            !copy.follows_layout_rule(),
+            "{code} 不得命中布局失败面：{}",
+            copy.reason_zh
+        );
+    }
+}
