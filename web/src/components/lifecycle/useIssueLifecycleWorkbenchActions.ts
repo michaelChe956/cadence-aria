@@ -18,8 +18,6 @@ type Args = {
   latestPointerPublication: PointerPublicationDto | null;
   aggregateInitialization: AggregateInitializationOperationSnapshot | null;
   selectedLogicalCodebaseId: string | null;
-  setSelectedProjectId: Dispatch<SetStateAction<string | null>>;
-  setFocusedIssueId: Dispatch<SetStateAction<string | null>>;
   setSelectedCardKey: Dispatch<SetStateAction<string | null>>;
   setSelectedLogicalCodebaseId: Dispatch<SetStateAction<string | null>>;
   setError: Dispatch<SetStateAction<string | null>>;
@@ -34,8 +32,8 @@ type Args = {
 
 export function useIssueLifecycleWorkbenchActions({
   selectedProjectId, activeLogicalCodebaseId, latestPointerPublication,
-  aggregateInitialization, selectedLogicalCodebaseId, setSelectedProjectId,
-  setFocusedIssueId, setSelectedCardKey, setSelectedLogicalCodebaseId, setError,
+  aggregateInitialization, selectedLogicalCodebaseId, setSelectedCardKey,
+  setSelectedLogicalCodebaseId, setError,
   setPointerPublicationBusy, setPointerPublications, setAggregateIndex, setAggregateIndexRebuilding,
   setAggregateInitialization, setAggregateInitializationBusy, refresh,
 }: Args) {
@@ -231,12 +229,7 @@ export function useIssueLifecycleWorkbenchActions({
     setError(null);
     try {
       await deleteProject(projectId, { confirmed: true });
-      if (projectId === selectedProjectId) {
-        setSelectedProjectId(null);
-        setFocusedIssueId(null);
-        setSelectedCardKey(null);
-      }
-      await refresh(null);
+      await refresh();
     } catch (reason) {
       setError(errorMessage(reason, "删除 Project 失败"));
     }

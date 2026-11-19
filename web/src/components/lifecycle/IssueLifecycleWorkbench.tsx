@@ -173,7 +173,7 @@ export function IssueLifecycleWorkbench({
     useState<PendingWorkItemPlanLaunch | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { details, detailErrors, clearDetails, hydrateDetails, prioritizeDetails } =
+  const { details, detailErrors, clearDetails, hydrateDetails, prioritizeDetails, refreshDeletedIssueDetails } =
     useWorkbenchLifecycleDetails();
   const [pointerPublicationBusy, setPointerPublicationBusy] = useState(false);
   const [aggregateIndexRebuilding, setAggregateIndexRebuilding] =
@@ -200,6 +200,7 @@ export function IssueLifecycleWorkbench({
     Record<string, boolean>
   >({});
   const refreshRequestId = useRef(0);
+  const activeProjectId = useRef<string | null>(null);
   const pendingProjectSelection = useRef<string | null>(null);
   const createdIssuesRef = useRef<ProductIssue[]>([]);
   // N6：多仓 plan 一键启动的幂等 command（同动作重试复用）与在途防抖。
@@ -253,13 +254,20 @@ export function IssueLifecycleWorkbench({
     onDrawerFocusChange(isDrawerOpen ? drawerFocusedEntityKey : null);
   }, [drawerFocusedEntityKey, isDrawerOpen, onDrawerFocusChange]);
 
+  function isCurrentProject(projectId: string) {
+    return activeProjectId.current === projectId;
+  }
+
   async function refresh(
-    projectIdOverride?: string | null,
+    sourceProjectId?: string | null,
     optimisticIssues: readonly ProductIssue[] = [],
   ) {
+    // A completed action may refresh its own project, but cannot navigate back to it.
+    if (sourceProjectId && (!isCurrentProject(sourceProjectId) ||
+      (pendingProjectSelection.current !== null && pendingProjectSelection.current !== sourceProjectId))) return;
     const requestId = refreshRequestId.current + 1;
     refreshRequestId.current = requestId;
-    const requestedProjectId = pendingProjectSelection.current ?? projectIdOverride;
+    const requestedProjectId = pendingProjectSelection.current ?? activeProjectId.current;
 
     setBusy(true);
     setError(null);
@@ -269,16 +277,11 @@ export function IssueLifecycleWorkbench({
         return;
       }
 
-      const projectId =
-        requestedProjectId ??
-        (selectedProjectId &&
-        projectResponse.projects.some(
-          (project) => project.project_id === selectedProjectId,
-        )
-          ? selectedProjectId
-          : projectResponse.projects[0]?.project_id) ??
-        null;
-      const projectChanged = projectId !== selectedProjectId;
+      const projectId = requestedProjectId && projectResponse.projects.some(
+        (project) => project.project_id === requestedProjectId,
+      ) ? requestedProjectId : (projectResponse.projects[0]?.project_id ?? null);
+      const projectChanged = projectId !== activeProjectId.current;
+      activeProjectId.current = projectId;
       setProjects(projectResponse.projects);
       setSelectedProjectId(projectId);
       if (projectChanged) {
@@ -289,6 +292,7 @@ export function IssueLifecycleWorkbench({
         setDeletedLogicalCodebases([]);
         setFocusedIssueId(null);
         setSelectedCardKey(null);
+        setDeletingCardKey(null);
         setSelectedLogicalCodebaseId(null);
         setAggregateInitialization(null);
       }
@@ -551,8 +555,6 @@ export function IssueLifecycleWorkbench({
     latestPointerPublication,
     aggregateInitialization,
     selectedLogicalCodebaseId,
-    setSelectedProjectId,
-    setFocusedIssueId,
     setSelectedCardKey,
     setSelectedLogicalCodebaseId,
     setError,
@@ -643,7 +645,7 @@ export function IssueLifecycleWorkbench({
       return;
     }
     pendingProjectSelection.current = projectId;
-    await refresh(projectId);
+    await refresh();
   }
 
   function handleSelectCard(card: LifecycleCardData) {
@@ -908,7 +910,8 @@ export function IssueLifecycleWorkbench({
   async function handleCreateProject(payload: CreateProjectPayload) {
     const project = await createProject(payload);
     setProjectDialogOpen(false);
-    await refresh(project.project_id);
+    pendingProjectSelection.current = project.project_id;
+    await refresh();
   }
 
 
@@ -919,9 +922,8 @@ export function IssueLifecycleWorkbench({
     handleDeleteAllCodingWorkspacesFromDrawer,
   } = useIssueLifecycleWorkbenchDeletion({
     selectedProjectId,
-    focusedIssueId,
-    selectedCardKey,
-    drawerFocusedEntityKey,
+    isCurrentProject,
+    refreshDeletedIssueDetails,
     groupCodingDeleteBusy,
     planGroupDeleteRef,
     setError,

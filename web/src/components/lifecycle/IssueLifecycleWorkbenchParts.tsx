@@ -112,7 +112,7 @@ export function IssueLifecycleDetail({
     issueId: string | null;
     stage: WorkbenchStageKey;
   }>({ issueId, stage: defaultStage });
-  if (stageSelection.issueId !== issueId) {
+  if (stageSelection.issueId !== issueId && stageSelection.issueId !== unloadedIssue?.issue_id) {
     // props 派生 state 的 render 阶段调整（React 推荐写法，无额外提交）。
     setStageSelection({ issueId, stage: defaultStage });
   }
