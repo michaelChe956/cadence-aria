@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ProductIssueListResponse } from "../../api/types";
+import type { IssueLifecycleResponse, ProductIssueListResponse } from "../../api/types";
 import { IssueLifecycleWorkbench } from "./IssueLifecycleWorkbench";
 import {
   deferred,
@@ -159,6 +159,8 @@ describe("IssueLifecycleWorkbench mutation refresh", () => {
       projects: [projectRecord("project_0001", "Alpha"), projectRecord("project_0002", "Beta")],
       issueTitlesByProject: { project_0001: "Alpha issue", project_0002: "Beta issue" },
     });
+    const original: IssueLifecycleResponse = await (await baseFetch(ALPHA_DETAIL)).json();
+    let replacement: IssueLifecycleResponse | undefined;
     let projectReads = 0;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input);
@@ -166,6 +168,10 @@ describe("IssueLifecycleWorkbench mutation refresh", () => {
       if (path === PROJECTS) {
         projectReads += 1;
         if (projectReads === 2) return pendingNavigation.promise;
+      }
+      if (replacement && path === ALPHA_DETAIL) return jsonResponse(replacement);
+      if (replacement && path === "/api/projects/project_0001/issues") {
+        return jsonResponse({ issues: [replacement.issue] });
       }
       return baseFetch(input, init);
     });
@@ -194,5 +200,10 @@ describe("IssueLifecycleWorkbench mutation refresh", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("项目目录读取失败");
     expect(screen.queryByRole("button", { name: "选择 Issue Alpha issue" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "删除 Issue Alpha issue" })).not.toBeInTheDocument();
+
+    // The server can reuse a deleted issue ID. A fresh read must show the new record.
+    replacement = { ...original, issue: { ...original.issue, title: "Replacement Alpha issue" } };
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    expect(await screen.findByRole("button", { name: "选择 Issue Replacement Alpha issue" })).toBeEnabled();
   });
 });

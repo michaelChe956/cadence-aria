@@ -96,7 +96,7 @@ describe("IssueLifecycleWorkbench 创建/删除 Project 请求次序竞争（202
     vi.restoreAllMocks();
   });
 
-  it("创建 Gamma 未决时取消弹窗并显式切换 Beta：迟到的创建完成不得劫持 Beta 目的地", async () => {
+  it.each([true, false])("创建 Gamma 与切换 Beta 重叠时只对在途目录合并回执（创建先返回：%s）", async (createFirst) => {
     const pendingCreate = deferred<Response>();
     const betaDirectoryGet = deferred<Response>();
     const baseFetch = lifecycleFetch({
@@ -146,6 +146,10 @@ describe("IssueLifecycleWorkbench 创建/删除 Project 请求次序竞争（202
     await user.click(beta);
     const directoryBeforeCreate = await baseFetch("/api/projects");
 
+    if (!createFirst) {
+      await act(async () => betaDirectoryGet.resolve(directoryBeforeCreate));
+      await within(detail).findByRole("heading", { name: "Beta issue" });
+    }
     // 创建 Gamma 先于 Beta 的目录 GET 完成，再放行 Beta 的目录读取。
     await act(async () => {
       pendingCreate.resolve(
@@ -155,9 +159,9 @@ describe("IssueLifecycleWorkbench 创建/删除 Project 请求次序竞争（202
         }),
       );
     });
-    await act(async () => {
-      betaDirectoryGet.resolve(directoryBeforeCreate);
-    });
+    if (createFirst) {
+      await act(async () => betaDirectoryGet.resolve(directoryBeforeCreate));
+    }
 
     expect(screen.getByRole("button", { name: "Beta" })).toHaveAttribute(
       "aria-pressed",
@@ -170,6 +174,13 @@ describe("IssueLifecycleWorkbench 创建/删除 Project 请求次序竞争（202
     const gamma = screen.getByRole("button", { name: "Gamma" });
     expect(gamma).toBeInTheDocument();
     expect(gamma).toHaveAttribute("aria-pressed", "false");
+    if (!createFirst) {
+      // A later read must reflect a deletion from another tab, not the old create receipt.
+      await baseFetch("/api/projects/project_0003?confirmed=true", { method: "DELETE" });
+      await user.click(screen.getByRole("button", { name: "刷新" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "Beta" })).toBeEnabled());
+      expect(screen.queryByRole("button", { name: "Gamma" })).not.toBeInTheDocument();
+    }
   });
 
   it("删除当前 Aria 成功但紧随目录读取失败：旧行与旧 Issue 内容消失且保留读取错误", async () => {
@@ -225,5 +236,43 @@ describe("IssueLifecycleWorkbench 创建/删除 Project 请求次序竞争（202
     ).not.toBeInTheDocument();
     // 清理之后列表读取错误仍然展示（不被吞掉）。
     expect(screen.getByRole("alert")).toHaveTextContent("项目目录读取失败");
+  });
+
+  it("删除回退后已选中的 Alpha 时重新选择存活项目，不等旧下游读取", async () => {
+    const pendingDelete = deferred<Response>();
+    const fallbackIssues = deferred<Response>();
+    const fallbackStarted = deferred<void>();
+    const deletePath = "/api/projects/project_0001?confirmed=true";
+    const baseFetch = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Alpha"), projectRecord("project_0002", "Beta"), projectRecord("project_0003", "Gamma")],
+    });
+    let holdAlphaIssues = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === deletePath && init?.method === "DELETE") return pendingDelete.promise;
+      if (holdAlphaIssues && path === "/api/projects/project_0001/issues") {
+        fallbackStarted.resolve();
+        return fallbackIssues.promise;
+      }
+      return baseFetch(input, init);
+    }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    render(<IssueLifecycleWorkbench />);
+    const deleteAlpha = await screen.findByRole("button", { name: "删除 Project Alpha" });
+    await waitFor(() => expect(deleteAlpha).toBeEnabled());
+    await user.click(deleteAlpha);
+
+    // Beta disappears before its switch request. The directory commits Alpha as fallback.
+    await baseFetch("/api/projects/project_0002?confirmed=true", { method: "DELETE" });
+    holdAlphaIssues = true;
+    await user.click(screen.getByRole("button", { name: "Beta" }));
+    await fallbackStarted.promise;
+    expect(screen.getByRole("button", { name: "Alpha" })).toHaveAttribute("aria-pressed", "true");
+
+    await act(async () => pendingDelete.resolve(await baseFetch(deletePath, { method: "DELETE" })));
+    expect(screen.getByRole("button", { name: "Gamma" })).toHaveAttribute("aria-pressed", "true");
+    await act(async () => fallbackIssues.resolve(await baseFetch("/api/projects/project_0001/issues")));
+    expect(screen.getByRole("button", { name: "Gamma" })).toHaveAttribute("aria-pressed", "true");
   });
 });
