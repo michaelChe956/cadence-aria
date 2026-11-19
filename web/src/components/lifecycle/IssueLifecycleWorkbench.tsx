@@ -947,13 +947,12 @@ export function IssueLifecycleWorkbench({
   function handleProjectDeleted(projectId: string) {
     refreshReconcileRef.current.projectChanges?.set(projectId, null);
     setProjects((existing) => existing.filter((p) => p.project_id !== projectId));
+    if (activeProjectId.current !== projectId) return false;
     const switching = pendingProjectSelection.current !== null &&
       pendingProjectSelection.current !== projectId;
-    if (activeProjectId.current === projectId) {
-      activeProjectId.current = null;
-      setSelectedProjectId(null);
-      resetProjectScopeState();
-    }
+    activeProjectId.current = null;
+    setSelectedProjectId(null);
+    resetProjectScopeState();
     return !switching;
   }
 

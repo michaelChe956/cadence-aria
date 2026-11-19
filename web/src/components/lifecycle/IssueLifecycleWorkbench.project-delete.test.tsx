@@ -275,4 +275,45 @@ describe("IssueLifecycleWorkbench 创建/删除 Project 请求次序竞争（202
     await act(async () => fallbackIssues.resolve(await baseFetch("/api/projects/project_0001/issues")));
     expect(screen.getByRole("button", { name: "Gamma" })).toHaveAttribute("aria-pressed", "true");
   });
+
+  it("旧项目的删除回执不会使已选中的 Beta 加载失效", async () => {
+    const pendingDelete = deferred<Response>();
+    const pendingBetaIssues = deferred<Response>();
+    const betaIssuesStarted = deferred<void>();
+    const deletePath = "/api/projects/project_0001?confirmed=true";
+    const betaIssuesPath = "/api/projects/project_0002/issues";
+    const baseFetch = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Alpha"), projectRecord("project_0002", "Beta")],
+      issueTitlesByProject: { project_0002: "Beta issue" },
+    });
+    let alphaDeleted = false;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path === deletePath && init?.method === "DELETE") return pendingDelete.promise;
+      if (path === betaIssuesPath) {
+        betaIssuesStarted.resolve();
+        return pendingBetaIssues.promise;
+      }
+      if (path === "/api/projects" && alphaDeleted) return new Response("{}", { status: 503 });
+      return baseFetch(input, init);
+    }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const user = userEvent.setup();
+    render(<IssueLifecycleWorkbench />);
+    const deleteAlpha = await screen.findByRole("button", { name: "删除 Project Alpha" });
+    await waitFor(() => expect(deleteAlpha).toBeEnabled());
+    await user.click(deleteAlpha);
+    await user.click(screen.getByRole("button", { name: "Beta" }));
+    await betaIssuesStarted.promise;
+    expect(screen.getByRole("button", { name: "Beta" })).toHaveAttribute("aria-pressed", "true");
+
+    await act(async () => {
+      const receipt = await baseFetch(deletePath, { method: "DELETE" });
+      alphaDeleted = receipt.ok;
+      pendingDelete.resolve(receipt);
+    });
+    await act(async () => pendingBetaIssues.resolve(await baseFetch(betaIssuesPath)));
+    expect(await screen.findByRole("button", { name: "选择 Issue Beta issue" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Alpha" })).not.toBeInTheDocument();
+  });
 });
