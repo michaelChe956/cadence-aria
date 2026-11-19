@@ -24,6 +24,7 @@ import {
 type Args = {
   selectedProjectId: string | null;
   isCurrentProject: (projectId: string) => boolean;
+  onIssueDeleted: (projectId: string, issueId: string) => void;
   refreshDeletedIssueDetails: (projectId: string, issueId: string) => void;
   groupCodingDeleteBusy: boolean;
   planGroupDeleteRef: RefObject<{ planId: string; commandId: string } | null>;
@@ -42,6 +43,7 @@ type Args = {
 export function useIssueLifecycleWorkbenchDeletion({
   selectedProjectId,
   isCurrentProject,
+  onIssueDeleted,
   refreshDeletedIssueDetails,
   groupCodingDeleteBusy,
   planGroupDeleteRef,
@@ -67,9 +69,18 @@ export function useIssueLifecycleWorkbenchDeletion({
           deleteProductIssue(selectedProjectId, issueId),
           waitForDeleteExitAnimation(),
         ]);
+        // PR #91：删除回执先于一切 scope 早退——DELETE 成功即通知 workbench
+        // 移除该 Project 下的 Issue 行，即便随后的刷新被在途导航让位跳过，
+        // 导航失败回退后也不得把已删除 Issue 留在队列；失败/取消不回执。
+        onIssueDeleted(selectedProjectId, issueId);
         if (!isCurrentProject(selectedProjectId)) return;
         setFocusedIssueId((current) => current === issueId ? null : current);
         setSelectedCardKey((current) => current?.split(":")[1] === issueId ? null : current);
+        // 仅当前 Project：抽屉键 kind:issueId:entityId 命中被删 Issue 才关闭，
+        // 其他 Issue/其他 Project 的抽屉（含早退拦下的同 ID 抽屉）不受影响。
+        if (useLifecycleWorkbenchStore.getState().focusedEntityKey?.split(":")[1] === issueId) {
+          closeDrawer();
+        }
         await refresh(selectedProjectId);
       } catch (reason) {
         if (isCurrentProject(selectedProjectId)) setError(errorMessage(reason, "删除 Issue 失败"));

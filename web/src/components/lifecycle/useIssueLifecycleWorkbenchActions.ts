@@ -28,6 +28,8 @@ type Args = {
   setAggregateInitialization: Dispatch<SetStateAction<AggregateInitializationOperationSnapshot | null>>;
   setAggregateInitializationBusy: Dispatch<SetStateAction<boolean>>;
   refresh: (projectId?: string | null) => Promise<void>;
+  /** PR #91：Project 删除确认回执；返回是否需补一次目录刷新（在途显式切换为 false）。 */
+  onProjectDeleted: (projectId: string) => boolean;
 };
 
 export function useIssueLifecycleWorkbenchActions({
@@ -35,7 +37,7 @@ export function useIssueLifecycleWorkbenchActions({
   aggregateInitialization, selectedLogicalCodebaseId, setSelectedCardKey,
   setSelectedLogicalCodebaseId, setError,
   setPointerPublicationBusy, setPointerPublications, setAggregateIndex, setAggregateIndexRebuilding,
-  setAggregateInitialization, setAggregateInitializationBusy, refresh,
+  setAggregateInitialization, setAggregateInitializationBusy, refresh, onProjectDeleted,
 }: Args) {
   // 2026-11-19：重建聚合索引的在途失效令牌与挂载位——作用域切换（含 A→B→A）
   // 或新一次重建开始都会作废旧请求的全部逻辑写入（busy/错误/卡片）；卸载后
@@ -229,7 +231,11 @@ export function useIssueLifecycleWorkbenchActions({
     setError(null);
     try {
       await deleteProject(projectId, { confirmed: true });
-      await refresh();
+      // PR #91：回执先落地（目录剔除/作用域清理/在途快照防复活）再补读；
+      // 用户已显式切换到其它 Project 时其刷新在途，不再重复刷新目录。
+      if (onProjectDeleted(projectId)) {
+        await refresh();
+      }
     } catch (reason) {
       setError(errorMessage(reason, "删除 Project 失败"));
     }

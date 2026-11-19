@@ -203,6 +203,14 @@ export function IssueLifecycleWorkbench({
   const activeProjectId = useRef<string | null>(null);
   const pendingProjectSelection = useRef<string | null>(null);
   const createdIssuesRef = useRef<ProductIssue[]>([]);
+  // PR #91：导航意图单调递增（显式选择推进；创建 POST 前捕获）。ref 承载
+  // 瞬态和解数据（仅内存、按次消费）：projectChanges=已确认目录变更（记录/
+  // null=已删）；issueListGuard=已删 Issue 一次性同 Project 列表过滤。
+  const navigationIntentRef = useRef(0);
+  const refreshReconcileRef = useRef({
+    projectChanges: new Map<string, Project | null>(),
+    issueListGuard: null as { projectId: string; deletedIssueIds: Set<string> } | null,
+  });
   // N6：多仓 plan 一键启动的幂等 command（同动作重试复用）与在途防抖。
   const planCodingStartRef = useRef<{ planId: string; commandId: string } | null>(null);
   const planCodingStartInFlightRef = useRef(false);
@@ -258,6 +266,20 @@ export function IssueLifecycleWorkbench({
     return activeProjectId.current === projectId;
   }
 
+  // PR #91：Project 作用域 UI 重置（原 projectChanged 分支抽出，共用清单）。
+  function resetProjectScopeState() {
+    clearDetails();
+    setIssueList(null);
+    setRepositories([]);
+    setCodebases([]);
+    setDeletedLogicalCodebases([]);
+    setFocusedIssueId(null);
+    setSelectedCardKey(null);
+    setDeletingCardKey(null);
+    setSelectedLogicalCodebaseId(null);
+    setAggregateInitialization(null);
+  }
+
   async function refresh(
     sourceProjectId?: string | null,
     optimisticIssues: readonly ProductIssue[] = [],
@@ -277,39 +299,29 @@ export function IssueLifecycleWorkbench({
         return;
       }
 
-      const projectId = requestedProjectId && projectResponse.projects.some(
+      // PR #91：先合并已确认目录变更再定作用域与落盘，防更早发出的陈旧快照复活已确认的创建/删除；仅最新读取消费即清空（内存瞬态）。
+      const confirmedChanges = refreshReconcileRef.current.projectChanges;
+      const directoryById = new Map(projectResponse.projects.map((p) => [p.project_id, p]));
+      for (const [changedId, confirmed] of confirmedChanges) {
+        if (confirmed) directoryById.set(changedId, confirmed);
+        else directoryById.delete(changedId);
+      }
+      confirmedChanges.clear();
+      const reconciledProjects = [...directoryById.values()];
+      const projectId = requestedProjectId && reconciledProjects.some(
         (project) => project.project_id === requestedProjectId,
-      ) ? requestedProjectId : (projectResponse.projects[0]?.project_id ?? null);
+      ) ? requestedProjectId : (reconciledProjects[0]?.project_id ?? null);
       const projectChanged = projectId !== activeProjectId.current;
       activeProjectId.current = projectId;
-      setProjects(projectResponse.projects);
+      setProjects(reconciledProjects);
       setSelectedProjectId(projectId);
-      if (projectChanged) {
-        clearDetails();
-        setIssueList(null);
-        setRepositories([]);
-        setCodebases([]);
-        setDeletedLogicalCodebases([]);
-        setFocusedIssueId(null);
-        setSelectedCardKey(null);
-        setDeletingCardKey(null);
-        setSelectedLogicalCodebaseId(null);
-        setAggregateInitialization(null);
-      }
+      if (projectChanged) resetProjectScopeState();
 
       if (!projectId) {
-        setRepositories([]);
-        setCodebases([]);
-        setDeletedLogicalCodebases([]);
-        clearDetails();
-        setIssueList(null);
+        resetProjectScopeState();
         setPointerPublications([]);
         setLogicalCodebaseMembers([]);
         setAggregateIndex(null);
-        setSelectedLogicalCodebaseId(null);
-        setAggregateInitialization(null);
-        setFocusedIssueId(null);
-        setSelectedCardKey(null);
         return;
       }
 
@@ -317,7 +329,14 @@ export function IssueLifecycleWorkbench({
         const { issues = [] } = await listProductIssues(projectId);
         if (!isLatestRefresh(requestId)) return;
 
-        const byId = new Map(issues.map((issue) => [issue.issue_id, issue]));
+        // PR #91：确认删除的 Issue 一次性过滤在途同 Project 读取，防复活。
+        const issueGuard = refreshReconcileRef.current.issueListGuard;
+        let serverIssues = issues;
+        if (issueGuard && issueGuard.projectId === projectId) {
+          serverIssues = issues.filter((issue) => !issueGuard.deletedIssueIds.has(issue.issue_id));
+          refreshReconcileRef.current.issueListGuard = null;
+        }
+        const byId = new Map(serverIssues.map((issue) => [issue.issue_id, issue]));
         createdIssuesRef.current = createdIssuesRef.current.filter((issue) =>
           issue.project_id !== projectId || !byId.has(issue.issue_id),
         );
@@ -565,6 +584,7 @@ export function IssueLifecycleWorkbench({
     setAggregateInitialization,
     setAggregateInitializationBusy,
     refresh,
+    onProjectDeleted: handleProjectDeleted,
   });
   // Task 6 收尾：plan/story/design 创建入口（含 provider 快照与失败可见化）整块抽到
   // useIssueLifecycleGeneration——纯搬运，零行为变化。
@@ -644,6 +664,7 @@ export function IssueLifecycleWorkbench({
     if (projectId === selectedProjectId) {
       return;
     }
+    navigationIntentRef.current += 1;
     pendingProjectSelection.current = projectId;
     await refresh();
   }
@@ -908,12 +929,52 @@ export function IssueLifecycleWorkbench({
   }
 
   async function handleCreateProject(payload: CreateProjectPayload) {
+    // PR #91：POST 前捕获导航意图；回执先落目录与和解表，仅在无更新意图且无在途显式选择时自动选中。
+    const createIntent = ++navigationIntentRef.current;
     const project = await createProject(payload);
     setProjectDialogOpen(false);
-    pendingProjectSelection.current = project.project_id;
-    await refresh();
+    refreshReconcileRef.current.projectChanges.set(project.project_id, project);
+    setProjects((existing) => [...existing.filter((c) => c.project_id !== project.project_id), project]);
+    if (navigationIntentRef.current === createIntent && !pendingProjectSelection.current) {
+      pendingProjectSelection.current = project.project_id;
+      await refresh();
+    }
   }
 
+  // PR #91：Project 删除确认回执——目录立即剔除并记和解表；命中当前作用域
+  function handleProjectDeleted(projectId: string) {
+    refreshReconcileRef.current.projectChanges.set(projectId, null);
+    setProjects((existing) => existing.filter((p) => p.project_id !== projectId));
+    const switching = pendingProjectSelection.current !== null &&
+      pendingProjectSelection.current !== projectId;
+    if (activeProjectId.current === projectId) {
+      activeProjectId.current = null;
+      setSelectedProjectId(null);
+      resetProjectScopeState();
+    }
+    return !switching;
+  }
+
+  // PR #91：Issue 删除确认回执——移除列表行/创建回执并挂一次性在途过滤。
+  function handleIssueDeleted(projectId: string, issueId: string) {
+    createdIssuesRef.current = createdIssuesRef.current.filter(
+      (issue) => !(issue.project_id === projectId && issue.issue_id === issueId),
+    );
+    setIssueList((current) =>
+      current?.projectId === projectId
+        ? { projectId, issues: current.issues.filter((i) => i.issue_id !== issueId) }
+        : current,
+    );
+    const guard = refreshReconcileRef.current.issueListGuard;
+    if (guard && guard.projectId === projectId) {
+      guard.deletedIssueIds.add(issueId);
+      return;
+    }
+    refreshReconcileRef.current.issueListGuard = {
+      projectId,
+      deletedIssueIds: new Set([issueId]),
+    };
+  }
 
   const {
     handleDeleteIssue,
@@ -923,6 +984,7 @@ export function IssueLifecycleWorkbench({
   } = useIssueLifecycleWorkbenchDeletion({
     selectedProjectId,
     isCurrentProject,
+    onIssueDeleted: handleIssueDeleted,
     refreshDeletedIssueDetails,
     groupCodingDeleteBusy,
     planGroupDeleteRef,
