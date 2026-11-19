@@ -26,6 +26,7 @@ const GROUP_LABEL: Record<IssueQueueGroupKey, string> = {
   blocked: "阻塞",
   coding: "编码中",
   completed: "已完成",
+  unloaded: "生命周期待查看",
 };
 
 export function IssueQueue(props: {
@@ -39,6 +40,7 @@ export function IssueQueue(props: {
   onGenerateStorySpec: (issueId: string) => void;
   onDeleteIssue: (issueId: string) => void;
   deletingIssueId?: string | null;
+  loading?: boolean;
   // 受控「显示更多」：父层收到组 key 后以更高 perGroupLimit 重派生该组 rows。
   onShowMoreGroup?: (key: IssueQueueGroupKey) => void;
 }): JSX.Element {
@@ -53,6 +55,7 @@ export function IssueQueue(props: {
     onGenerateStorySpec,
     onDeleteIssue,
     deletingIssueId = null,
+    loading = false,
     onShowMoreGroup,
   } = props;
 
@@ -87,6 +90,7 @@ export function IssueQueue(props: {
     <section
       role="region"
       aria-label="Issue 卡片列表"
+      aria-busy={loading || undefined}
       className="flex min-h-0 flex-col overflow-hidden rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)]"
     >
       <div
@@ -123,7 +127,7 @@ export function IssueQueue(props: {
       >
         {orderedGroups.length === 0 ? (
           <p className="p-3 text-xs text-[var(--aria-ink-muted)]">
-            没有匹配的 Issue。
+            {loading ? "正在加载议题…" : "没有匹配的 Issue。"}
           </p>
         ) : (
           orderedGroups.map((group) => {
@@ -176,10 +180,8 @@ export function IssueQueue(props: {
                         row={row}
                         focused={row.issueId === focusedIssueId}
                         onSelect={() => onSelectIssue(row.issueId)}
-                        onGenerateStorySpec={() =>
-                          onGenerateStorySpec(row.issueId)
-                        }
-                        onDelete={() => onDeleteIssue(row.issueId)}
+                        onGenerateStorySpec={row.group === "unloaded" ? undefined : () => onGenerateStorySpec(row.issueId)}
+                        onDelete={row.group === "unloaded" ? undefined : () => onDeleteIssue(row.issueId)}
                         deleting={row.issueId === deletingIssueId}
                       />
                     ))}

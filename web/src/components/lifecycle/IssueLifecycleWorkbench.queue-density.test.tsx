@@ -84,6 +84,162 @@ describe("IssueLifecycleWorkbench 队列折叠双密度 (Task 7)", () => {
     return screen.getByTestId("issue-queue-column");
   }
 
+  it("shows issue titles before repository metadata and lifecycle details are ready", async () => {
+    const repositories = deferred<Response>();
+    const details = deferred<Response>();
+    const baseFetch = bulkIssuesFetch(["先看到标题"]);
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/repositories")) return repositories.promise;
+      if (url.includes("/lifecycle?")) return details.promise;
+      return baseFetch(input);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<IssueLifecycleWorkbench />);
+
+    const row = await within(queueRegion()).findByRole("button", {
+      name: "选择 Issue 先看到标题",
+    });
+    expect(row).toBeEnabled();
+    const detail = screen.getByRole("region", { name: "Issue 生命周期详情" });
+    expect(within(detail).getByText("正在加载生命周期…")).toBeVisible();
+    expect(within(detail).queryByRole("button", { name: "生成 Story Spec" })).toBeNull();
+
+    await act(async () => {
+      details.resolve(await baseFetch("/api/issues/issue_0001/lifecycle?project_id=project_0001"));
+      repositories.resolve(await baseFetch("/api/projects/project_0001/repositories"));
+    });
+    expect(await within(detail).findByRole("button", { name: "生成 Story Spec" })).toBeVisible();
+  });
+
+  it("opens a chosen issue while the initial issue's detail request is still pending", async () => {
+    const first = deferred<Response>();
+    const baseFetch = bulkIssuesFetch(["初始议题", "用户选中的议题"]);
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) =>
+      String(input).includes("/issue_0001/lifecycle?") ? first.promise : baseFetch(input),
+    ));
+    const user = userEvent.setup();
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await within(queueRegion()).findByRole("button", { name: "选择 Issue 用户选中的议题" }));
+    const detail = screen.getByRole("region", { name: "Issue 生命周期详情" });
+    expect(await within(detail).findByRole("heading", { name: "用户选中的议题" })).toBeVisible();
+    expect(await within(detail).findByRole("button", { name: "生成 Story Spec" })).toBeVisible();
+
+    await act(async () => first.resolve(await baseFetch("/api/issues/issue_0001/lifecycle?project_id=project_0001")));
+    expect(within(detail).getByRole("heading", { name: "用户选中的议题" })).toBeVisible();
+  });
+
+  it("does not lose the queue when one issue detail fails", async () => {
+    const baseFetch = bulkIssuesFetch(["无法读取详情", "仍可打开"]);
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) =>
+      String(input).includes("/issue_0001/lifecycle?")
+        ? Promise.resolve(new Response("{}", { status: 503 }))
+        : baseFetch(input),
+    ));
+    const user = userEvent.setup();
+    render(<IssueLifecycleWorkbench />);
+
+    const detail = screen.getByRole("region", { name: "Issue 生命周期详情" });
+    expect(await within(detail).findByText("生命周期加载失败，可刷新重试。")).toBeVisible();
+    await user.click(within(queueRegion()).getByRole("button", { name: "选择 Issue 仍可打开" }));
+    expect(await within(detail).findByRole("heading", { name: "仍可打开" })).toBeVisible();
+    expect(await within(detail).findByRole("button", { name: "生成 Story Spec" })).toBeVisible();
+  });
+
+  it("bounds lifecycle reads during selection and refresh, then prioritizes the selected issue", async () => {
+    const baseFetch = bulkIssuesFetch(["议题一", "议题二", "议题三", "议题四", "议题五"]);
+    const reads: Array<{ url: string; resolve: (value: Response) => void }> = [];
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes("/lifecycle?")) return baseFetch(input);
+      const response = deferred<Response>();
+      reads.push({ url, resolve: response.resolve });
+      return response.promise;
+    }));
+    const user = userEvent.setup();
+    render(<IssueLifecycleWorkbench />);
+
+    const fifth = await within(queueRegion()).findByRole("button", { name: "选择 Issue 议题五" });
+    expect(reads).toHaveLength(3);
+    await user.click(fifth);
+    expect(reads).toHaveLength(3);
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Aria" })).toBeEnabled());
+    expect(reads).toHaveLength(3);
+
+    await act(async () => reads[0].resolve(await baseFetch(reads[0].url)));
+    expect(reads[3]?.url).toBe("/api/issues/issue_0005/lifecycle?project_id=project_0001");
+  });
+
+  it("switches projects without waiting for a slow background issue", async () => {
+    const pending = deferred<Response>();
+    const baseFetch = lifecycleFetch({
+      projects: [projectRecord("project_0001", "Alpha"), projectRecord("project_0002", "Beta")],
+      sharedLifecycleIdsAcrossIssues: true,
+      issueTitlesByProject: { project_0002: "Beta issue" },
+    });
+    const betaFetch = lifecycleFetch({ issueTitlesByProject: { project_0002: "Beta issue" } });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/issues/issue_0002/lifecycle?project_id=project_0001") return pending.promise;
+      if (url === "/api/issues/issue_0002/lifecycle?project_id=project_0002") return betaFetch(input, init);
+      return baseFetch(input, init);
+    }));
+    const user = userEvent.setup();
+    render(<IssueLifecycleWorkbench />);
+
+    await within(queueRegion()).findByRole("button", { name: "选择 Issue Issue Two" });
+    const beta = screen.getByRole("button", { name: "Beta" });
+    await waitFor(() => expect(beta).toBeEnabled());
+    await user.click(beta);
+    expect(await within(queueRegion()).findByRole("button", { name: "选择 Issue Beta issue" })).toBeVisible();
+    await act(async () => pending.resolve(await baseFetch("/api/issues/issue_0002/lifecycle?project_id=project_0001")));
+    expect(within(queueRegion()).queryByRole("button", { name: "选择 Issue Issue Two" })).toBeNull();
+  });
+
+  it("refreshes the newly selected project while its first request is still in flight", async () => {
+    const pending = deferred<Response>();
+    const projects = [projectRecord("project_0001", "Alpha"), projectRecord("project_0002", "Beta")];
+    vi.stubGlobal("fetch", lifecycleFetch({
+      projects,
+      projectResponses: [Promise.resolve(jsonResponse({ projects })), pending.promise],
+      issueTitlesByProject: { project_0001: "Alpha issue", project_0002: "Beta issue" },
+    }));
+    const user = userEvent.setup();
+    render(<IssueLifecycleWorkbench />);
+
+    const beta = await screen.findByRole("button", { name: "Beta" });
+    await waitFor(() => expect(beta).toBeEnabled());
+    await user.click(beta);
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    expect(await within(queueRegion()).findByRole("button", { name: "选择 Issue Beta issue" })).toBeVisible();
+    await act(async () => pending.resolve(jsonResponse({ projects })));
+    expect(beta).toHaveAttribute("aria-pressed", "true");
+    expect(within(queueRegion()).queryByRole("button", { name: "选择 Issue Alpha issue" })).toBeNull();
+  });
+
+  it("keeps a launch error visible when a background issue fails", async () => {
+    const pending = deferred<Response>();
+    const baseFetch = lifecycleFetch({ sharedLifecycleIdsAcrossIssues: true });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/issue_0002/lifecycle?")) return pending.promise;
+      if (url.endsWith("/story-specs:generate")) {
+        return Promise.resolve(new Response(JSON.stringify({ message: "Provider 不可用" }), { status: 422 }));
+      }
+      return baseFetch(input, init);
+    }));
+    const user = userEvent.setup();
+    render(<IssueLifecycleWorkbench />);
+
+    await user.click(await within(queueRegion()).findByRole("button", { name: "生成 Story Spec Issue One" }));
+    expect(await screen.findByText("Provider 不可用")).toBeVisible();
+    await act(async () => pending.resolve(new Response(JSON.stringify({ message: "详情读取异常" }), { status: 503 })));
+    expect(screen.getByText("Provider 不可用")).toBeVisible();
+    expect(screen.queryByText("详情读取异常")).toBeNull();
+  });
+
   it("外壳与队列列宽满足双密度规格，队列与工作区各自可滚动", async () => {
     vi.stubGlobal("fetch", lifecycleFetch());
 

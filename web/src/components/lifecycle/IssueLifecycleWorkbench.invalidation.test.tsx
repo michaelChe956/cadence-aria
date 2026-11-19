@@ -133,13 +133,13 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
     });
   });
 
-  it("re-drives the targeted refresh when a concurrent invalidation supersedes it (F-29 fix round 1)", async () => {
+  it("applies overlapping updates to two issues without re-reading the first issue", async () => {
     vi.stubGlobal("BroadcastChannel", FakeBroadcastChannel);
     const baseFetch = lifecycleFetch({
       storyDraftInitially: true,
       sharedLifecycleIdsAcrossIssues: true,
     });
-    // 挂起 issue_0001 的 lifecycle GET（初始加载放行），制造 X 回写被 Y 抢先的窗口。
+    // Hold the first issue's update while allowing the other issue to refresh.
     let deferIssueOneLifecycle = false;
     const pendingIssueOneFetches: Array<{
       url: string;
@@ -177,22 +177,16 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
     act(() => {
       notifyLifecycleInvalidated("issue_0001");
     });
-    // X 在途期间，另一 issue Y 的 invalidation 抢先 bump 全局 requestId 并先落地。
+    // A concurrent update to another issue must not invalidate this request.
     act(() => {
       notifyLifecycleInvalidated("issue_0002");
     });
     expect(pendingIssueOneFetches.length).toBe(1);
 
-    // X 的 GET 返回新数据——被 Y 抢先后必须重驱动本 issue 定向刷新，而不是丢弃。
+    // The first response already contains the durable change; no retry is needed.
     const issueOneUrl = pendingIssueOneFetches[0]!.url;
     await act(async () => {
       pendingIssueOneFetches[0]!.resolve(await baseFetch(issueOneUrl));
-    });
-    await waitFor(() => {
-      expect(pendingIssueOneFetches.length).toBe(2);
-    });
-    await act(async () => {
-      pendingIssueOneFetches[1]!.resolve(await baseFetch(issueOneUrl));
     });
 
     await waitFor(() => {
@@ -202,6 +196,7 @@ describe("IssueLifecycleWorkbench lifecycle invalidation (F-29)", () => {
         ),
       ).toBeInTheDocument();
     });
+    expect(pendingIssueOneFetches).toHaveLength(1);
   });
 
   it("ignores invalidations for issues the workbench is not showing", async () => {

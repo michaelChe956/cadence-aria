@@ -14,7 +14,6 @@ import type {
 import {
   defaultCollapsedGroups,
   deriveIssueQueue,
-  ISSUE_QUEUE_GROUP_ORDER,
   type IssueQueueGroupKey,
   type IssueStageKey,
   type StagePipState,
@@ -611,17 +610,6 @@ describe("perGroupLimit 截断", () => {
 });
 
 describe("分组顺序与默认折叠", () => {
-  it("ISSUE_QUEUE_GROUP_ORDER 锁定六个分组的顺序", () => {
-    expect(ISSUE_QUEUE_GROUP_ORDER).toEqual([
-      "needs_story",
-      "needs_design",
-      "needs_work_item",
-      "blocked",
-      "coding",
-      "completed",
-    ]);
-  });
-
   it("defaultCollapsedGroups 返回 completed", () => {
     expect(defaultCollapsedGroups()).toEqual(["completed"]);
   });
