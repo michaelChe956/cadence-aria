@@ -49,8 +49,21 @@ describe("LogicalCodebaseLayoutTree", () => {
   it("tree_explains_worktrees_are_not_indexable", () => {
     render(<LogicalCodebaseLayoutTree />);
 
+    // 第六条口径（REQ-LAYOUT-02）：普通路径与 .worktrees/ 的边界说明不变。
+    const note = screen.getByTestId("lc-layout-tree-note");
+    expect(note).toHaveTextContent("只在 .worktrees/ 下的代码不可被索引");
+    // 经盘检确认无源码的成员会被跳过并提示；它仍是项目成员，
+    // 仍可作配置/文档类变更的目标仓。
+    expect(note).toHaveTextContent("经盘检确认没有源码的成员会被跳过并提示");
+    expect(note).toHaveTextContent("仍可作配置/文档类变更的目标仓");
+  });
+
+  it("tree_states_at_least_one_covered_member_required", () => {
+    render(<LogicalCodebaseLayoutTree />);
+
+    // 第六条口径的边界：跳过无源码成员有前提——至少要有一个成员被索引覆盖。
     expect(screen.getByTestId("lc-layout-tree-note")).toHaveTextContent(
-      "只在 .worktrees/ 下的代码不可被索引",
+      "至少要有一个成员被索引覆盖",
     );
   });
 

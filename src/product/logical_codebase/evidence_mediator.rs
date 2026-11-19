@@ -7,6 +7,7 @@
 // 后续读钉住 record + stale 判定）⑤查询+渲染+单次 12k 截断+累计配额
 // （Exhausted→evidence_budget_exhausted/429）⑥审计 append（role 拼
 // role_self_reported 标记）。
+// 片8（REQ-COD-05）：③ 后上提输入校验、④ 后按钉住世代分叉（跳过 ⇒ 未检索支路）。
 //
 // 本模块不调用真实 Provider：`handle_evidence_query` 以 `TokioBoundedCommandRunner`
 // 构造真实 `CodeGraphCli`；测试经 `handle_evidence_query_with_runner` 注入 fake runner。
@@ -44,7 +45,7 @@ use crate::product::logical_codebase::evidence_token::{
 };
 use crate::product::logical_codebase::store::{LogicalCodebaseManifest, LogicalCodebaseStore};
 use crate::product::logical_codebase::{
-    CheckoutAvailability, CheckoutKind, MemberStatus, RepositoryCheckoutRecord,
+    CheckoutAvailability, CheckoutKind, LogicalRepositoryId, MemberStatus, RepositoryCheckoutRecord,
 };
 
 /// attempt 分区快照钉住记录文件名（设计 §4.3 命名）。
@@ -101,6 +102,10 @@ pub struct EvidenceQueryResponse {
     pub truncated: bool,
     pub index_stale: bool,
     pub budget_remaining: usize,
+    /// 片8（REQ-COD-05）：目标被钉住世代判定为「已确认无源码、未纳入代码
+    /// 检索」时携带；普通支路不出现该键（与卡片/成员行告警同源）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_searched: Option<NotSearchedEvidence>,
 }
 
 /// 六步编排入口（T7 使用）：以真实 `TokioBoundedCommandRunner` 构造 CodeGraphCli。
@@ -111,8 +116,9 @@ pub fn handle_evidence_query(
     handle_evidence_query_with_runner(paths, input, Arc::new(TokioBoundedCommandRunner))
 }
 
-/// 可注入 runner 的编排实现（测试经 fake runner 注入 CodeGraphCli）。
-fn handle_evidence_query_with_runner(
+/// 可注入 runner 的编排实现（测试经 fake runner 注入 CodeGraphCli；片8A 起
+/// 证据 handler 经片7W 覆盖点 `state.evidence_command_runner` 注入 runner）。
+pub fn handle_evidence_query_with_runner(
     paths: &ProductAppPaths,
     input: &EvidenceQueryInput,
     runner: Arc<dyn BoundedCommandRunner>,
@@ -142,7 +148,7 @@ fn handle_evidence_query_with_runner(
                 attempt.project_id
             ),
         })?;
-    let member_dir_names = member_dir_names(&logical, &manifest)?;
+    let member_dirs = member_dir_names(&logical, &manifest)?;
     if !manifest
         .member_ids
         .contains(&snapshot.logical_repository_id)
@@ -155,16 +161,25 @@ fn handle_evidence_query_with_runner(
             ),
         });
     }
-    let index_query = EvidenceIndexQuery::new(
-        CodeGraphCli::new(runner, "codegraph".to_string()),
-        manifest.provider_context_root.clone(),
-        member_dir_names,
-        target_member_dir,
-    );
+
+    // ③b 输入校验（片8 M7：上提到分叉之前——跳过目标同样拒绝非法查询词；
+    // 直接复用 evidence_index 的权威 validate_symbol，不另存第二份口径）。
+    crate::product::logical_codebase::evidence_index::validate_symbol(&input.query)?;
 
     // ④ 快照钉住：首查写 pin，后续读钉住 record；stale 两方向判定。
     let pinned = load_or_pin_index(paths, &attempt, &manifest, lc_id.as_str())?;
     let index_stale = is_index_stale(snapshot, &pinned);
+
+    // ④c 分叉（片8 REQ-COD-05）：钉住世代按（成员 ID + checkout ID）把
+    // 目标成员记为跳过 ⇒ 未检索支路——不建查询、不探库目录、零 CLI 调用。
+    if pinned_generation_skips_target(snapshot, &pinned) {
+        return not_searched_response(
+            paths,
+            &attempt,
+            input,
+            &target_member_alias(&logical, &attempt, snapshot)?,
+        );
+    }
 
     // ④b 库目录守卫（owner 裁定 2026-11-04）：durable 索引在册（含已 pin）
     // 但聚合根 `.codegraph` 库目录缺失 ⇒ fail-closed 为
@@ -186,7 +201,13 @@ fn handle_evidence_query_with_runner(
         });
     }
 
-    // ⑤ 查询 + 渲染 + 单次 12k 截断 + 累计配额（Exhausted→evidence_budget_exhausted/429）。
+    // ⑤ 查询（范围 = ACL ∩ 钉住世代已覆盖成员）+ 渲染 + 单次 12k 截断 + 累计配额。
+    let index_query = EvidenceIndexQuery::new(
+        CodeGraphCli::new(runner, "codegraph".to_string()),
+        manifest.provider_context_root.clone(),
+        covered_member_dir_names(&member_dirs, &pinned),
+        target_member_dir,
+    );
     let hits = index_query.query(&input.query)?;
     let (text, truncated) = render_and_truncate(&hits);
     let result_chars = text.chars().count();
@@ -209,6 +230,8 @@ fn handle_evidence_query_with_runner(
             snapshot_refs: hits.iter().map(|hit| hit.file_path.clone()).collect(),
             budget_remaining,
             timestamp: Utc::now().to_rfc3339(),
+            // 片8A：真实检索路径无「未检索原因」（原因码归片8 跳过分支填充）。
+            not_searched_reason: None,
         },
     )?;
 
@@ -217,6 +240,8 @@ fn handle_evidence_query_with_runner(
         truncated,
         index_stale,
         budget_remaining,
+        // 片8：普通支路无「未检索」事实——键不出现。
+        not_searched: None,
     })
 }
 
@@ -1049,7 +1074,7 @@ fn resolve_target_member_dir(
 fn member_dir_names(
     logical: &LogicalCodebaseStore,
     manifest: &LogicalCodebaseManifest,
-) -> Result<Vec<String>, EvidenceError> {
+) -> Result<Vec<(LogicalRepositoryId, String)>, EvidenceError> {
     let members = logical
         .list_members(&manifest.project_id)
         .map_err(map_store_error)?;
@@ -1096,7 +1121,7 @@ fn member_dir_names(
                 checkout.checkout_id.0, member_id.0
             )));
         }
-        names.push(checkout_dir_name(checkout)?);
+        names.push((*member_id, checkout_dir_name(checkout)?));
     }
     Ok(names)
 }
@@ -1153,6 +1178,9 @@ fn render_and_truncate(hits: &[EvidenceHit]) -> (String, bool) {
 fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
+
+// 片8（REQ-COD-05）：未检索分叉与跳过支路拆入 .inc.rs（余量不足，Plan §1.3）。
+include!("evidence_not_searched.inc.rs");
 
 // 测试模块按仓库惯例拆入 `.inc.rs`,保持主文件低于 large_file_guard 的 1200 行上限。
 include!("evidence_mediator_tests.inc.rs");

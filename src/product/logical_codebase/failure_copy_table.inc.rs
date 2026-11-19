@@ -3,7 +3,7 @@
 // 注意：本文件被 include! 插到模块中部，因此只能用 `//` 行注释——`//!` 内部
 // 文档注释在模块中间是 E0753。
 
-/// 六条布局规则与七个对外稳定码的归属（REQ-LAYOUT-01 / REQ-LAYOUT-02）。
+/// 六条布局规则与十个对外稳定码的归属（REQ-LAYOUT-01 / REQ-LAYOUT-02）。
 ///
 /// 规则表与文案同处本模块：块3 只做呈现，不自建文案表、不复制中文。
 pub struct LayoutRule {
@@ -36,8 +36,13 @@ pub const LAYOUT_RULES: &[LayoutRule] = &[
         codes: &["aggregate_root_nested_worktree"],
     },
     LayoutRule {
-        rule_zh: "每个成员至少要有一个可索引的源码文件",
-        codes: &["aggregate_index_member_coverage_failed"],
+        rule_zh: "聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过",
+        codes: &[
+            "aggregate_index_member_coverage_failed",
+            "aggregate_index_member_source_excluded",
+            "aggregate_index_all_members_source_less",
+            "aggregate_index_source_scan_incomplete",
+        ],
     },
 ];
 
@@ -77,7 +82,7 @@ type Entry = (
 
 /// 全块码表（一次性写全，下游片只消费、不得另存第二份文案）。
 const TABLE: &[Entry] = &[
-    // ── 七个布局码（具体规则依据 + 可执行处置动作，REQ-LAYOUT-02）──
+    // ── 十个布局码（具体规则依据 + 可执行处置动作，REQ-LAYOUT-02）──
     (
         "aggregate_root_is_git",
         "逻辑代码库根目录不能是 git 仓库",
@@ -123,8 +128,39 @@ const TABLE: &[Entry] = &[
     (
         "aggregate_index_member_coverage_failed",
         "成员仓里没有可索引的代码文件",
-        "布局规则「每个成员至少要有一个可索引的源码文件」未满足：被纳入的成员{member}下找不到可索引的源码文件，索引会得到空结果。",
+        "布局规则「聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过」下：被纳入的成员{member}下找不到可索引的源码文件，索引会得到空结果。",
         "把真实源码放进成员仓（.js/.ts/.py/.go/.rs 等）；.html/.json/.md 不算源码；只放在 .worktrees/ 下的代码同样不算。放好后点「重试」。",
+        FailureTriage::Environment,
+    ),
+    // 覆盖失败码的**同码第二成品变体**（磁盘上有源码，但本次索引没收录）：
+    // 变体 key 只用于查表，**不是**对外稳定码、绝不外泄；归因分支与
+    // `machine_line` 仍用 canonical 码。
+    (
+        "aggregate_index_member_coverage_failed.disk_source",
+        "成员仓里有源码，但没被索引收录",
+        "布局规则「聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过」看起来满足：成员{member}的普通路径下有 Aria 源码，但本次索引里没有它的任何文件——通常是成员路径或忽略规则把源码挡在外面。",
+        "检查成员{member}的路径与忽略规则（.gitignore、codegraph.json）后点「重试」；源码只在 .worktrees/ 下时请合入主 checkout。",
+        FailureTriage::Environment,
+    ),
+    (
+        "aggregate_index_member_source_excluded",
+        "成员仓的源码只在 .worktrees/ 里",
+        "布局规则「聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过」下，成员{member}主检出普通路径下没有 Aria 源码，源码只存在于开发工作树里。",
+        "把要索引的源码合入成员{member}主 checkout 的普通路径（不是 .worktrees/），然后点「重试」。",
+        FailureTriage::Environment,
+    ),
+    (
+        "aggregate_index_source_scan_incomplete",
+        "这次没能确认成员{member}的源码情况",
+        "布局规则「聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过」下，盘检因权限、IO、深度、条目数或时间上限未完成——本次无法判定该成员是否有源码，不等于已确认该成员无源码。",
+        "检查成员{member}主检出的可读性与目录规模，修好后点「重试」。",
+        FailureTriage::Environment,
+    ),
+    (
+        "aggregate_index_all_members_source_less",
+        "没有可建立代码索引的源码",
+        "布局规则「聚合索引至少需要一个已覆盖成员；确认无源码的成员可以跳过」下，全部成员经盘检确认没有 Aria 源码，没有任何被覆盖成员，索引无法激活。",
+        "加入一个含源码的成员仓，或把实际源码放到成员主 checkout 的普通路径，然后点「重试」。",
         FailureTriage::Environment,
     ),
     // ── 聚合初始化（durable 记录）链路 ──
@@ -356,6 +392,16 @@ const TABLE: &[Entry] = &[
         "刷新成员登记事实后点「重试」；仍失败时附机器码与诊断提交问题。",
         FailureTriage::ProductDefect,
     ),
+    // durable warning 内层码（snapshot 固定成员快照的前置闸）：主检出不可用。
+    // 它会经 fail_building 落进 record.warning，但不属于七个对外布局码
+    // （REQ-LAYOUT-02），因此不进 LAYOUT_RULES。
+    (
+        "aggregate_index_checkout_unavailable",
+        "某个成员的主检出不可用",
+        "聚合索引要读取成员的主检出目录，但它当前不是可用的主检出（该检出的路径见下方诊断）；重试解决不了这个问题。",
+        "修复该成员的检出（重新 clone，或在逻辑代码库里把它重新登记为可用的主检出）后点「重试」。",
+        FailureTriage::Environment,
+    ),
     (
         "aggregate_index_invalid_revision",
         "成员仓的 revision 不可用",
@@ -428,10 +474,17 @@ const TABLE: &[Entry] = &[
     ),
     (
         "aggregate_index_active_ambiguous",
-        "存在多个活跃聚合索引",
-        "同一逻辑代码库上出现多于一条活跃索引记录，内部状态异常。",
-        "保留现有记录并附机器码与诊断提交问题（不要手动删除记录）。",
-        FailureTriage::ProductDefect,
+        "同一逻辑代码库上存在多个可读索引世代",
+        "连续重建失败会各自留下一条世代记录；没有可降级的上一代时，多条同状态记录并存，读侧无法判断该用哪一版（既有读路径语义，不是索引内容本身出错）。",
+        "先看诊断里的失败原因并修好，再重建索引一次——成功的那次会把其余世代置为已废弃；连续失败重建只会让候选更多，不会自动收敛；不要手工删除 durable 记录。",
+        FailureTriage::Environment,
+    ),
+    (
+        "aggregate_index_active_missing",
+        "当前没有可用的聚合索引",
+        "该逻辑代码库还没有任何可读的索引世代（尚未建立，或已有世代都不可用）。",
+        "点「重建索引」建立一次索引；若重建反复失败，看诊断里的失败原因（例如 codegraph 缺失、成员检出不可用）修好后再重建。",
+        FailureTriage::Environment,
     ),
     (
         "aggregate_index_not_found",
@@ -1035,6 +1088,30 @@ pub fn canonical_key(code: &str) -> &str {
         .unwrap_or(code)
 }
 
+/// 覆盖失败码的同码双变体：按持久化失败事实的机器事实前缀选择模板。
+///
+/// 变体 key **只用于模板选择**：归因分支与码表查找仍用 canonical 码，
+/// `machine_line` 仍写原始稳定码（内部变体键不得替换 canonical key）。
+const COVERAGE_DISK_SOURCE_KEY: &str = "aggregate_index_member_coverage_failed.disk_source";
+
+/// 新事实前缀：磁盘上有源码，但本次索引没收录它。
+const COVERAGE_DISK_SOURCE_FACT_PREFIX: &str = "source found on disk;";
+
+/// 查表用 key：覆盖失败码遇到「磁盘上有源码」的新事实前缀时选第二成品变体。
+///
+/// 只改**模板**，不改归因、不改 `machine_line`；其余码一律原样返回。
+fn resolved_entry_key<'a>(key: &'a str, detail: Option<&str>) -> &'a str {
+    if key == "aggregate_index_member_coverage_failed"
+        && let Some(detail) = detail
+        && detail
+            .trim_start()
+            .starts_with(COVERAGE_DISK_SOURCE_FACT_PREFIX)
+    {
+        return COVERAGE_DISK_SOURCE_KEY;
+    }
+    key
+}
+
 fn table_entry(key: &str) -> Option<Entry> {
     TABLE
         .iter()
@@ -1046,4 +1123,61 @@ fn table_entry(key: &str) -> Option<Entry> {
                 .find(|(suffix, _)| key.ends_with(suffix))
                 .map(|(_, entry)| *entry)
         })
+}
+
+/// 告警码：成员经确认无源码、被跳过代码检索，但仍是项目成员。
+///
+/// 非阻断告警：MUST NOT 进失败码集合（不进 `TABLE`、不进 `LAYOUT_RULES`），
+/// MUST NOT 以 `FailureCopy` 五字段传输（不占分诊、不触发失败通知）。
+pub const MEMBER_SOURCE_LESS_CODE: &str = "aggregate_index_member_source_less";
+
+/// 结构化告警对象（与证据面 `not_searched` 同构）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SourceLessAlert {
+    pub code: String,
+    pub message_zh: String,
+}
+
+/// 逐仓标注：单成员被跳过的说明。
+pub fn member_source_less_member_copy(member: &str) -> String {
+    format!("「{member}」未纳入代码搜索，可修改配置或文档。")
+}
+
+/// 卡片一行：点名全部被跳过的成员。
+pub fn member_source_less_summary_copy(members: &[&str]) -> String {
+    let names = members.join("、");
+    if names.is_empty() {
+        return "已跳过无源码成员。".to_string();
+    }
+    format!("已跳过无源码成员：{names}。")
+}
+
+/// 降级态历史措辞：上次可用索引里被跳过的成员。
+pub fn member_source_less_history_copy(members: &[&str]) -> String {
+    let names = members.join("、");
+    if names.is_empty() {
+        return "上次可用索引跳过了无源码成员。".to_string();
+    }
+    format!("上次可用索引跳过了无源码成员：{names}。")
+}
+
+/// 证据说明：目标仓无源码，未检索聚合索引。
+pub fn member_source_less_evidence_copy(member: &str) -> String {
+    format!("目标仓「{member}」无源码，未检索聚合索引；请在目标工作区直接读取配置或文档。")
+}
+
+/// 组装结构化告警对象 `{code, message_zh}`。
+///
+/// 降级态（沿用上次可用索引）用历史措辞，正常态用卡片一行措辞。
+pub fn member_source_less_alert(members: &[&str], degraded: bool) -> SourceLessAlert {
+    let message_zh = if degraded {
+        member_source_less_history_copy(members)
+    } else {
+        member_source_less_summary_copy(members)
+    };
+    SourceLessAlert {
+        code: MEMBER_SOURCE_LESS_CODE.to_string(),
+        message_zh,
+    }
 }

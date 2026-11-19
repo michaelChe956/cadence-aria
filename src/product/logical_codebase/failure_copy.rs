@@ -16,7 +16,7 @@
 //! 码表外真正未知的码由 [`neutral_fallback`] 给出中性三段（不 panic、
 //! 不用英文原文当中文主标题）。已知布局码因漏登记或字段缺失被当成未知码
 //! **属于实现缺陷**：本模块把它们逐一登记在 [`TABLE`] 里，并用
-//! [`LAYOUT_RULES`] 维护「六条布局规则 → 七个对外稳定码」的归属。
+//! [`LAYOUT_RULES`] 维护「六条布局规则 → 十个对外稳定码」的归属。
 
 use serde::{Deserialize, Serialize};
 
@@ -268,7 +268,9 @@ fn apply_confirmed_cause(copy: &mut FailureCopy, key: &str, input: &FailureInput
 
 /// 唯一入口：只读事实 → 五字段成品。
 pub fn describe(input: FailureInput<'_>) -> FailureCopy {
-    let key = canonical_key(input.reason_code);
+    // canonical 码用于归因与 `machine_line`；查表用的 key 才允许是同码变体。
+    let canonical = canonical_key(input.reason_code);
+    let key = resolved_entry_key(canonical, input.detail);
     let mut copy = match table_entry(key) {
         Some((_, title, reason, action, triage)) => FailureCopy {
             title_zh: fill(title, &input),
@@ -279,7 +281,7 @@ pub fn describe(input: FailureInput<'_>) -> FailureCopy {
         },
         None => neutral_fallback(&input),
     };
-    apply_confirmed_cause(&mut copy, key, &input);
+    apply_confirmed_cause(&mut copy, canonical, &input);
     copy.machine_line = input.reason_code.to_string();
     copy
 }
@@ -321,6 +323,21 @@ pub fn record_diagnostic(record: &AggregateInitializationErrorRecord) -> String 
 /// 原始整句仍原样进折叠区诊断。
 pub fn subject_from_message(code: &str, message: &str) -> Option<String> {
     let extracted = match canonical_key(code) {
+        "aggregate_index_member_coverage_failed"
+        | "aggregate_index_member_source_excluded"
+        | "aggregate_index_source_scan_incomplete"
+        | "aggregate_index_all_members_source_less" => {
+            // 这四个码抽出的是「逗号分隔的成员名清单」，不是路径：按逗号
+            // 切分、逐段 trim、丢空串后用中文顿号连接，直接返回，不走
+            // 函数尾部「路径形态只点名最后一段」的收尾处理。
+            let extracted = extract_between(message, "included members [", "]")?;
+            let members: Vec<&str> = extracted
+                .split(',')
+                .map(str::trim)
+                .filter(|segment| !segment.is_empty())
+                .collect();
+            return (!members.is_empty()).then(|| members.join("、"));
+        }
         "aggregate_root_member_outside_root"
         | "aggregate_root_member_symlink_escape"
         | "aggregate_root_nested_worktree" => {
@@ -348,6 +365,58 @@ fn extract_between(message: &str, prefix: &str, suffix: &str) -> Option<String> 
     let end = rest.find(suffix)?;
     let extracted = rest[..end].trim();
     (!extracted.is_empty()).then(|| extracted.to_string())
+}
+
+/// 持久化失败封套 → (内层稳定码, 原始事实 message, 是否 degraded 封套)。
+///
+/// 封套形态（`aggregate_index/codegraph_cli.rs` 的 Display）：
+/// - `aggregate_index_failed:<code>: <message>`
+/// - `aggregate_index_degraded:<code>: <message>`
+///
+/// 解析不出内层码 ⇒ `None`（调用方回落到通用码），**不得**用裸前缀
+/// `contains` 猜码。
+pub fn parse_failure_envelope(envelope: &str) -> Option<(String, String, bool)> {
+    let (degraded, payload) =
+        if let Some(payload) = envelope.strip_prefix("aggregate_index_degraded:") {
+            (true, payload)
+        } else {
+            (false, envelope.strip_prefix("aggregate_index_failed:")?)
+        };
+    let (code, message) = payload
+        .split_once(": ")
+        .or_else(|| payload.split_once(':'))?;
+    let code = code.trim();
+    // 内层码必须是单个稳定码：含空白即不是合法码，回落通用码（不猜码）。
+    if code.is_empty() || code.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some((code.to_string(), message.trim_start().to_string(), degraded))
+}
+
+/// 已持有内层稳定码 + 原始事实 → 三段成品（**含成员点名**）。
+///
+/// 点名逻辑只在这里一处：`subject_from_message(code, fact)` 抽出的成员名写进
+/// `FailureInput::with_subject`，于是 `reason_zh` 里出现「gray-config、msha-sdk」
+/// 这类点名。**任何调用方都不得自己拼点名**。
+pub fn describe_fact(code: &str, fact: &str) -> FailureCopy {
+    // 先把点到的对象抬到函数级作用域：input 借用它，describe 消费 input
+    // 必须发生在 subject 仍然存活期间。
+    let subject = subject_from_message(code, fact);
+    let mut input = FailureInput::new(code).with_detail(fact);
+    if let Some(subject) = subject.as_deref() {
+        input = input.with_subject(subject);
+    }
+    describe(input)
+}
+
+/// 持久化失败封套 → (内层稳定码, 三段成品)。
+///
+/// 唯一把「封套 → 成品」串起来的入口；解析不出封套 ⇒ `None`
+/// （调用方回落到通用码）。
+pub fn describe_envelope(envelope: &str) -> Option<(String, FailureCopy)> {
+    let (inner, fact, _degraded) = parse_failure_envelope(envelope)?;
+    let copy = describe_fact(&inner, &fact);
+    Some((inner, copy))
 }
 
 /// 文本序列化器：问题 → 原因 → 怎么做 → 机器码 → 已脱敏原文。
@@ -532,6 +601,32 @@ mod tests {
         let unnamed = describe_code("member_path_outside_root", None);
         assert!(!unnamed.title_zh.contains("「"), "{}", unnamed.title_zh);
     }
+    /// 覆盖失败码点名的对象是「逗号分隔的成员名清单」：按逗号切分、逐段
+    /// trim、丢空串后用中文顿号连接；不能套用路径形态的「只取最后一段」。
+    #[test]
+    fn coverage_failure_names_all_included_members() {
+        let subject = subject_from_message(
+            "aggregate_index_member_coverage_failed",
+            concat!(
+                "no indexable code file under included members ",
+                "[gray-config, msha-sdk]; ",
+                "each included member needs at least 1 indexable code file"
+            ),
+        )
+        .expect("消息里明确列出了成员名，必须能点名");
+        assert_eq!(subject, "gray-config、msha-sdk");
+    }
+
+    /// 回归：路径形态的既有分支保持不变，仍只点名路径最后一段。
+    #[test]
+    fn root_is_git_subject_still_names_last_path_segment() {
+        let subject = subject_from_message(
+            "aggregate_root_is_git",
+            "aggregate root /tmp/proj/aggregate-root is a Git repository",
+        )
+        .expect("既有 is_git 分支必须继续命中");
+        assert_eq!(subject, "aggregate-root");
+    }
 
     /// 测试点 #14 ②③：码表外未知码的两个入口形态一致（中性兜底），
     /// 且 `record.action` 永远不进主文案/动作段。
@@ -706,9 +801,9 @@ mod tests {
         assert!(copy.reason_zh.contains("检查过程本身失败"));
     }
 
-    /// 六条规则覆盖七个对外稳定码，一一可反查。
+    /// 六条规则覆盖十个对外稳定码，一一可反查（既有七码 + 第六条三个补充失败码）。
     #[test]
-    fn layout_rules_cover_seven_external_codes() {
+    fn layout_rules_cover_ten_external_codes() {
         assert_eq!(LAYOUT_RULES.len(), 6);
         let mut codes: Vec<&str> = LAYOUT_RULES
             .iter()
@@ -716,8 +811,11 @@ mod tests {
             .collect();
         codes.sort_unstable();
         let mut expected = vec![
+            "aggregate_index_all_members_source_less",
             "aggregate_index_layout_unsupported",
             "aggregate_index_member_coverage_failed",
+            "aggregate_index_member_source_excluded",
+            "aggregate_index_source_scan_incomplete",
             "aggregate_root_is_git",
             "aggregate_root_member_outside_root",
             "aggregate_root_member_symlink_escape",
@@ -772,4 +870,7 @@ mod tests {
         }
         false
     }
+
+    // 新增失败码 / 告警码 / 封套解析入口的用例（同一模块、同一过滤器）。
+    include!("failure_copy_new_tests.inc.rs");
 }

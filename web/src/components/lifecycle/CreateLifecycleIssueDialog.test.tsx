@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { CreateLifecycleIssueDialog } from "./CreateLifecycleIssueDialog";
@@ -21,17 +21,34 @@ function logicalCodebase(
   };
 }
 
+// REQ-MRE-01：服务端下发的结构化无源码标注（正文唯一来源 = message_zh）。
+const SOURCE_LESS_ALERT = {
+  code: "aggregate_index_member_source_less",
+  message_zh: "「gray-config」未纳入代码搜索，可修改配置或文档。",
+};
+
+// 成员夹具：`index_alert` 省略 = 旧 DTO（无该字段）；显式 null = 无提示；对象 = 带提示。
+type MemberFixture = {
+  logical_repository_id: string;
+  physical_repository_id: string | null;
+  alias: string;
+  status: "active" | "removed";
+  index_alert?: { code: string; message_zh: string } | null;
+};
+
 function member(
   logicalId: string,
   alias: string,
   physicalId: string | null,
   status: "active" | "removed" = "active",
-) {
+  indexAlert?: { code: string; message_zh: string } | null,
+): MemberFixture {
   return {
     logical_repository_id: logicalId,
     physical_repository_id: physicalId,
     alias,
     status,
+    ...(indexAlert === undefined ? {} : { index_alert: indexAlert }),
   };
 }
 
@@ -335,5 +352,166 @@ describe("CreateLifecycleIssueDialog 成员复选（REQ-MRE-01）", () => {
 
     expect(await screen.findByText("请选择成员")).toBeInTheDocument();
     expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it("成员行渲染服务端下发的结构化标注（正文取 message_zh）", async () => {
+    const listMembers = vi.fn().mockResolvedValue([
+      member("lr-api", "api", "repository_1001"),
+      member("lr-gray", "gray-config", "repository_1002", "active", SOURCE_LESS_ALERT),
+    ]);
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        codebases={[logicalCodebase()]}
+        listMembers={listMembers}
+        onCreate={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("代码库"), "lc_0001");
+
+    const note = await screen.findByTestId("member-index-note-lr-gray");
+    expect(note.textContent).toBe(SOURCE_LESS_ALERT.message_zh);
+    // 无标注成员不渲染标注节点。
+    expect(screen.queryByTestId("member-index-note-lr-api")).toBeNull();
+    // 标注来自已有成员列表响应，不额外发请求。
+    expect(listMembers).toHaveBeenCalledTimes(1);
+    expect(listMembers).toHaveBeenCalledWith("lc_0001");
+  });
+
+  it("无标注成员不渲染任何标注节点（旧 DTO 缺字段 / index_alert=null）", async () => {
+    const listMembers = vi.fn().mockResolvedValue([
+      member("lr-api", "api", "repository_1001"),
+      member("lr-web", "web", "repository_1002", "active", null),
+    ]);
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        codebases={[logicalCodebase()]}
+        listMembers={listMembers}
+        onCreate={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.selectOptions(screen.getByLabelText("代码库"), "lc_0001");
+    await screen.findByRole("group", { name: "成员" });
+
+    expect(screen.queryAllByTestId(/member-index-note-/)).toHaveLength(0);
+  });
+
+  it("标注不影响资格：带标注与不带标注的成员都可勾选并提交", async () => {
+    const onCreate = vi.fn().mockResolvedValue(undefined);
+    const listMembers = vi.fn().mockResolvedValue([
+      member("lr-api", "api", "repository_1001"),
+      member("lr-gray", "gray-config", "repository_1002", "active", SOURCE_LESS_ALERT),
+    ]);
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        codebases={[logicalCodebase()]}
+        listMembers={listMembers}
+        onCreate={onCreate}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Issue 标题"), "跨仓需求");
+    await user.selectOptions(screen.getByLabelText("代码库"), "lc_0001");
+    const group = await screen.findByRole("group", { name: "成员" });
+
+    const apiBox = within(group).getByRole("checkbox", { name: /api · repository_1001/ });
+    const grayBox = within(group).getByRole("checkbox", { name: /gray-config · repository_1002/ });
+    expect(apiBox).toBeEnabled();
+    expect(grayBox).toBeEnabled();
+
+    await user.click(apiBox);
+    await user.click(grayBox);
+    await user.click(screen.getByRole("button", { name: "创建 Issue" }));
+
+    expect(onCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        logical_codebase_id: "lc_0001",
+        focus_repository_ids: ["lr-api", "lr-gray"],
+      }),
+    );
+  });
+
+  it("切换逻辑代码库后立即清除旧成员列表与旧标注（不等新响应）", async () => {
+    const first = deferred<MemberFixture[]>();
+    const second = deferred<MemberFixture[]>();
+    const listMembers = vi.fn((logicalCodebaseId: string) =>
+      logicalCodebaseId === "lc_0001" ? first.promise : second.promise,
+    );
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        codebases={[logicalCodebase(), logicalCodebase({ id: "lc_0002", name: "other" })]}
+        listMembers={listMembers}
+        onCreate={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const select = screen.getByLabelText("代码库");
+    await user.selectOptions(select, "lc_0001");
+    first.resolve([
+      member("lr-old", "old-api", "repository_1001", "active", SOURCE_LESS_ALERT),
+    ]);
+    await screen.findByTestId("member-index-note-lr-old");
+
+    // 切到另一个 LC：立刻不再渲染上一 LC 的成员与标注。
+    await user.selectOptions(select, "lc_0002");
+    expect(screen.queryByTestId("member-index-note-lr-old")).toBeNull();
+    expect(screen.queryByRole("checkbox", { name: /old-api/ })).toBeNull();
+
+    // 新响应到达后只渲染新 LC 的成员。
+    second.resolve([member("lr-new", "new-api", "repository_2001")]);
+    await screen.findByRole("checkbox", { name: /new-api/ });
+    expect(screen.queryByRole("checkbox", { name: /old-api/ })).toBeNull();
+    expect(screen.queryByTestId("member-index-note-lr-old")).toBeNull();
+  });
+
+  it("迟到的旧 LC 响应不得回填上一 LC 的成员与标注", async () => {
+    const first = deferred<MemberFixture[]>();
+    const second = deferred<MemberFixture[]>();
+    const listMembers = vi.fn((logicalCodebaseId: string) =>
+      logicalCodebaseId === "lc_0001" ? first.promise : second.promise,
+    );
+    const user = userEvent.setup();
+
+    render(
+      <CreateLifecycleIssueDialog
+        codebases={[logicalCodebase(), logicalCodebase({ id: "lc_0002", name: "other" })]}
+        listMembers={listMembers}
+        onCreate={vi.fn().mockResolvedValue(undefined)}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const select = screen.getByLabelText("代码库");
+    await user.selectOptions(select, "lc_0001");
+    await user.selectOptions(select, "lc_0002");
+
+    second.resolve([
+      member("lr-new", "new-api", "repository_2001", "active", SOURCE_LESS_ALERT),
+    ]);
+    await screen.findByTestId("member-index-note-lr-new");
+
+    // 旧 LC 的响应迟到：不得回填旧成员/旧标注。
+    await act(async () => {
+      first.resolve([
+        member("lr-old", "old-api", "repository_1001", "active", SOURCE_LESS_ALERT),
+      ]);
+    });
+
+    expect(screen.queryByRole("checkbox", { name: /old-api/ })).toBeNull();
+    expect(screen.queryByTestId("member-index-note-lr-old")).toBeNull();
+    expect(screen.getByTestId("member-index-note-lr-new")).toBeInTheDocument();
   });
 });

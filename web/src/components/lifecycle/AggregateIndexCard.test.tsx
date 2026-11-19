@@ -88,6 +88,125 @@ describe("AggregateIndexCard", () => {
     expect(onRebuild).toHaveBeenCalledOnce();
   });
 
+  it("renders the aggregate-index failure face with its own rebuild action", () => {
+    const onRebuild = vi.fn();
+    render(
+      <AggregateIndexCard
+        index={{
+          state: "active",
+          revision: 7,
+          indexed_at: "2026-08-18T00:00:00Z",
+          warning:
+            "aggregate_index_failed:aggregate_index_member_coverage_failed: no indexable code file under included members [gray-config, msha-sdk]",
+          failure_copy: {
+            title_zh: "成员仓里没有可索引的代码文件",
+            reason_zh:
+              "被纳入的成员 gray-config、msha-sdk 下找不到可索引的源码文件。",
+            action_zh:
+              "把真实源码放进成员仓（.js/.ts/.py/.go/.rs 等）；.html/.json/.md 不算源码。放好后点「重试」。",
+            triage: "environment",
+            machine_line: "aggregate_index_member_coverage_failed",
+          },
+        }}
+        rebuilding={false}
+        onRebuild={onRebuild}
+      />,
+    );
+
+    expect(screen.getByTestId("aggregate-index-failure")).toHaveTextContent(
+      "成员仓里没有可索引的代码文件",
+    );
+    expect(screen.getByTestId("aggregate-index-failure-title")).toHaveTextContent(
+      "成员仓里没有可索引的代码文件",
+    );
+    expect(
+      screen.getByText(
+        "原因：被纳入的成员 gray-config、msha-sdk 下找不到可索引的源码文件。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "怎么做：把真实源码放进成员仓（.js/.ts/.py/.go/.rs 等）；.html/.json/.md 不算源码。放好后点「重试」。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("机器码：aggregate_index_member_coverage_failed"),
+    ).toBeInTheDocument();
+
+    // 原始英文串降级为失败面内的「诊断」次要行，只出现一次。
+    expect(screen.getAllByTestId("aggregate-index-warning")).toHaveLength(1);
+    expect(screen.getByTestId("aggregate-index-warning")).toHaveTextContent(
+      "gray-config",
+    );
+
+    // 失败面自带上动作，标题行不再重复给出「重建索引」。
+    const rebuild = screen.getAllByRole("button", { name: "重建索引" });
+    expect(rebuild).toHaveLength(1);
+    fireEvent.click(rebuild[0]);
+    expect(onRebuild).toHaveBeenCalledOnce();
+  });
+
+  it("prefers the aggregate-index failure face over the index-unavailable face", () => {
+    render(
+      <AggregateIndexCard
+        index={{
+          state: "active",
+          revision: 7,
+          indexed_at: "2026-08-18T00:00:00Z",
+          failure_copy: {
+            title_zh: "成员仓里没有可索引的代码文件",
+            reason_zh: "被纳入的成员 gray-config 下找不到可索引的源码文件。",
+            action_zh: "把真实源码放进成员仓。",
+            triage: "environment",
+            machine_line: "aggregate_index_member_coverage_failed",
+          },
+          evidence_copy: {
+            title_zh: "聚合索引不可用，跨仓证据检索无法执行",
+            reason_zh: "这不是「没有找到证据」：跨仓证据检索要读聚合索引。",
+            action_zh: "在逻辑代码库管理面板的「聚合索引」处点「重建索引」重建聚合索引。",
+            triage: "environment",
+            machine_line: "evidence_index_unavailable",
+          },
+        }}
+        rebuilding={false}
+        onRebuild={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("aggregate-index-failure")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("aggregate-index-evidence-unavailable"),
+    ).toBeNull();
+    expect(screen.getAllByRole("button", { name: "重建索引" })).toHaveLength(1);
+  });
+
+  it("keeps the index-unavailable face when there is no aggregate-index failure copy", () => {
+    render(
+      <AggregateIndexCard
+        index={{
+          state: "active",
+          revision: 7,
+          indexed_at: "2026-08-18T00:00:00Z",
+          evidence_copy: {
+            title_zh: "聚合索引不可用，跨仓证据检索无法执行",
+            reason_zh: "这不是「没有找到证据」：跨仓证据检索要读聚合索引。",
+            action_zh: "在逻辑代码库管理面板的「聚合索引」处点「重建索引」重建聚合索引。",
+            triage: "environment",
+            machine_line: "evidence_index_unavailable",
+          },
+        }}
+        rebuilding={false}
+        onRebuild={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByTestId("aggregate-index-evidence-unavailable"),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("aggregate-index-failure")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "重建索引" })).toHaveLength(1);
+  });
+
   it("shows an actionable stale notice", () => {
     renderCard({
       state: "stale",
@@ -98,5 +217,120 @@ describe("AggregateIndexCard", () => {
     expect(screen.getByTestId("aggregate-index-stale-notice")).toHaveTextContent(
       "索引已过期，请重建后再使用聚合上下文。",
     );
+  });
+
+  it("keeps the failure face and drops the stale notice when the rebuild failed without a usable index", () => {
+    render(
+      <AggregateIndexCard
+        index={{
+          state: "stale",
+          revision: null,
+          indexed_at: null,
+          warning:
+            "aggregate_index_failed:aggregate_index_checkout_unavailable: 主检出不可用",
+          failure_copy: {
+            title_zh: "某个成员的主检出不可用",
+            reason_zh: "成员 msha-sdk 的主检出不可用。",
+            action_zh: "修复该成员的检出后点「重试」。",
+            triage: "environment",
+            machine_line: "aggregate_index_checkout_unavailable",
+          },
+        }}
+        rebuilding={false}
+        onRebuild={vi.fn()}
+      />,
+    );
+
+    // 失败面是唯一可执行面：不再叠加「索引已过期」的重建提示。
+    expect(screen.getByTestId("aggregate-index-failure")).toBeInTheDocument();
+    expect(screen.queryByTestId("aggregate-index-stale-notice")).toBeNull();
+    expect(
+      screen.queryByText("索引已过期，请重建后再使用聚合上下文。"),
+    ).toBeNull();
+
+    // 失败面自带上动作，标题行不再重复给出「重建索引」。
+    expect(screen.getAllByRole("button", { name: "重建索引" })).toHaveLength(1);
+  });
+
+  it("renders the source-less alert line below the index summary", () => {
+    renderCard({
+      state: "active",
+      revision: 7,
+      indexed_at: "2026-08-18T00:00:00Z",
+      source_less_alert: {
+        code: "aggregate_index_member_source_less",
+        message_zh: "已跳过无源码成员：gray-config、msha-sdk。",
+      },
+    });
+
+    const alert = screen.getAllByTestId("aggregate-index-source-less-alert");
+    expect(alert).toHaveLength(1);
+    expect(alert[0]).toHaveTextContent("已跳过无源码成员：gray-config、msha-sdk。");
+  });
+
+  it("renders no alert line when the response carries no source-less alert", () => {
+    renderCard({
+      state: "active",
+      revision: 7,
+      indexed_at: "2026-08-18T00:00:00Z",
+    });
+
+    expect(screen.queryByTestId("aggregate-index-source-less-alert")).toBeNull();
+  });
+
+  it("keeps the source-less alert and the failure face side by side", () => {
+    renderCard({
+      state: "active",
+      revision: 7,
+      indexed_at: "2026-08-18T00:00:00Z",
+      source_less_alert: {
+        code: "aggregate_index_member_source_less",
+        message_zh: "已跳过无源码成员：gray-config、msha-sdk。",
+      },
+      failure_copy: {
+        title_zh: "成员仓里没有可索引的代码文件",
+        reason_zh: "被纳入的成员 gray-config 下找不到可索引的源码文件。",
+        action_zh: "把真实源码放进成员仓。",
+        triage: "environment",
+        machine_line: "aggregate_index_member_coverage_failed",
+      },
+    });
+
+    expect(screen.getAllByTestId("aggregate-index-source-less-alert")).toHaveLength(
+      1,
+    );
+    expect(screen.getAllByTestId("aggregate-index-failure")).toHaveLength(1);
+    expect(
+      screen.queryByTestId("aggregate-index-evidence-unavailable"),
+    ).toBeNull();
+    expect(screen.getAllByRole("button", { name: "重建索引" })).toHaveLength(1);
+  });
+
+  it("renders the failure face for a degraded index", () => {
+    render(
+      <AggregateIndexCard
+        index={{
+          state: "degraded",
+          revision: 7,
+          indexed_at: "2026-08-18T00:00:00Z",
+          warning: "aggregate_index_degraded:aggregate_index_checkout_unavailable",
+          failure_copy: {
+            title_zh: "某个成员的主检出不可用",
+            reason_zh: "成员 msha-sdk 的主检出不可用。",
+            action_zh: "修复该成员的检出后点「重试」。",
+            triage: "environment",
+            machine_line: "aggregate_index_checkout_unavailable",
+          },
+        }}
+        rebuilding={false}
+        onRebuild={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("aggregate-index-failure")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("aggregate-index-evidence-unavailable"),
+    ).toBeNull();
+    expect(screen.getAllByRole("button", { name: "重建索引" })).toHaveLength(1);
   });
 });

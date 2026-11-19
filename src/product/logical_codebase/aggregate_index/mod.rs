@@ -4,6 +4,7 @@ pub mod exclude;
 pub mod freshness;
 pub mod operation;
 pub mod snapshot;
+pub mod source_scan;
 pub mod store;
 pub mod types;
 

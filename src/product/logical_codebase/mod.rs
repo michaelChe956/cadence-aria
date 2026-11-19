@@ -48,6 +48,7 @@ pub mod repository_routing;
 pub mod root_recipe_receipt;
 pub mod snapshot_validator;
 pub mod store;
+pub mod story_index_refresh;
 pub mod types;
 
 pub use aggregate_initialization::{

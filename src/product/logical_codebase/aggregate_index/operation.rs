@@ -18,9 +18,14 @@ use super::codegraph_coverage::{
     AggregateCoverageProbe, CliFallbackCoverageProbe, CodeGraphCoverage, CoverageOutcome,
     summarize_coverage,
 };
+use super::source_scan::{
+    ARIA_SOURCE_SUFFIX_CALIBRATED_CODEGRAPH_VERSION, GitVisibleFiles, MemberSourceVerdict,
+    MemberSourceVisibility, SourceScanBudget, scan_member_source,
+};
 use super::{
     AggregateIndexError, AggregateIndexRecord, AggregateIndexSnapshotCollector,
     AggregateIndexStatus, AggregateIndexStore, CodeGraphCli, CodeGraphExcludeGenerator,
+    codegraph_cli::parse_codegraph_version,
 };
 
 const EXCLUDED_QUERIES: [&str; 4] = [
@@ -43,6 +48,9 @@ pub struct AggregateIndexAcceptance {
     pub excluded_queries: BTreeMap<String, Vec<PathBuf>>,
     /// 健康闸/CLI 回退的审计 warning（不阻断激活）。
     pub warning: Option<String>,
+    /// 本世代经盘检确认无源码、跳过代码检索的成员目录名（manifest 顺序）。
+    /// 只有验收成功的世代才据此落跳过事实（design D1/D4）。
+    pub skipped_members: Vec<String>,
 }
 
 impl AggregateIndexAcceptance {
@@ -51,6 +59,8 @@ impl AggregateIndexAcceptance {
         coverage: &dyn AggregateCoverageProbe,
         root: &Path,
         member_names: &[String],
+        visibility: &dyn MemberSourceVisibility,
+        budget: &mut SourceScanBudget,
     ) -> Result<Self, AggregateIndexError> {
         let sdk_warning: Option<String>;
         // 成员覆盖优先走 codegraph SDK（hasFilesUnder 判定，载荷几百字节；
@@ -94,13 +104,22 @@ impl AggregateIndexAcceptance {
             None => {
                 let files = match cli.files(root) {
                     Ok(files) => files,
-                    // 空索引＝每个成员都没有任何可索引文件：把上游人读提示
-                    // 归并为业务语义的覆盖不足错误并点名全部成员，而不是让
-                    // `expected value at line 1 column 1` 这类 JSON 解析天书透出。
+                    // 空索引归一：exit 0 的人读提示既不是截断也不是非法
+                    // JSON/协议错误——归并为「全员未覆盖」（空清单经
+                    // verify_member_coverage 天然得到全 false），继续走交叉
+                    // 验收区分「确认无源码可跳过」与「磁盘有源码却漏收」。
                     Err(AggregateIndexError::Failed {
                         code: "codegraph_files_empty_index",
                         ..
-                    }) => return Err(member_coverage_failed(member_names)),
+                    }) => {
+                        tracing::warn!(
+                            code = "codegraph_files_empty_index",
+                            path = "cli_files",
+                            "codegraph files returned an empty-index notice; treating every \
+                             member as uncovered"
+                        );
+                        Vec::new()
+                    }
                     Err(error) => {
                         // 一条 warn：截断（载荷不完整）——实际字节不可得
                         // （错误只带上限），影响范围在 fail_building 里按
@@ -132,8 +151,12 @@ impl AggregateIndexAcceptance {
                 (covered, sdk_warning)
             }
         };
-        require_member_coverage(&member_covered, member_names)?;
-        // 排除性查询载荷小，保持既有 CLI query_json 路径不动。
+        // 交叉验收（design D1：先覆盖、后盘检、再汇总）：未覆盖成员逐个
+        // 有界盘检，区分「漏收 / 仅工作树 / 无法确认 / 确认无源码可跳过」。
+        let skipped_members =
+            cross_verify_uncovered(root, &member_covered, member_names, visibility, budget)?;
+        // 排除性查询载荷小，保持既有 CLI query_json 路径不动——交叉验收
+        // 通过（含跳过成员）不放松负向排除。
         let mut excluded_queries = BTreeMap::new();
         for query in EXCLUDED_QUERIES {
             let result = cli.query_json(root, query)?;
@@ -148,6 +171,7 @@ impl AggregateIndexAcceptance {
             member_covered,
             excluded_queries,
             warning,
+            skipped_members,
         })
     }
 
@@ -167,6 +191,9 @@ pub struct AggregateIndexOperation {
     /// 成员覆盖探针：生产=new() 装配 SDK 探针；DI 构造器默认 CLI 回退
     /// 探针（保持既有 CLI 验收行为，测试可注入桩）。
     coverage: Arc<dyn AggregateCoverageProbe>,
+    /// 成员可见范围提供者：默认生产 `GitVisibleFiles`；测试可注入桩
+    /// （交叉验收的盘检口径由它界定，见 source_scan.rs）。
+    source_visibility: Arc<dyn MemberSourceVisibility>,
 }
 
 impl AggregateIndexOperation {
@@ -219,12 +246,19 @@ impl AggregateIndexOperation {
             cli,
             snapshots,
             coverage: Arc::new(CliFallbackCoverageProbe),
+            source_visibility: Arc::new(GitVisibleFiles::production()),
         }
     }
 
     /// 覆盖探针注入 seam（测试桩 / for_lc 探针继承）。
     pub fn with_coverage_probe(mut self, coverage: Arc<dyn AggregateCoverageProbe>) -> Self {
         self.coverage = coverage;
+        self
+    }
+
+    /// 可见范围提供者注入 seam（测试桩；默认生产 `GitVisibleFiles`）。
+    pub fn with_source_visibility(mut self, visibility: Arc<dyn MemberSourceVisibility>) -> Self {
+        self.source_visibility = visibility;
         self
     }
 
@@ -242,6 +276,7 @@ impl AggregateIndexOperation {
             self.snapshots.for_lc(lc_id),
         )
         .with_coverage_probe(self.coverage.clone())
+        .with_source_visibility(self.source_visibility.clone())
     }
 
     /// Clones the logical-codebase store handle for sibling services such as
@@ -540,6 +575,10 @@ impl AggregateIndexOperation {
             self.coverage.as_ref(),
             &manifest.provider_context_root,
             &member_names,
+            // 交叉验收注入点：verify 是关联函数，可见范围与盘检预算由
+            // 调用方显式传入（每次验收一批共享预算）。
+            self.source_visibility.as_ref(),
+            &mut SourceScanBudget::new_batch(),
         ) {
             Ok(acceptance) => {
                 let summary = summarize_coverage(&acceptance.member_covered);
@@ -564,11 +603,39 @@ impl AggregateIndexOperation {
         record.observed_after_member_snapshots = after;
         record.status = AggregateIndexStatus::Active;
         record.codegraph_root = manifest.provider_context_root.clone();
+        // 版本漂移只记软告警（不改判定、不阻断激活）：实测 codegraph 版本
+        // 与源码后缀清单的校准基线不一致 ⇒ 追加一条可审计 warning。
+        let drift_warning = codegraph_version_drift_warning(&codegraph_version);
         // 实测版本透传：激活世代记录真实 CLI 版本（版本门实测值），
         // building/failed 世代保持空值，不伪造未实测的版本号。
         record.codegraph_version = codegraph_version;
         record.config_digest = config_digest;
+        // 成功世代才落跳过事实（design D4）：把盘检确认无源码的成员标进
+        // 本世代 before 快照（included 语义不动）。observed_after 是构建期
+        // 观测、失败世代不走这里，都不打标记；上一代的标记也不跨代继承。
+        let skipped_checkout_ids: BTreeSet<_> = included
+            .iter()
+            .zip(member_names.iter())
+            .filter(|(_, name)| acceptance.skipped_members.contains(name))
+            .map(|((_, checkout), _)| checkout.checkout_id)
+            .collect();
+        for snapshot in record.member_snapshots.iter_mut() {
+            if skipped_checkout_ids.contains(&snapshot.checkout_id) {
+                snapshot.mark_source_less();
+            }
+        }
         record.warning = acceptance.soft_warning();
+        if let Some(drift) = drift_warning {
+            tracing::warn!(
+                observed = %record.codegraph_version,
+                baseline = ARIA_SOURCE_SUFFIX_CALIBRATED_CODEGRAPH_VERSION,
+                "codegraph version drift from source-suffix calibration baseline"
+            );
+            record.warning = Some(match record.warning.take() {
+                Some(existing) => format!("{existing}；{drift}"),
+                None => drift,
+            });
+        }
         record.updated_at = now;
         let active = self.store.replace_active(project_id, record)?;
         // 激活落点回写 manifest 指针：evidence 链首查按
@@ -833,21 +900,57 @@ fn verify_member_coverage(
     Ok(result)
 }
 
-/// SDK/CLI 归一后的成员覆盖判定：点名全部未覆盖成员再失败（bootstrap
-/// 失败卡要呈现完整的「无可索引代码文件的成员」清单，不止第一个）。
-fn require_member_coverage(
+/// 交叉验收：对未覆盖成员做有界盘检，按四值结论分桶汇总（design D1/D3）。
+///
+/// `visibility` 与 `budget` 都由调用方传入（**明确的注入点**）：测试直调
+/// 本函数即可注入耗尽预算/失败可见范围，不依赖真实 sleep 或竞态。
+/// 返回「经盘检确认无源码、可跳过」的成员名单（manifest 顺序）。
+fn cross_verify_uncovered(
+    root: &Path,
     member_covered: &BTreeMap<String, bool>,
     member_names: &[String],
-) -> Result<(), AggregateIndexError> {
-    let uncovered = member_names
-        .iter()
-        .filter(|name| !member_covered.get(*name).copied().unwrap_or(false))
-        .cloned()
-        .collect::<Vec<_>>();
-    if uncovered.is_empty() {
-        Ok(())
+    visibility: &dyn MemberSourceVisibility,
+    budget: &mut SourceScanBudget,
+) -> Result<Vec<String>, AggregateIndexError> {
+    let mut disk_source = Vec::new();
+    let mut worktree_only = Vec::new();
+    let mut scan_unknown = Vec::new();
+    let mut coverage_unknown = Vec::new();
+    let mut no_source = Vec::new();
+    for name in member_names {
+        match member_covered.get(name) {
+            Some(true) => {}
+            Some(false) => match scan_member_source(&root.join(name), visibility, budget) {
+                MemberSourceVerdict::SourceInNormalPath => disk_source.push(name.clone()),
+                MemberSourceVerdict::SourceOnlyInWorktrees => worktree_only.push(name.clone()),
+                MemberSourceVerdict::Unknown => scan_unknown.push(name.clone()),
+                MemberSourceVerdict::NoSource => no_source.push(name.clone()),
+            },
+            // 覆盖键缺失：连覆盖状态都不知道 ⇒ 无法确认，不得进任何盘检
+            // 桶、不得计入「全员确认无源码」（S1/R1）。
+            None => coverage_unknown.push(name.clone()),
+        }
+    }
+    // 失败主码优先级（一条文案不得混类点名，每桶只点名同类成员）：
+    // 普通路径漏收 > .worktrees/ 独有源码 > 盘检无法确认 > 覆盖状态未知。
+    if !disk_source.is_empty() {
+        return Err(member_coverage_failed_on_disk(&disk_source));
+    }
+    if !worktree_only.is_empty() {
+        return Err(member_source_excluded(&worktree_only));
+    }
+    if !scan_unknown.is_empty() {
+        return Err(source_scan_incomplete(&scan_unknown));
+    }
+    if !coverage_unknown.is_empty() {
+        return Err(member_coverage_state_unknown(&coverage_unknown));
+    }
+    // 无上述阻断且至少一个成员被覆盖 ⇒ 通过，返回可跳过名单；
+    // 全员确认无源码（无任何被覆盖成员）⇒ 失败，不发布空索引当成功。
+    if member_covered.values().any(|covered| *covered) {
+        Ok(no_source)
     } else {
-        Err(member_coverage_failed(&uncovered))
+        Err(all_members_source_less(member_names))
     }
 }
 
@@ -903,15 +1006,92 @@ fn index_health_warning(outcome: &CoverageOutcome) -> Option<String> {
     }
 }
 
-/// 覆盖不足的业务语义错误：点名无可索引代码文件的成员清单（空索引时
-/// 即全部成员），并携带「每成员至少 1 个可索引代码文件」修复指引。
-fn member_coverage_failed(uncovered: &[String]) -> AggregateIndexError {
+/// 版本漂移软告警（**不改判定、不阻断激活**）：实测 codegraph 版本 ≠
+/// 源码后缀清单的校准基线 ⇒ 记一条可审计 warning（含实测版本、基线
+/// 版本、后果与复校准指引）。
+fn codegraph_version_drift_warning(observed: &str) -> Option<String> {
+    let baseline = ARIA_SOURCE_SUFFIX_CALIBRATED_CODEGRAPH_VERSION;
+    // 实测输出可能带前缀（形如 `codegraph 1.6.3`）：按三元组比，避免同
+    // 一版本被误报成漂移。
+    let drifted = observed.trim() != baseline
+        && !matches!(
+            (parse_codegraph_version(observed), parse_codegraph_version(baseline)),
+            (Some(actual), Some(base)) if actual == base
+        );
+    if !drifted {
+        return None;
+    }
+    Some(format!(
+        "codegraph 版本漂移（不阻断激活）：已安装 {observed}，源码后缀清单校准基线 {baseline}；\
+         新版若不再收录清单内某后缀，该类仓会被判「漏收」而失败；\
+         复校准：按 cadence/notes/2026-11-18_校准_CodeGraph源码后缀清单_1.6.3_v1.0.md \
+         的测量命令重跑后缀收录表，更新 ARIA_SOURCE_EXTENSIONS 与基线常量"
+    ))
+}
+
+/// 五个失败构造函数（design D3）：message 必须含 `included members [`，
+/// 供 `failure_copy.rs` 的 `subject_from_message` 抽成员名；中文成品只在
+/// 码表（`failure_copy_table.inc.rs`），这里只写机器事实。
+/// 漏收：普通路径 git 可见范围内有 Aria 源码，索引却未收录。复用覆盖
+/// 失败码；`source found on disk;` 事实前缀选择码表的磁盘事实成品变体
+/// （MUST NOT 说用户没放源码）。
+fn member_coverage_failed_on_disk(uncovered: &[String]) -> AggregateIndexError {
     AggregateIndexError::Failed {
         code: "aggregate_index_member_coverage_failed",
         message: format!(
-            "no indexable code file under included members [{}]; each included member \
-             needs at least 1 indexable code file",
+            "source found on disk; no indexed files under included members [{}]; check member \
+             paths and ignore rules, then rebuild",
             uncovered.join(", ")
+        ),
+    }
+}
+
+/// 源码只在被排除的 `.worktrees/` 子树（第二段诊断）：专属失败码。
+fn member_source_excluded(members: &[String]) -> AggregateIndexError {
+    AggregateIndexError::Failed {
+        code: "aggregate_index_member_source_excluded",
+        message: format!(
+            "source exists only under .worktrees/ for included members [{}]; move it into the \
+             member main checkout",
+            members.join(", ")
+        ),
+    }
+}
+
+/// 盘检无法确认（权限/IO/深度/条目数/时限/取消）：MUST NOT 断言该成员
+/// 没有源码。
+fn source_scan_incomplete(members: &[String]) -> AggregateIndexError {
+    AggregateIndexError::Failed {
+        code: "aggregate_index_source_scan_incomplete",
+        message: format!(
+            "source scan incomplete (permission/io/depth/entry/time limit) for included members \
+             [{}]; cannot confirm absence of source",
+            members.join(", ")
+        ),
+    }
+}
+
+/// 覆盖键缺失（连覆盖状态都不知道）：按「无法确认」处理，复用无法确认
+/// 码（R1：不得复用覆盖失败码，也不得当「已确认无源码」）。
+fn member_coverage_state_unknown(members: &[String]) -> AggregateIndexError {
+    AggregateIndexError::Failed {
+        code: "aggregate_index_source_scan_incomplete",
+        message: format!(
+            "coverage state unknown for included members [{}]; no indexed files and no disk \
+             scan evidence",
+            members.join(", ")
+        ),
+    }
+}
+
+/// 全部成员经盘检确认无源码：没有任何被覆盖成员，索引不可激活。
+fn all_members_source_less(members: &[String]) -> AggregateIndexError {
+    AggregateIndexError::Failed {
+        code: "aggregate_index_all_members_source_less",
+        message: format!(
+            "no source found after bounded disk scan under included members [{}]; add a member \
+             that contains source",
+            members.join(", ")
         ),
     }
 }
@@ -984,3 +1164,8 @@ fn new_index_id() -> String {
 
 #[cfg(test)]
 include!("operation_tests.inc.rs");
+
+#[cfg(test)]
+mod source_scope_tests {
+    include!("source_scope_tests.inc.rs");
+}

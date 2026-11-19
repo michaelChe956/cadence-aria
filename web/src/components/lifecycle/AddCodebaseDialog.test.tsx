@@ -160,10 +160,14 @@ describe("AddCodebaseDialog", () => {
     expect(
       screen.getByTestId("lc-layout-tree-member-frontend"),
     ).toHaveTextContent("直接子目录");
-    // 可索引范围说明（只在 .worktrees/ 下的代码不可被索引）。
-    expect(screen.getByTestId("lc-layout-tree-note")).toHaveTextContent(
-      "只在 .worktrees/ 下的代码不可被索引",
-    );
+    // 可索引范围说明按第六条口径改写：源码位置 + .worktrees/ 边界 +
+    // 确认无源码的成员可跳过（仍是项目成员，可作配置/文档类变更的目标仓）+
+    // 至少要有一个成员被索引覆盖。三处入口共用同一组件 ⇒ 在渲染文字处断言。
+    const note = screen.getByTestId("lc-layout-tree-note");
+    expect(note).toHaveTextContent("只在 .worktrees/ 下的代码不可被索引");
+    expect(note).toHaveTextContent("经盘检确认没有源码的成员会被跳过并提示");
+    expect(note).toHaveTextContent("仍可作配置/文档类变更的目标仓");
+    expect(note).toHaveTextContent("至少要有一个成员被索引覆盖");
 
     // 文案同源：弹窗源码里不含第二份布局文案，只引用同一组件。
     expect(addCodebaseDialogSource).toContain("LogicalCodebaseLayoutTree");

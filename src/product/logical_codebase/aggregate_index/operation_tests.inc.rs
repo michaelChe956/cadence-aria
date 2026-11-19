@@ -121,26 +121,30 @@ mod tests {
     #[test]
     fn build_rejects_missing_member_coverage() {
         let fixture = aggregate_index_fixture();
-        fixture.cli.files_return(["api/src/A.java"]);
+        let operation = fixture
+            .operation()
+            .with_coverage_probe(Arc::new(StubCoverageProbe::with_members(&[("api", true)])));
         assert!(matches!(
-            fixture.operation().build("project_0001", 3),
-            Err(AggregateIndexError::Failed { code, .. }) if code == "aggregate_index_member_coverage_failed"
+            operation.build("project_0001", 3),
+            Err(AggregateIndexError::Failed { code, message })
+                if code == "aggregate_index_source_scan_incomplete"
+                    && message.contains("coverage state unknown for included members [web]")
         ));
     }
 
     /// ① 现场（/tmp/notify-center）：成员仓仅 .git+README，init 建出
     /// 0 文件库，codegraph 1.6 的 `files --json` 以 exit 0 输出人读提示。
-    /// 该形态必须归并为业务语义的覆盖不足错误并点名全部成员，而不是
-    /// 把提示文本当 JSON 解析出 `expected value at line 1 column 1` 天书。
+    /// 空索引归一为「全员未覆盖」进交叉验收：夹具成员目录无任何源码 ⇒
+    /// 全员无源码码（磁盘有源码的分支由 source_scope_tests 承担）。
     #[test]
-    fn build_on_empty_index_reports_member_coverage_naming_all_members() {
+    fn build_on_empty_index_reports_all_members_source_less() {
         let fixture = aggregate_index_fixture();
         fixture.cli.files_return_empty_index_notice();
 
         let error = fixture.operation().build("project_0001", 3).unwrap_err();
         assert!(
             matches!(&error, AggregateIndexError::Failed { code, .. }
-                if *code == "aggregate_index_member_coverage_failed"),
+                if *code == "aggregate_index_all_members_source_less"),
             "empty index must surface business semantics, got: {error}"
         );
         let message = error.to_string();
@@ -148,23 +152,21 @@ mod tests {
         assert!(message.contains("web"), "must name member web: {message}");
     }
 
-    /// ① 部分覆盖：点名全部无可索引文件的成员清单（不止第一个），
-    /// 供 bootstrap 失败卡呈现「每成员至少 1 个可索引代码文件」指引。
+    /// ① 部分覆盖：未覆盖成员经盘检确认无源码 ⇒ 跳过并激活（included
+    /// 语义不动）；漏收成员的点名失败由 source_scope_tests 的磁盘事实
+    /// 变体用例承担。
     #[test]
-    fn build_names_all_uncovered_members_in_coverage_failure() {
+    fn build_activates_and_marks_source_less_member_skipped() {
         let fixture = aggregate_index_fixture();
         fixture.cli.files_return(["api/src/A.java"]);
 
-        let error = fixture.operation().build("project_0001", 3).unwrap_err();
-        assert!(
-            matches!(&error, AggregateIndexError::Failed { code, .. }
-                if *code == "aggregate_index_member_coverage_failed"),
-            "unexpected error: {error}"
+        let record = fixture.operation().build("project_0001", 3).unwrap();
+        assert_eq!(record.status, AggregateIndexStatus::Active);
+        assert_eq!(
+            record.member_snapshots[1].skip_reason,
+            Some(super::super::types::AggregateIndexMemberSkipReason::NoSource)
         );
-        assert!(
-            error.to_string().contains("members [web]"),
-            "must name the uncovered member list, got: {error}"
-        );
+        assert!(record.member_snapshots[1].included);
     }
 
     /// ② 防漂移（探测路径）：durable Active 记录与磁盘库漂移——

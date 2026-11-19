@@ -6,6 +6,12 @@ export type LogicalCodebaseMemberDto = {
   physical_repository_id: string | null;
   alias: string;
   status: LogicalCodebaseMemberStatus;
+  /// REQ-MRE-01：服务端下发的结构化「无源码、未纳入代码搜索」标注
+  /// （与卡片 `source_less_alert`、证据 `not_searched` 同构）。
+  ///
+  /// 缺省 / null = 无该事实（旧响应兼容）；**仅作提示**，不承载任何选择资格：
+  /// 复选、提交、禁用、主仓校验一律不受它影响。
+  index_alert?: { code: string; message_zh: string } | null;
 };
 
 export type LogicalCodebaseMembersResponse = {

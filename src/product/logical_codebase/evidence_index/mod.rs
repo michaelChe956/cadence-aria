@@ -59,7 +59,8 @@ pub enum EvidenceError {
 pub const MAX_EVIDENCE_HITS: usize = 200;
 
 /// 查询符号的最大长度（字符），超出按非法查询词拒绝。
-const MAX_QUERY_SYMBOL_CHARS: usize = 512;
+/// （唯一口径：evidence_mediator 入口级校验直接复用，见 `validate_symbol`。）
+pub(crate) const MAX_QUERY_SYMBOL_CHARS: usize = 512;
 
 /// 跨仓证据查询封装：包住 `CodeGraphCli::query_json`，按成员目录过滤并截断。
 pub struct EvidenceIndexQuery {
@@ -119,7 +120,7 @@ impl From<AggregateIndexError> for EvidenceError {
     }
 }
 
-fn validate_symbol(symbol: &str) -> Result<(), EvidenceError> {
+pub(crate) fn validate_symbol(symbol: &str) -> Result<(), EvidenceError> {
     if symbol.trim().is_empty() {
         return Err(EvidenceError::InvalidQuery {
             reason: "query symbol must not be empty".to_string(),

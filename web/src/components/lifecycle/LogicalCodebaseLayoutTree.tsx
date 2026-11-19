@@ -41,7 +41,7 @@ export function LogicalCodebaseLayoutTree({
         data-testid="lc-layout-tree-note"
         className="mt-1 text-xs text-[var(--aria-ink-muted)]"
       >
-        成员仓代码要放在仓库根或普通子目录；只在 .worktrees/ 下的代码不可被索引。
+        成员仓代码要放在仓库根或普通子目录；只在 .worktrees/ 下的代码不可被索引。经盘检确认没有源码的成员会被跳过并提示（它仍是项目成员，仍可作配置/文档类变更的目标仓），但至少要有一个成员被索引覆盖。
       </p>
     </div>
   );

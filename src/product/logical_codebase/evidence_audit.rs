@@ -34,6 +34,10 @@ static EVIDENCE_AUDIT_LOG_MUTEX: Mutex<()> = Mutex::new(());
 /// 单条证据查询审计记录（对应设计 §5.3 的 `evidence_query` 条目，serde snake_case）。
 ///
 /// `role` 为 Coder/Reviewer 自报标注（含 `role_self_reported` 标记），由 T6 调用方拼装。
+///
+/// 片8A（REQ-COD-05 delta，纯加法）：新增可选字段 `not_searched_reason`——
+/// 只解释「为什么没检索」（如配置仓目标跳过 CodeGraph 查询的原因码）；既有
+/// 字段与判定口径不变，`#[serde(default)]` 保证既有审计 JSON（无该字段）仍可读。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct EvidenceAuditRecord {
@@ -45,6 +49,10 @@ pub struct EvidenceAuditRecord {
     pub snapshot_refs: Vec<String>,
     pub budget_remaining: usize,
     pub timestamp: String,
+    /// 未检索原因（可选）：None = 已真实检索；Some(code) = 该条目未派发
+    /// CodeGraph 查询的原因码（片8 填充，本片仅落字段与接线）。
+    #[serde(default)]
+    pub not_searched_reason: Option<String>,
 }
 
 /// 审计 jsonl 的持久化行：`sequence`（递增序号，仿 role_run_event 先例）+ 记录字段。
@@ -175,6 +183,7 @@ mod tests {
             snapshot_refs: vec!["web/src/app.ts".to_string()],
             budget_remaining: 119_880,
             timestamp: timestamp.to_string(),
+            not_searched_reason: None,
         }
     }
 
@@ -323,5 +332,45 @@ mod tests {
             .collect();
         sequences.sort_unstable();
         assert_eq!(sequences, vec![1, 2, 3, 4, 5]);
+    }
+
+    // ---- 片8A：not_searched_reason 可选字段（纯加法）的向后兼容断言 ----
+
+    /// 既有审计 JSON（无 `not_searched_reason` 字段）必须仍可反序列化——
+    /// 新字段缺省 None，形状向后兼容。
+    #[test]
+    fn audit_record_without_not_searched_reason_still_deserializes() {
+        let legacy = serde_json::json!({
+            "attempt_id": ATTEMPT_ID,
+            "role": "coder(role_self_reported)",
+            "query": "usedByWeb",
+            "hit_count": 1,
+            "result_chars": 120,
+            "snapshot_refs": ["web/src/app.ts"],
+            "budget_remaining": 119_880,
+            "timestamp": "2026-08-14T00:00:00Z",
+        });
+        let parsed: EvidenceAuditRecord = serde_json::from_value(legacy)
+            .expect("legacy audit JSON without not_searched_reason must deserialize");
+        assert_eq!(parsed.attempt_id, ATTEMPT_ID);
+        assert_eq!(parsed.not_searched_reason, None);
+    }
+
+    /// 带 `not_searched_reason` 的记录可序列化往返（Some 语义保留）。
+    #[test]
+    fn audit_record_with_not_searched_reason_round_trips() {
+        let mut with_reason = record("usedByWeb", "2026-08-14T00:00:00Z");
+        with_reason.not_searched_reason = Some("aggregate_index_target_scope_skipped".to_string());
+        let serialized = serde_json::to_value(&with_reason).expect("serialize");
+        assert_eq!(
+            serialized["not_searched_reason"],
+            "aggregate_index_target_scope_skipped"
+        );
+        let parsed: EvidenceAuditRecord =
+            serde_json::from_value(serialized).expect("round trip deserializes");
+        assert_eq!(
+            parsed.not_searched_reason.as_deref(),
+            Some("aggregate_index_target_scope_skipped")
+        );
     }
 }

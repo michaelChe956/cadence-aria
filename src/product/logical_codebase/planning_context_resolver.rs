@@ -23,6 +23,9 @@ use crate::product::logical_codebase::planning_context_set::{
     render_compact_inventory,
 };
 use crate::product::logical_codebase::policy::AggregatePolicyArtifactStore;
+use crate::product::logical_codebase::story_index_refresh::{
+    StoryIndexFreshness, refresh_for_story,
+};
 use crate::product::logical_codebase::{
     InvalidationRecord, LogicalCodebaseStore, LogicalRepositoryId,
 };
@@ -179,11 +182,33 @@ impl PlanningIndexFreshness for AggregateIndexFreshnessService {
     }
 }
 
+/// Story 前刷新失败面（REQ-PLN-18）：刷新/验收失败携带稳定码 + 原始事实，
+/// 上层据此映射 422，**不得**降级成 `ProductStoreError::Io` 的通用 500。
+#[derive(Debug)]
+pub enum StoryPlanningError {
+    /// 刷新或验收失败（AI 不启动）：`code` 为内层稳定码，`detail` 为原始事实。
+    Refresh { code: String, detail: String },
+    /// 非刷新失败（authority 解析 / context 解析 / 快照落盘）：沿用既有产品错误。
+    Store(ProductStoreError),
+}
+
+impl From<ProductStoreError> for StoryPlanningError {
+    fn from(error: ProductStoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+/// 无法确定内层稳定码时的兜底（已登记于 `failure_copy_table.inc.rs`）。
+const STORY_REFRESH_FALLBACK_CODE: &str = "aggregate_index_unavailable";
+
 pub struct PlanningContextResolver {
     paths: ProductAppPaths,
     sets: PlanningContextSetResolver,
     snapshots: PlanningContextSnapshotStore,
     freshness: Arc<dyn PlanningIndexFreshness>,
+    /// Story 专用后端；仅 `with_story_freshness_service` 路径装配，其余构造为
+    /// `None`（Design/WorkItemPlan/resume 不经此字段）。
+    story_freshness: Option<Arc<dyn StoryIndexFreshness>>,
 }
 
 impl PlanningContextResolver {
@@ -196,7 +221,21 @@ impl PlanningContextResolver {
             ),
             CodeGraphExcludeGenerator,
         ));
-        Self::with_freshness_service(paths, Arc::new(freshness))
+        Self::with_story_freshness_service(paths, Arc::new(freshness))
+    }
+
+    /// 单个 `Arc<AggregateIndexFreshnessService>` 同时 coerce 成规划路径与
+    /// Story 路径两个 trait object（`AggregateIndexOperation` 无 `Clone`，
+    /// 两条路径必须共享同一个 operation）。
+    pub fn with_story_freshness_service(
+        paths: ProductAppPaths,
+        service: Arc<AggregateIndexFreshnessService>,
+    ) -> Self {
+        let freshness: Arc<dyn PlanningIndexFreshness> = service.clone();
+        let story_freshness: Arc<dyn StoryIndexFreshness> = service;
+        let mut resolver = Self::with_freshness_service(paths, freshness);
+        resolver.story_freshness = Some(story_freshness);
+        resolver
     }
 
     #[cfg(test)]
@@ -249,6 +288,7 @@ impl PlanningContextResolver {
             snapshots: PlanningContextSnapshotStore::new(paths.clone()),
             paths,
             freshness,
+            story_freshness: None,
         }
     }
 
@@ -287,6 +327,49 @@ impl PlanningContextResolver {
             resolved.inventory_injection.rendered.push('\n');
             resolved.inventory_injection.rendered.push_str(&warning);
         }
+        self.snapshots.save(&resolved.snapshot)?;
+        Ok(resolved)
+    }
+
+    /// Story 生成专用入口（REQ-PLN-18）：先按 issue 的 lc_id 重扫，再走三分支
+    /// （首建 / 复用 / 增量同步 + 重新验收）；刷新失败带稳定码返回，调用方在
+    /// AI 启动之前停下。与 `build_with_fresh_index` 的 LKG + 告警语义互相独立。
+    pub async fn build_with_fresh_index_for_story(
+        &self,
+        project_id: &str,
+        issue_id: &str,
+        targets: &[LogicalRepositoryId],
+    ) -> Result<ResolvedPlanningContext, StoryPlanningError> {
+        // 首步 lc 解析（conflict fail-closed）；`for_lc` 才按 LC 子树隔离读取范围。
+        let lc_id = self.resolve_issue_authority_lc_id(project_id, issue_id)?;
+        let backend = match lc_id.as_deref() {
+            Some(lc_id) => self.story_freshness.as_ref().map(|f| f.for_lc(lc_id)),
+            None => self.story_freshness.clone(),
+        };
+        let Some(backend) = backend else {
+            return Err(StoryPlanningError::Refresh {
+                code: STORY_REFRESH_FALLBACK_CODE.to_string(),
+                detail: "story index refresh backend is not configured".to_string(),
+            });
+        };
+        let project = project_id.to_string();
+        // 刷新会跑 git / CodeGraph 子进程，必须离开 Tokio worker。
+        tokio::task::spawn_blocking(move || refresh_for_story(&project, &*backend))
+            .await
+            .map_err(|error| StoryPlanningError::Refresh {
+                code: STORY_REFRESH_FALLBACK_CODE.to_string(),
+                detail: format!("story index refresh task failed: {error}"),
+            })?
+            .map_err(|error| {
+                use crate::product::logical_codebase::story_index_refresh::StoryIndexRefreshError;
+                let (StoryIndexRefreshError::UnreadableGeneration { code, message }
+                | StoryIndexRefreshError::VerificationFailed { code, message }) = error;
+                StoryPlanningError::Refresh {
+                    code,
+                    detail: message,
+                }
+            })?;
+        let resolved = self.resolve_context(project_id, issue_id, targets)?;
         self.snapshots.save(&resolved.snapshot)?;
         Ok(resolved)
     }
