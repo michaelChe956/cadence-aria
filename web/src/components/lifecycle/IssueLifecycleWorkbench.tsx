@@ -67,6 +67,7 @@ import {
   type PendingWorkItemPlanLaunch,
 } from "./useIssueLifecycleGeneration";
 import { IssueQueue } from "./IssueQueue";
+
 import {
   defaultCollapsedGroups,
   deriveIssueQueue,
@@ -102,6 +103,9 @@ export { defaultLaunchTitle } from "./IssueLifecycleWorkbenchParts";
 // 稳定空数组引用：避免每次 render 新建 [] 使 useMemo 依赖失效。
 const EMPTY_GROUP_KEYS: IssueQueueGroupKey[] = [];
 const EMPTY_ISSUES: ProductIssue[] = [];
+
+// 在途删除键为空的稳定引用：状态初值与「无在途」派生结果复用同一引用。
+const NO_DELETING_CARD_KEYS: ReadonlySet<string> = new Set();
 
 // N6（REQ-CS-01）：多仓 plan 判定——plan 的 work items 落在 ≥2 个非兼容投影
 // target 仓时走新一键 coding-start；单仓/无分仓投影保持 v1 旧路径不变。
@@ -164,7 +168,11 @@ export function IssueLifecycleWorkbench({
   );
   const [focusedIssueId, setFocusedIssueId] = useState<string | null>(null);
   const [selectedCardKey, setSelectedCardKey] = useState<string | null>(null);
-  const [deletingCardKey, setDeletingCardKey] = useState<string | null>(null);
+  // 在途删除键集合（PR #92 三审 Important）：并发删除各自记账，先结算者只移除
+  // 自己的键；行 busy（deletingIssueIds）与卡片 busy 标量键均从此集合派生。
+  const [deletingCardKeys, setDeletingCardKeys] = useState<
+    ReadonlySet<string>
+  >(NO_DELETING_CARD_KEYS);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [registrationDialogOpen, setRegistrationDialogOpen] = useState(false);
@@ -284,7 +292,7 @@ export function IssueLifecycleWorkbench({
     setDeletedLogicalCodebases([]);
     setFocusedIssueId(null);
     setSelectedCardKey(null);
-    setDeletingCardKey(null);
+    setDeletingCardKeys(NO_DELETING_CARD_KEYS);
     setSelectedLogicalCodebaseId(null);
     setAggregateInitialization(null);
   }
@@ -568,16 +576,25 @@ export function IssueLifecycleWorkbench({
     (sum, group) => sum + group.total,
     0,
   );
-  // 队列行的 aria-busy 需要 issueId；页面只维护 cardKey（issue 卡的 key 形如
-  // "issue:<issueId>:<issueId>"），这里反向取回当前正在删除的 Issue。删除键在
-  // handleDeleteIssue 发起删除时即生成，不依赖生命周期详情已加载——「生命周
-  // 期待查看」组的未加载行同样能从键内取回 issueId，DELETE 在途期间行进入
-  // busy、删除按钮禁用，连点不会发出第二个 DELETE；其他实体键（story/design/
-  // work item 等）不以 "issue:" 开头，不命中任何队列行。
-  const deletingIssueId =
-    deletingCardKey !== null && deletingCardKey.startsWith("issue:")
-      ? (deletingCardKey.split(":")[1] ?? null)
-      : null;
+  // 队列行 busy 的在途 issueId 集合：删除键在 handleDeleteIssue 发起删除时即生成
+  // （形如 "issue:<issueId>:<issueId>"），不依赖生命周期详情已加载——「生命周期
+  // 待查看」组的未加载行同样能从键内取回 issueId。集合经 View 传给 IssueQueue
+  // （deletingIssueIds），B 发起不得解除 A 行的 busy；其他实体键不以 "issue:"
+  // 开头，不命中任何队列行。卡片 busy 的在途键集合（deletingCardKeys）原样传给
+  // Parts（deletingKey）做成员判定。
+  const deletingIssueIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const key of deletingCardKeys) {
+      if (!key.startsWith("issue:")) {
+        continue;
+      }
+      const issueId = key.split(":")[1];
+      if (issueId) {
+        ids.add(issueId);
+      }
+    }
+    return ids.size === 0 ? NO_DELETING_CARD_KEYS : ids;
+  }, [deletingCardKeys]);
   // R9 fix round 1【Important-2】：LC 作用域数据（成员/指针发布/聚合索引/轮询）抽取为
   // 独立 hook（纯搬运，无行为改动）。
   const {
@@ -807,6 +824,38 @@ export function IssueLifecycleWorkbench({
     });
   }
 
+  // 焦点可见性（PR #92 三审 Important）：焦点行迁入折叠组或组渲染上限之外时，
+  // 队列请求让该 Issue 可见。满足方式：行已在本组渲染 rows 内则只展开该组；不在
+  // （被每组截断）则以无上限重派生定位其所在组，展开并把该组加入「显示更多」
+  // 集合（无上限重派生覆盖任意下标）。行不在任何组（如被过滤移除）时无动作，
+  // 队列自行清除待还原记录。
+  function handleEnsureIssueVisible(issueId: string) {
+    if (!selectedProjectId) {
+      return;
+    }
+    const renderedGroup = issueQueueGroups.find((group) =>
+      group.rows.some((row) => row.issueId === issueId),
+    );
+    const targetKey =
+      renderedGroup?.key ??
+      deriveIssueQueue(lifecycles, {
+        filterText: queueFilterText,
+        pendingIssues,
+        perGroupLimit: Number.MAX_SAFE_INTEGER,
+      }).find((group) => group.rows.some((row) => row.issueId === issueId))
+        ?.key;
+    if (targetKey === undefined) {
+      return;
+    }
+    if (collapsedQueueGroups.includes(targetKey)) {
+      // 折叠态下 toggle 即展开，与手动展开同一存储路径。
+      handleToggleQueueGroup(targetKey);
+    }
+    if (renderedGroup === undefined) {
+      handleShowMoreQueueGroup(targetKey);
+    }
+  }
+
   function handleOpenFullIssue(card: LifecycleCardData) {
     const cardKey = lifecycleCardKey(card);
     setSelectedCardKey(cardKey);
@@ -1028,7 +1077,7 @@ export function IssueLifecycleWorkbench({
     setError,
     setFocusedIssueId,
     setSelectedCardKey,
-    setDeletingCardKey,
+    setDeletingCardKeys,
     setGroupCodingDeleteBusy,
     closeDrawer,
     refresh,
@@ -1145,7 +1194,7 @@ export function IssueLifecycleWorkbench({
       selectedProject={selectedProject}
       focusedIssueId={focusedIssueId}
       selectedCardKey={selectedCardKey}
-      deletingCardKey={deletingCardKey}
+      deletingCardKeys={deletingCardKeys}
       selectedIssue={selectedIssueColumns.issue[0] ?? null}
       unloadedIssue={unloadedIssue}
       issueDetailError={focusedIssueId ? detailErrors.get(focusedIssueId) : undefined}
@@ -1224,7 +1273,8 @@ export function IssueLifecycleWorkbench({
       onGenerateStorySpec={handleGenerateStorySpecFromQueue}
       onDeleteIssue={(issueId) => void handleDeleteIssue(issueId)}
       onShowMoreQueueGroup={handleShowMoreQueueGroup}
-      deletingIssueId={deletingIssueId}
+      onEnsureIssueVisible={handleEnsureIssueVisible}
+      deletingIssueIds={deletingIssueIds}
       onSelectCard={handleSelectCard}
       onOpenFullIssue={handleOpenFullIssue}
       onDeleteCard={handleDeleteLifecycleCard}

@@ -31,7 +31,7 @@ type Args = {
   setError: Dispatch<SetStateAction<string | null>>;
   setFocusedIssueId: Dispatch<SetStateAction<string | null>>;
   setSelectedCardKey: Dispatch<SetStateAction<string | null>>;
-  setDeletingCardKey: Dispatch<SetStateAction<string | null>>;
+  setDeletingCardKeys: Dispatch<SetStateAction<ReadonlySet<string>>>;
   setGroupCodingDeleteBusy: Dispatch<SetStateAction<boolean>>;
   closeDrawer: () => void;
   refresh: (
@@ -39,6 +39,31 @@ type Args = {
     optimisticIssues?: readonly ProductIssue[],
   ) => Promise<void>;
 };
+
+// 在途删除键集合的不可变更新：命中时保持原引用，避免无谓重渲染。
+function addDeletingKey(
+  current: ReadonlySet<string>,
+  key: string,
+): ReadonlySet<string> {
+  if (current.has(key)) {
+    return current;
+  }
+  const next = new Set(current);
+  next.add(key);
+  return next;
+}
+
+function removeDeletingKey(
+  current: ReadonlySet<string>,
+  key: string,
+): ReadonlySet<string> {
+  if (!current.has(key)) {
+    return current;
+  }
+  const next = new Set(current);
+  next.delete(key);
+  return next;
+}
 
 export function useIssueLifecycleWorkbenchDeletion({
   selectedProjectId,
@@ -50,7 +75,7 @@ export function useIssueLifecycleWorkbenchDeletion({
   setError,
   setFocusedIssueId,
   setSelectedCardKey,
-  setDeletingCardKey,
+  setDeletingCardKeys,
   setGroupCodingDeleteBusy,
   closeDrawer,
   refresh,
@@ -60,9 +85,10 @@ export function useIssueLifecycleWorkbenchDeletion({
         setError("缺少 Project");
         return;
       }
-
       const cardKey = lifecycleEntityKey("issue", issueId, issueId);
-      setDeletingCardKey(cardKey);
+      // 并发删除（PR #92 三审 Important）：在途键入集合而非单键覆盖——先删 A 再删
+      // B 时两行都保持 busy，先结算的只移除自己的键。
+      setDeletingCardKeys((current) => addDeletingKey(current, cardKey));
       setError(null);
       try {
         await Promise.all([
@@ -86,7 +112,9 @@ export function useIssueLifecycleWorkbenchDeletion({
         if (isCurrentProject(selectedProjectId)) setError(errorMessage(reason, "删除 Issue 失败"));
       } finally {
         if (isCurrentProject(selectedProjectId)) {
-          setDeletingCardKey((current) => current === cardKey ? null : current);
+          setDeletingCardKeys((current) =>
+            removeDeletingKey(current, cardKey),
+          );
         }
       }
     }
@@ -126,7 +154,7 @@ export function useIssueLifecycleWorkbenchDeletion({
       };
 
       const cardKey = lifecycleCardKey(card);
-      setDeletingCardKey(cardKey);
+      setDeletingCardKeys((current) => addDeletingKey(current, cardKey));
       setError(null);
       try {
         try {
@@ -166,7 +194,7 @@ export function useIssueLifecycleWorkbenchDeletion({
         if (isCurrentProject(selectedProjectId)) setError(errorMessage(reason, "删除生命周期实体失败"));
       } finally {
         if (isCurrentProject(selectedProjectId)) {
-          setDeletingCardKey((current) => current === cardKey ? null : current);
+          setDeletingCardKeys((current) => removeDeletingKey(current, cardKey));
         }
       }
     }

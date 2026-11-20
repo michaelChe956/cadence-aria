@@ -29,6 +29,10 @@ const GROUP_LABEL: Record<IssueQueueGroupKey, string> = {
   unloaded: "生命周期待查看",
 };
 
+// PR #92 三审 Important（并发删除）：行 busy 需覆盖并发在途的全部 Issue——
+// deletingIssueIds 是在途 issueId 集合（受控，父层派生），标量 deletingIssueId
+// 仅为单删除旧通道保留（直接渲染队列的既有测试在用），两者取并集。
+
 // 迁组行的焦点还原目标：按 data-issue-id 定位行，再取标题 span 所在按钮。
 function findRowTitleButton(
   root: HTMLElement,
@@ -61,9 +65,15 @@ export function IssueQueue(props: {
   onGenerateStorySpec: (issueId: string) => void;
   onDeleteIssue: (issueId: string) => void;
   deletingIssueId?: string | null;
+  // 并发删除在途的 issueId 集合：B 发起不得解除 A 行的在途禁用。
+  deletingIssueIds?: ReadonlySet<string> | null;
   loading?: boolean;
   // 受控「显示更多」：父层收到组 key 后以更高 perGroupLimit 重派生该组 rows。
   onShowMoreGroup?: (key: IssueQueueGroupKey) => void;
+  // 焦点可见性：行迁入折叠组/超出组渲染上限时请求父层让该 Issue 可见（展开所在
+  // 组、提升该组渲染上限），随后队列照常还原焦点；父层无法使其可见时清除待还原
+  // 记录，不抢焦点。
+  onEnsureIssueVisible?: (issueId: string) => void;
 }): JSX.Element {
   const {
     groups,
@@ -76,8 +86,10 @@ export function IssueQueue(props: {
     onGenerateStorySpec,
     onDeleteIssue,
     deletingIssueId = null,
+    deletingIssueIds = null,
     loading = false,
     onShowMoreGroup,
+    onEnsureIssueVisible,
   } = props;
 
   // 非受控回退模式的「已追加」本地 state：与产生它的 filterText 绑定，
@@ -103,9 +115,11 @@ export function IssueQueue(props: {
   // （focusout 的下一落点不在队列区域内——含点击非聚焦空白区域后落回 <body>），迁组
   // 不得把焦点抢回，因此在 focusout 时即丢弃记录，而非等提交后再判断。
   const sectionRef = useRef<HTMLElement | null>(null);
-  const lastRowFocusRef = useRef<{ issueId: string; element: Element } | null>(
-    null,
-  );
+  const lastRowFocusRef = useRef<{
+    issueId: string;
+    element: Element;
+    visibilityRequested: boolean;
+  } | null>(null);
 
   const handleSectionFocus = (event: FocusEvent<HTMLElement>) => {
     const row =
@@ -118,6 +132,7 @@ export function IssueQueue(props: {
         : {
             issueId: row.getAttribute("data-issue-id") ?? "",
             element: event.target,
+            visibilityRequested: false,
           };
   };
 
@@ -150,20 +165,32 @@ export function IssueQueue(props: {
     if (prev.element.isConnected) {
       return;
     }
-    lastRowFocusRef.current = null;
     const active = document.activeElement;
     if (active !== null && active !== document.body && active.isConnected) {
       // 焦点已被其他元素接管（如父层焦点管理），不抢占。
+      lastRowFocusRef.current = null;
       return;
     }
     const root = sectionRef.current;
     if (root === null) {
+      lastRowFocusRef.current = null;
       return;
     }
     const titleButton = findRowTitleButton(root, prev.issueId);
     if (titleButton !== null) {
+      lastRowFocusRef.current = null;
       titleButton.focus();
+      return;
     }
+    // 行未被渲染：迁入折叠组（折叠态不渲染 rows）或落在组渲染上限之外（父层截断）。
+    // 请父层让该 Issue 可见——展开所在组、提升该组渲染上限；仅请求一次，父层处理后
+    // 的下一轮提交内行已可见则照常还原焦点，仍不可见则清除待还原记录，不抢焦点。
+    if (!prev.visibilityRequested && onEnsureIssueVisible != null) {
+      lastRowFocusRef.current = { ...prev, visibilityRequested: true };
+      onEnsureIssueVisible(prev.issueId);
+      return;
+    }
+    lastRowFocusRef.current = null;
   });
 
   // 防御性排序：无论传入顺序如何，组一律按 ISSUE_QUEUE_GROUP_ORDER 渲染。
@@ -281,7 +308,12 @@ export function IssueQueue(props: {
                         // （OpenSpec workbench-progressive-issue-loading）。
                         onGenerateStorySpec={row.group === "unloaded" ? undefined : () => onGenerateStorySpec(row.issueId)}
                         onDelete={() => onDeleteIssue(row.issueId)}
-                        deleting={row.issueId === deletingIssueId}
+                        // 并发删除：busy 判定取「在途 issueId 集合 ∪ 标量
+                        // deletingIssueId」，B 发起不得解除 A 的在途禁用。
+                        deleting={
+                          (deletingIssueIds?.has(row.issueId) ?? false) ||
+                          row.issueId === deletingIssueId
+                        }
                       />
                     ))}
                     {showMoreVisible ? (

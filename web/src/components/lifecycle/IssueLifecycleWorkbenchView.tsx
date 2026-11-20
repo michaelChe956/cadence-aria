@@ -41,7 +41,7 @@ export type IssueLifecycleWorkbenchViewProps = {
   projects: Project[]; codebases: CodebaseSummaryDto[]; repositories: Repository[];
   selectedProjectId: string | null; issueCount: number; busy: boolean; error: string | null;
   selectedProject?: Project; focusedIssueId: string | null; selectedCardKey: string | null;
-  deletingCardKey: string | null; selectedIssue: LifecycleCardData | null;
+  deletingCardKeys: ReadonlySet<string>; selectedIssue: LifecycleCardData | null;
   unloadedIssue?: ProductIssue; issueDetailError?: string; issueListLoading: boolean;
   storySpecs: LifecycleCardData[]; designSpecs: LifecycleCardData[]; workItems: LifecycleCardData[];
   workItemRepositoryGroups: WorkItemRepositoryGroup[]; issueQueueGroups: IssueQueueGroup[];
@@ -85,7 +85,10 @@ export type IssueLifecycleWorkbenchViewProps = {
   onToggleQueueGroup: (key: IssueQueueGroupKey) => void; onQueueFilterTextChange: (text: string) => void;
   onSelectIssue: (id: string) => void; onGenerateStorySpec: (id: string) => void;
   onDeleteIssue: (id: string) => void; onShowMoreQueueGroup: (key: IssueQueueGroupKey) => void;
-  deletingIssueId: string | null; onSelectCard: (card: LifecycleCardData) => void;
+  // 焦点可见性（PR #92 三审 Important）：转发给队列，行迁入折叠组/组渲染上限
+  // 之外时由 workbench 展开所在组并提升该组渲染上限。
+  onEnsureIssueVisible?: (issueId: string) => void;
+  deletingIssueIds: ReadonlySet<string>; onSelectCard: (card: LifecycleCardData) => void;
   onOpenFullIssue: (card: LifecycleCardData) => void; onDeleteCard: (card: LifecycleCardData) => void;
   onGenerateForStage: (stage: WorkbenchStageKey) => void; onCloseDrawer: () => void;
   onOpenWorkspaceFromDrawer: () => void; onOpenCodingWorkspaceFromDrawer: () => void;
@@ -123,7 +126,7 @@ function AlertLines({ text }: { text: string }) {
 
 export function IssueLifecycleWorkbenchView({
   projects, codebases, repositories, selectedProjectId, issueCount, busy, error, selectedProject,
-  focusedIssueId, selectedCardKey, deletingCardKey, selectedIssue, storySpecs, designSpecs, workItems,
+  focusedIssueId, selectedCardKey, deletingCardKeys, selectedIssue, storySpecs, designSpecs, workItems,
   unloadedIssue, issueDetailError, issueListLoading,
   workItemRepositoryGroups, issueQueueGroups, queueCollapsed, queueTotalCount, collapsedQueueGroups,
   queueFilterText, logicalCodebases, activeLogicalCodebaseId, activeLogicalCodebaseName,
@@ -142,7 +145,7 @@ export function IssueLifecycleWorkbenchView({
   knowledgeBasePreflightFailure = null,
   onStartKnowledgeBase = noop, onCancelKnowledgeBase = noop, onOpenKnowledgeBaseDetail = noop,
   onCreateKnowledgeBaseBootstrapInputs = noop, onDismissKnowledgeBasePreflightFailure = noop,
-  onSelectIssue, onGenerateStorySpec, onDeleteIssue, onShowMoreQueueGroup, deletingIssueId, onSelectCard,
+  onSelectIssue, onGenerateStorySpec, onDeleteIssue, onShowMoreQueueGroup, onEnsureIssueVisible, deletingIssueIds, onSelectCard,
   onOpenFullIssue, onDeleteCard, onGenerateForStage, onCloseDrawer, onOpenWorkspaceFromDrawer,
   onOpenCodingWorkspaceFromDrawer, onGenerateNext, onDeleteFromDrawer,
   onDeleteAllCodingWorkspacesFromDrawer, groupCodingDeleteBusy, dialogs,
@@ -175,8 +178,8 @@ export function IssueLifecycleWorkbenchView({
           <LogicalCodebaseSummaryBar summary={{ lcName: activeLogicalCodebaseName, indexState: (aggregateIndex as { state?: string } | null)?.state ?? null, publicationStatus: latestPointerPublication?.status ?? null, hasWarning: lcSummaryHasWarning }} expanded={lcSummaryExpanded} onToggle={onToggleLcSummary} />
         </> : null}
         <div className="flex h-[calc(100dvh-6rem)] min-h-0 gap-3">
-          {queueCollapsed ? <div data-testid="issue-queue-collapsed-rail" className="flex w-10 shrink-0 flex-col items-center gap-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] py-2"><button type="button" aria-label="展开 Issue 队列" aria-expanded={false} onClick={onToggleQueueCollapsed} className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"><PanelLeftOpen className="h-4 w-4" /></button><span data-testid="issue-queue-rail-count" className="shrink-0 rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">{queueTotalCount}</span></div> : <div data-testid="issue-queue-column" className="grid w-72 min-h-0 shrink-0 grid-rows-[auto_minmax(0,1fr)] gap-2"><button type="button" aria-label="折叠 Issue 队列" aria-expanded onClick={onToggleQueueCollapsed} className="inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 self-start rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 text-[11px] font-semibold text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"><PanelLeftClose className="h-3.5 w-3.5" />折叠队列</button><IssueQueue groups={issueQueueGroups} loading={issueListLoading} focusedIssueId={focusedIssueId} collapsedGroups={collapsedQueueGroups} onToggleGroup={onToggleQueueGroup} filterText={queueFilterText} onFilterTextChange={onQueueFilterTextChange} onSelectIssue={onSelectIssue} onGenerateStorySpec={onGenerateStorySpec} onDeleteIssue={onDeleteIssue} onShowMoreGroup={onShowMoreQueueGroup} deletingIssueId={deletingIssueId} /></div>}
-          <div className="flex min-h-0 min-w-0 flex-1"><IssueLifecycleDetail issue={selectedIssue} unloadedIssue={unloadedIssue} issueDetailError={issueDetailError} storySpecs={storySpecs} designSpecs={designSpecs} workItems={workItems} workItemRepositoryGroups={workItemRepositoryGroups} selectedKey={selectedCardKey} deliverySummary={selectedIssueDeliverySummary} onSelect={onSelectCard} onOpenFullIssue={onOpenFullIssue} onDelete={onDeleteCard} onGenerateForStage={onGenerateForStage} deletingKey={deletingCardKey} /></div>
+          {queueCollapsed ? <div data-testid="issue-queue-collapsed-rail" className="flex w-10 shrink-0 flex-col items-center gap-2 rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel-muted)] py-2"><button type="button" aria-label="展开 Issue 队列" aria-expanded={false} onClick={onToggleQueueCollapsed} className="inline-flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"><PanelLeftOpen className="h-4 w-4" /></button><span data-testid="issue-queue-rail-count" className="shrink-0 rounded border border-[var(--aria-line)] bg-[var(--aria-panel)] px-1 py-0.5 font-mono text-[11px] text-[var(--aria-ink-muted)]">{queueTotalCount}</span></div> : <div data-testid="issue-queue-column" className="grid w-72 min-h-0 shrink-0 grid-rows-[auto_minmax(0,1fr)] gap-2"><button type="button" aria-label="折叠 Issue 队列" aria-expanded onClick={onToggleQueueCollapsed} className="inline-flex h-7 shrink-0 cursor-pointer items-center justify-center gap-1.5 self-start rounded-md border border-[var(--aria-line)] bg-[var(--aria-panel)] px-2 text-[11px] font-semibold text-[var(--aria-ink-muted)] transition-colors duration-200 hover:border-[var(--aria-primary)] hover:text-[var(--aria-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--aria-primary)]"><PanelLeftClose className="h-3.5 w-3.5" />折叠队列</button><IssueQueue groups={issueQueueGroups} loading={issueListLoading} focusedIssueId={focusedIssueId} collapsedGroups={collapsedQueueGroups} onToggleGroup={onToggleQueueGroup} filterText={queueFilterText} onFilterTextChange={onQueueFilterTextChange} onSelectIssue={onSelectIssue} onGenerateStorySpec={onGenerateStorySpec} onDeleteIssue={onDeleteIssue} onShowMoreGroup={onShowMoreQueueGroup} deletingIssueIds={deletingIssueIds} onEnsureIssueVisible={onEnsureIssueVisible} /></div>}
+          <div className="flex min-h-0 min-w-0 flex-1"><IssueLifecycleDetail issue={selectedIssue} unloadedIssue={unloadedIssue} issueDetailError={issueDetailError} storySpecs={storySpecs} designSpecs={designSpecs} workItems={workItems} workItemRepositoryGroups={workItemRepositoryGroups} selectedKey={selectedCardKey} deliverySummary={selectedIssueDeliverySummary} onSelect={onSelectCard} onOpenFullIssue={onOpenFullIssue} onDelete={onDeleteCard} onGenerateForStage={onGenerateForStage} deletingKey={deletingCardKeys} /></div>
         </div>
       </div>} />
     </div>
