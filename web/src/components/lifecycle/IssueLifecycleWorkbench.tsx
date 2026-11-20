@@ -204,6 +204,12 @@ export function IssueLifecycleWorkbench({
     Record<string, boolean>
   >({});
   const refreshRequestId = useRef(0);
+  // 队列加载态归属：记录 issueListReadPending 由哪一轮刷新置位。清理按
+  // 归属判定而非「仍是最新刷新」——更新一轮刷新若在进入列表读取前就失败
+  // （如项目目录读取失败），旧一轮的结算仍要解除加载态，否则队列会在已无
+  // 请求在途时永远显示「正在加载议题…」；而归属已易主（新一轮已重新置位）
+  // 时旧一轮不清新一轮的标记。
+  const issueListLoadingOwnerRef = useRef<number | null>(null);
   const activeProjectId = useRef<string | null>(null);
   const pendingProjectSelection = useRef<string | null>(null);
   const createdIssuesRef = useRef<ProductIssue[]>([]);
@@ -327,6 +333,7 @@ export function IssueLifecycleWorkbench({
         setLogicalCodebaseMembers([]);
         setAggregateIndex(null);
         // 无项目可加载：清掉可能残留的列表在途标记（如最后一个项目被删）。
+        issueListLoadingOwnerRef.current = null;
         setIssueListLoading(false);
         return;
       }
@@ -372,9 +379,13 @@ export function IssueLifecycleWorkbench({
             drawerIssueId,
           );
         } finally {
-          // 列表读取结算（无论成败）即解除队列加载态；被更新的刷新取代时
-          // 不清——新一轮刷新自行管理该状态。
-          if (isLatestRefresh(requestId)) {
+          // 列表读取结算（无论成败）即解除队列加载态：清理只认置位归属
+          // （本轮 token），不要求本轮仍是最新刷新——被更新一轮取代但该轮
+          // 从未进入列表读取（如项目目录读取失败）时仍由本轮解除，避免
+          // 加载态在无请求在途时永久卡死；新一轮已重新置位（归属易主）时
+          // 本轮不清新一轮的标记。
+          if (issueListLoadingOwnerRef.current === requestId) {
+            issueListLoadingOwnerRef.current = null;
             setIssueListLoading(false);
           }
         }
@@ -397,7 +408,9 @@ export function IssueLifecycleWorkbench({
         );
       };
 
-      // 列表读取开始：置位队列加载态（结算在 loadIssues 的 finally）。
+      // 列表读取开始：置位队列加载态并登记本轮归属（结算在 loadIssues 的
+      // finally，按归属解除）。
+      issueListLoadingOwnerRef.current = requestId;
       setIssueListLoading(true);
       await Promise.all([loadIssues(), loadProjectMetadata()]);
     } catch (reason) {
@@ -1117,7 +1130,14 @@ export function IssueLifecycleWorkbench({
       selectedProjectId={selectedProjectId}
       issueCount={issueCount}
       busy={busy}
-      error={error ?? deepLinkFailureAlert}
+      // 页面级错误与深链失败提示并存时合流为同一条多行 alert（AlertLines
+      // 保留换行）：页面级错误保持在前的措辞顺序，深链提示仍可见，不新增
+      // 第二条错误通道。
+      error={
+        error && deepLinkFailureAlert
+          ? `${error}\n${deepLinkFailureAlert}`
+          : (error ?? deepLinkFailureAlert)
+      }
       selectedProject={selectedProject}
       focusedIssueId={focusedIssueId}
       selectedCardKey={selectedCardKey}

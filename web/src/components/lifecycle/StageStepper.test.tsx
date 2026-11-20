@@ -30,6 +30,7 @@ const STATE_COLOR: Record<StagePipState, string> = {
   active: "bg-[var(--aria-primary)]",
   blocked: "bg-amber-500",
   pending: "bg-[var(--aria-line)]",
+  unknown: "border border-dashed border-[var(--aria-line)]",
 };
 
 // 视觉规范允许的 hover 反馈前缀：仅颜色/边框/阴影（不得有位移/尺寸类）。

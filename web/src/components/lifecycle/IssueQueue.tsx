@@ -99,6 +99,9 @@ export function IssueQueue(props: {
   // 稳定），但 key 相同不足以跨父保住节点，因此显式还原：借 focus 冒泡记录最近在行内
   // 获得焦点的元素；每次提交后若该节点确已被本次渲染移除且行仍在（换了组），把焦点
   // 还原到该行标题按钮。未迁组 / 行被移除 / 焦点已被其他元素接管时均不动作。
+  // 焦点还原意图：还原只修复「迁组本身造成的焦点丢失」。若用户已主动把焦点移出队列
+  // （focusout 的下一落点不在队列区域内——含点击非聚焦空白区域后落回 <body>），迁组
+  // 不得把焦点抢回，因此在 focusout 时即丢弃记录，而非等提交后再判断。
   const sectionRef = useRef<HTMLElement | null>(null);
   const lastRowFocusRef = useRef<{ issueId: string; element: Element } | null>(
     null,
@@ -116,6 +119,25 @@ export function IssueQueue(props: {
             issueId: row.getAttribute("data-issue-id") ?? "",
             element: event.target,
           };
+  };
+
+  // focusout 冒泡：焦点离开行内元素时看下一落点。仍在队列区域内（行间移动、移向
+  // 过滤输入框/组头）则不动记录，交给随后的 focus 冒泡刷新；落在队列外或 <body>
+  // （relatedTarget 为空）说明用户主动离开，丢弃待还原记录。
+  const handleSectionBlur = (event: FocusEvent<HTMLElement>) => {
+    if (!(event.target instanceof Element)) {
+      return;
+    }
+    if (
+      event.target.closest('[data-testid="issue-queue-row"]') === null
+    ) {
+      return;
+    }
+    const next = event.relatedTarget;
+    if (next instanceof Node && sectionRef.current?.contains(next)) {
+      return;
+    }
+    lastRowFocusRef.current = null;
   };
 
   useLayoutEffect(() => {
@@ -161,6 +183,7 @@ export function IssueQueue(props: {
     <section
       ref={sectionRef}
       onFocus={handleSectionFocus}
+      onBlur={handleSectionBlur}
       role="region"
       aria-label="Issue 卡片列表"
       aria-busy={loading || undefined}
@@ -253,8 +276,11 @@ export function IssueQueue(props: {
                         row={row}
                         focused={row.issueId === focusedIssueId}
                         onSelect={() => onSelectIssue(row.issueId)}
+                        // unloaded 行（详情未到）：删除不依赖生命周期详情，保持可用；
+                        // 生成 Story 的幂等性依赖是否已有 Story，未知时不得放行
+                        // （OpenSpec workbench-progressive-issue-loading）。
                         onGenerateStorySpec={row.group === "unloaded" ? undefined : () => onGenerateStorySpec(row.issueId)}
-                        onDelete={row.group === "unloaded" ? undefined : () => onDeleteIssue(row.issueId)}
+                        onDelete={() => onDeleteIssue(row.issueId)}
                         deleting={row.issueId === deletingIssueId}
                       />
                     ))}

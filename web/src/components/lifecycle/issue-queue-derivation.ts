@@ -5,7 +5,7 @@ import { workItemWaitingReason } from "../../state/lifecycle-workbench-store";
 
 export type IssueStageKey = "story" | "design" | "work_item" | "coding";
 
-export type StagePipState = "done" | "active" | "blocked" | "pending";
+export type StagePipState = "done" | "active" | "blocked" | "pending" | "unknown";
 
 export type IssueQueueGroupKey =
   | "needs_story"
@@ -97,7 +97,7 @@ export function deriveIssueQueue(
       title: issue.title,
       status: issue.status,
       group: "unloaded",
-      stagePips: [],
+      stagePips: buildUnknownStagePips(),
       storyCount: 0,
       designCount: 0,
       workItemCount: 0,
@@ -247,4 +247,12 @@ function deriveStagePipState(
     return "active";
   }
   return "pending";
+}
+
+// 未加载行（unloaded 组）的 stagePips：详情未到达，四个阶段状态均未知。
+// unknown 与 pending 语义不同（未知 vs 已知未开始），不得互相替代；详情到达后
+// 该行迁入阶段分组并按 buildStagePips 恢复真实状态
+// （OpenSpec workbench-progressive-issue-loading「详情未到时的行」）。
+function buildUnknownStagePips(): StagePip[] {
+  return STAGE_KEYS.map((stage): StagePip => ({ stage, state: "unknown" }));
 }
