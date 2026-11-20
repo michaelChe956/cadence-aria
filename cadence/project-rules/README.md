@@ -142,6 +142,10 @@
 - **main 分支保护规则**
   - main 分支禁止直接 commit（受 shared `pre-commit` hook 与本规则双约束）；实施/交付一律在功能 worktree 分支进行，主仓 main 仅作合并目标；误在 main 产生的 commit 按「备份 tag → 复位 `origin/main` → cherry-pick 回功能分支」处置。完整规则详见 `cadence/project-rules/branch-protection.md`。
 
+- **仓库结构与合并方式规则（强制）**
+  - 主仓 `core.bare` 保持 `true`，禁止改写或临时覆盖；所有项目内容在功能分支 worktree 中实施；所有分支间合并必须通过 PR，禁止绕过 PR 直推 `main`。
+  - 完整规则详见 `cadence/project-rules/repo-structure-policy.md`。
+
 - **版本发布策略规则（强制）**
   - 🔴 **默认不发 rc / 预发布版本**；除非 owner 明确指示，禁止创建带 `-rc`/`-beta`/`-alpha` 后缀的版本号或 tag。
   - 🔴 **必须先合并再发版**：发版前提是该版本改动已在 `origin/main`；禁止从未合并的功能分支发布任何版本（正式版必须可从 main 复现）。固定顺序：PR 合并进 main → 在合并提交上打版本 tag → 推 tag 触发流水线。
