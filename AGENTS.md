@@ -68,7 +68,7 @@ Skill 调用：Claude/Kimi 原生调用；Codex/pi/omp 清单选择后将用途�
 - 禁止直接修改 `.claude/rules/` 目录下的框架内置规则文件
 - 详见 `cadence/project-rules/README.md`
 - **版本发布策略(强制)**:默认不发 rc/预发布版本;必须**先合并进 main 再发版**,禁止从未合并的功能分支发任何版本;发版后必须核对 npm dist-tags / Release prerelease 标记 / 产物内嵌版本,并同步订正面向用户的文档版本口径 → 详见 `cadence/project-rules/release-policy.md`
-- **仓库结构与合并方式（强制）**：禁止改动主仓的 `core.bare`；所有项目内容在功能分支 worktree 中实施；所有代码合并必须走 PR。详见 `cadence/project-rules/repo-structure-policy.md`。
+- **仓库结构与合并方式（强制）**：禁止改动主仓的 `core.bare`；所有项目内容在功能分支 worktree 中实施；仅将 `origin/main` 同步到自己的功能分支无需 PR，跨分支交付改动必须走 PR。详见 `cadence/project-rules/repo-structure-policy.md`。
 
 ### 7. 代码阅读规则
 - **大范围检索使用 CodeGraph，精确结构阅读优先使用 ast-grep outline** → 详见 `.claude/rules/code-reading.md`
