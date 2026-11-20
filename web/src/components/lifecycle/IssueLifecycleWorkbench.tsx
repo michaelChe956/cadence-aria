@@ -67,19 +67,10 @@ import {
   type PendingWorkItemPlanLaunch,
 } from "./useIssueLifecycleGeneration";
 import { IssueQueue } from "./IssueQueue";
-
-import {
-  defaultCollapsedGroups,
-  deriveIssueQueue,
-  type IssueQueueGroupKey,
-} from "./issue-queue-derivation";
+import { useWorkbenchIssueQueue } from "./useWorkbenchIssueQueue";
 import {
   lcSummaryStorageKey,
-  queueCollapsedStorageKey,
-  queueGroupsStorageKey,
-  readStoredCollapsedGroups,
   readStoredLcSummaryExpanded,
-  readStoredQueueCollapsed,
   writeStoredValue,
 } from "./IssueLifecycleWorkbenchStorage";
 import {
@@ -101,7 +92,6 @@ import { IssueLifecycleWorkbenchView } from "./IssueLifecycleWorkbenchView";
 export { defaultLaunchTitle } from "./IssueLifecycleWorkbenchParts";
 
 // 稳定空数组引用：避免每次 render 新建 [] 使 useMemo 依赖失效。
-const EMPTY_GROUP_KEYS: IssueQueueGroupKey[] = [];
 const EMPTY_ISSUES: ProductIssue[] = [];
 
 // 在途删除键为空的稳定引用：状态初值与「无在途」派生结果复用同一引用。
@@ -192,21 +182,6 @@ export function IssueLifecycleWorkbench({
     useState(false);
   const [aggregateInitializationBusy, setAggregateInitializationBusy] =
     useState(false);
-  // Task 7：双密度外壳的队列状态。全部按 projectId 记忆，仅在首次遇到该 Project 时
-  // 从 localStorage 回填；后续以内存 Map 为权威（2s 轮询不会重置这些 Map）。
-  const [queueCollapsedByProject, setQueueCollapsedByProject] = useState<
-    Record<string, boolean>
-  >({});
-  const [collapsedGroupsByProject, setCollapsedGroupsByProject] = useState<
-    Record<string, IssueQueueGroupKey[]>
-  >({});
-  // 过滤文本与「已追加」组也按 projectId 隔离，避免切 Project 后沿用上一个的过滤态。
-  const [queueFilterByProject, setQueueFilterByProject] = useState<
-    Record<string, string>
-  >({});
-  const [showMoreGroupsByProject, setShowMoreGroupsByProject] = useState<
-    Record<string, IssueQueueGroupKey[]>
-  >({});
   // Task 8：运维摘要条展开态，同样按 projectId 记忆（内存 Map 优先，缺失时读 localStorage）。
   const [lcSummaryExpanded, setLcSummaryExpanded] = useState<
     Record<string, boolean>
@@ -529,53 +504,24 @@ export function IssueLifecycleWorkbench({
     (project) => project.project_id === selectedProjectId,
   );
   const issueCount = issues.length;
-  // Task 7：队列派生与双密度状态的有效值。内存 Map 优先，缺失时从 localStorage 回填
-  // （分组折叠缺省 defaultCollapsedGroups()）。轮询只写 lifecycles，不碰这些 Map。
-  const queueCollapsed = selectedProjectId
-    ? (queueCollapsedByProject[selectedProjectId] ??
-      readStoredQueueCollapsed(selectedProjectId))
-    : false;
-  const collapsedQueueGroups = useMemo<IssueQueueGroupKey[]>(
-    () =>
-      selectedProjectId
-        ? (collapsedGroupsByProject[selectedProjectId] ??
-          readStoredCollapsedGroups(selectedProjectId))
-        : defaultCollapsedGroups(),
-    [collapsedGroupsByProject, selectedProjectId],
-  );
-  const queueFilterText = selectedProjectId
-    ? (queueFilterByProject[selectedProjectId] ?? "")
-    : "";
-  const showMoreQueueGroups = selectedProjectId
-    ? (showMoreGroupsByProject[selectedProjectId] ?? EMPTY_GROUP_KEYS)
-    : EMPTY_GROUP_KEYS;
-  // 「显示更多」受控实现（闭合 Task 4 评审 Important-1）：命中组用无上限 perGroupLimit
-  // 重派生后替换该组 rows，于是 rows.length === total，入口自然消失。
-  const issueQueueGroups = useMemo(() => {
-    const baseGroups = deriveIssueQueue(lifecycles, {
-      filterText: queueFilterText,
-      pendingIssues,
-    });
-    if (showMoreQueueGroups.length === 0) {
-      return baseGroups;
-    }
-    const expandedByKey = new Map(
-      deriveIssueQueue(lifecycles, {
-        filterText: queueFilterText,
-        pendingIssues,
-        perGroupLimit: Number.MAX_SAFE_INTEGER,
-      }).map((group) => [group.key, group]),
-    );
-    return baseGroups.map((group) =>
-      showMoreQueueGroups.includes(group.key)
-        ? (expandedByKey.get(group.key) ?? group)
-        : group,
-    );
-  }, [lifecycles, pendingIssues, queueFilterText, showMoreQueueGroups]);
-  const queueTotalCount = issueQueueGroups.reduce(
-    (sum, group) => sum + group.total,
-    0,
-  );
+  // Task 7：双密度队列状态收在 useWorkbenchIssueQueue（large_file_guard 拆分，
+  // 纯搬运零行为变化）：按 projectId 记忆折叠/过滤/「已追加」组并派生队列分组。
+  const {
+    queueCollapsed,
+    collapsedQueueGroups,
+    queueFilterText,
+    issueQueueGroups,
+    queueTotalCount,
+    handleToggleQueueCollapsed,
+    handleToggleQueueGroup,
+    handleQueueFilterTextChange,
+    handleShowMoreQueueGroup,
+    handleEnsureIssueVisible,
+  } = useWorkbenchIssueQueue({
+    selectedProjectId,
+    lifecycles,
+    pendingIssues,
+  });
   // 队列行 busy 的在途 issueId 集合：删除键在 handleDeleteIssue 发起删除时即生成
   // （形如 "issue:<issueId>:<issueId>"），不依赖生命周期详情已加载——「生命周期
   // 待查看」组的未加载行同样能从键内取回 issueId。集合经 View 传给 IssueQueue
@@ -760,100 +706,6 @@ export function IssueLifecycleWorkbench({
       return;
     }
     void handleLaunchWorkspace("story", card);
-  }
-
-  // Task 7：折叠/展开仅切换密度——不动 focusedIssueId/selectedCardKey，不发请求。
-  function handleToggleQueueCollapsed() {
-    if (!selectedProjectId) {
-      return;
-    }
-    const next = !queueCollapsed;
-    setQueueCollapsedByProject((existing) => ({
-      ...existing,
-      [selectedProjectId]: next,
-    }));
-    writeStoredValue(
-      queueCollapsedStorageKey(selectedProjectId),
-      next ? "1" : "0",
-    );
-  }
-
-  function handleToggleQueueGroup(key: IssueQueueGroupKey) {
-    if (!selectedProjectId) {
-      return;
-    }
-    const next = collapsedQueueGroups.includes(key)
-      ? collapsedQueueGroups.filter((candidate) => candidate !== key)
-      : [...collapsedQueueGroups, key];
-    setCollapsedGroupsByProject((existing) => ({
-      ...existing,
-      [selectedProjectId]: next,
-    }));
-    writeStoredValue(
-      queueGroupsStorageKey(selectedProjectId),
-      JSON.stringify(next),
-    );
-  }
-
-  function handleQueueFilterTextChange(text: string) {
-    if (!selectedProjectId) {
-      return;
-    }
-    setQueueFilterByProject((existing) => ({
-      ...existing,
-      [selectedProjectId]: text,
-    }));
-    // 过滤变化即重派生：「已追加」组复位（闭合 Task 4 评审 Important-2）。
-    setShowMoreGroupsByProject((existing) =>
-      (existing[selectedProjectId] ?? EMPTY_GROUP_KEYS).length === 0
-        ? existing
-        : { ...existing, [selectedProjectId]: [] },
-    );
-  }
-
-  function handleShowMoreQueueGroup(key: IssueQueueGroupKey) {
-    if (!selectedProjectId) {
-      return;
-    }
-    setShowMoreGroupsByProject((existing) => {
-      const current = existing[selectedProjectId] ?? EMPTY_GROUP_KEYS;
-      if (current.includes(key)) {
-        return existing;
-      }
-      return { ...existing, [selectedProjectId]: [...current, key] };
-    });
-  }
-
-  // 焦点可见性（PR #92 三审 Important）：焦点行迁入折叠组或组渲染上限之外时，
-  // 队列请求让该 Issue 可见。满足方式：行已在本组渲染 rows 内则只展开该组；不在
-  // （被每组截断）则以无上限重派生定位其所在组，展开并把该组加入「显示更多」
-  // 集合（无上限重派生覆盖任意下标）。行不在任何组（如被过滤移除）时无动作，
-  // 队列自行清除待还原记录。
-  function handleEnsureIssueVisible(issueId: string) {
-    if (!selectedProjectId) {
-      return;
-    }
-    const renderedGroup = issueQueueGroups.find((group) =>
-      group.rows.some((row) => row.issueId === issueId),
-    );
-    const targetKey =
-      renderedGroup?.key ??
-      deriveIssueQueue(lifecycles, {
-        filterText: queueFilterText,
-        pendingIssues,
-        perGroupLimit: Number.MAX_SAFE_INTEGER,
-      }).find((group) => group.rows.some((row) => row.issueId === issueId))
-        ?.key;
-    if (targetKey === undefined) {
-      return;
-    }
-    if (collapsedQueueGroups.includes(targetKey)) {
-      // 折叠态下 toggle 即展开，与手动展开同一存储路径。
-      handleToggleQueueGroup(targetKey);
-    }
-    if (renderedGroup === undefined) {
-      handleShowMoreQueueGroup(targetKey);
-    }
   }
 
   function handleOpenFullIssue(card: LifecycleCardData) {
