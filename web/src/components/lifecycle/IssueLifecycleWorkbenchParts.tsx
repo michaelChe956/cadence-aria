@@ -94,7 +94,9 @@ export function IssueLifecycleDetail({
   workItems: LifecycleCardData[];
   workItemRepositoryGroups?: WorkItemRepositoryGroup[];
   selectedKey: string | null;
-  deletingKey: string | null;
+  // PR #92 三审 Important（并发删除）：在途删除键集合（null = 无在途），
+  // busy 判定为「键在集合中」——并发删除互不覆盖。
+  deletingKey: ReadonlySet<string> | null;
   // B1（用户裁决 A，2026-10-10）：选中 issue 的交付状态聚合——常驻渲染
   // 在详情区，不依赖「查看完整 Issue」抽屉入口（长描述限定）。
   deliverySummary?: IssueDeliverySummaryDto;
@@ -419,7 +421,7 @@ function WorkItemRepositoryGroupSection({
   planCard: LifecycleCardData | undefined;
   groups: WorkItemRepositoryGroup[];
   selectedKey: string | null;
-  deletingKey: string | null;
+  deletingKey: ReadonlySet<string> | null;
   onSelect: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
   // onboarding 引导锚点（仅新增属性）：容器代表计划审阅区，内容体代表计划最终确认区。
@@ -462,7 +464,7 @@ function WorkItemRepositoryGroupSection({
           <LifecycleCard
             card={planCard}
             selected={selectedKey === lifecycleCardKey(planCard)}
-            deleting={deletingKey === lifecycleCardKey(planCard)}
+            deleting={deletingKey?.has(lifecycleCardKey(planCard)) ?? false}
             onSelect={() => onSelect(planCard)}
           />
         </div>
@@ -522,7 +524,7 @@ function WorkItemRepositoryGroupSection({
                           <LifecycleCard
                             card={card}
                             selected={selectedKey === lifecycleCardKey(card)}
-                            deleting={deletingKey === lifecycleCardKey(card)}
+                            deleting={deletingKey?.has(lifecycleCardKey(card)) ?? false}
                             onSelect={() => onSelect(card)}
                             onDelete={item.source_work_item_plan_id
                               ? undefined
@@ -560,7 +562,7 @@ function LifecycleContentSection({
   ariaLabel: string;
   cards: LifecycleCardData[];
   selectedKey: string | null;
-  deletingKey: string | null;
+  deletingKey: ReadonlySet<string> | null;
   onSelect: (card: LifecycleCardData) => void;
   onDelete: (card: LifecycleCardData) => void;
   allWorkItems?: LifecycleWorkItem[];
@@ -609,7 +611,7 @@ function LifecycleContentSection({
               <LifecycleCard
                 card={card}
                 selected={selectedKey === lifecycleCardKey(card)}
-                deleting={deletingKey === lifecycleCardKey(card)}
+                deleting={deletingKey?.has(lifecycleCardKey(card)) ?? false}
                 onSelect={() => onSelect(card)}
                 onDelete={
                   card.kind === "work_item_group" ||

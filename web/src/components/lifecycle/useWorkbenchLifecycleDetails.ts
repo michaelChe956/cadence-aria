@@ -11,6 +11,7 @@ type DetailBatch = {
   issues: ReadonlyMap<string, ProductIssue>;
   pending: Set<string>;
   invalidated: Set<string>;
+  activeReads: number;
   revisions: Map<string, number>;
   focusedIssueId: string | null;
   drawerIssueId: string | undefined;
@@ -24,13 +25,12 @@ export function useWorkbenchLifecycleDetails() {
     () => new Map(),
   );
   const batchRef = useRef<DetailBatch | null>(null);
-  const activeReads = useRef(0);
 
   const drain = useCallback(() => {
     const batch = batchRef.current;
     if (!batch) return;
 
-    while (activeReads.current < DETAIL_CONCURRENCY && batch.pending.size > 0) {
+    while (batch.activeReads < DETAIL_CONCURRENCY && batch.pending.size > 0) {
       const issueId = [batch.focusedIssueId, batch.drawerIssueId].find(
         (id): id is string => id != null && batch.pending.has(id),
       ) ?? batch.invalidated.values().next().value ?? batch.pending.values().next().value;
@@ -39,7 +39,7 @@ export function useWorkbenchLifecycleDetails() {
       batch.invalidated.delete(issueId);
       const issue = batch.issues.get(issueId)!;
       const revision = batch.revisions.get(issueId);
-      activeReads.current += 1;
+      batch.activeReads += 1;
 
       void getIssueLifecycle(issueId, batch.projectId)
         .then((response) => {
@@ -62,7 +62,7 @@ export function useWorkbenchLifecycleDetails() {
           setDetailErrors((previous) => new Map(previous).set(issueId, message));
         })
         .finally(() => {
-          activeReads.current -= 1;
+          batch.activeReads -= 1;
           drain();
         });
     }
@@ -86,12 +86,15 @@ export function useWorkbenchLifecycleDetails() {
       issues: issuesById,
       pending: new Set(issuesById.keys()),
       invalidated: new Set(),
+      activeReads: 0,
       revisions: new Map(),
       focusedIssueId,
       drawerIssueId,
     };
-    // Outstanding reads keep their slots on refresh or project switch. Only
-    // queued work and late responses from the old batch are discarded.
+    // Each batch owns its concurrency budget, so a refresh or project switch
+    // is never starved by the previous batch's outstanding reads; those late
+    // responses are discarded on landing by the batch identity and revision
+    // guards below.
     batchRef.current = batch;
     setDetailErrors(new Map());
     setDetails((previous) => new Map([...previous].filter(([id, detail]) =>

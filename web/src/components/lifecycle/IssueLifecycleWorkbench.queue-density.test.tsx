@@ -166,9 +166,9 @@ describe("IssueLifecycleWorkbench 队列折叠双密度 (Task 7)", () => {
     expect(reads).toHaveLength(3);
     await user.click(screen.getByRole("button", { name: "刷新" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Aria" })).toBeEnabled());
-    expect(reads).toHaveLength(3);
-
-    await act(async () => reads[0].resolve(await baseFetch(reads[0].url)));
+    // 新批次独立占用并发额度：刷新不被旧批次在途请求阻塞，立即再读 3 条，
+    // 且聚焦的议题五在新批次中最先派发。
+    expect(reads).toHaveLength(6);
     expect(reads[3]?.url).toBe("/api/issues/issue_0005/lifecycle?project_id=project_0001");
   });
 

@@ -12,12 +12,14 @@ import type {
 } from "./issue-queue-derivation";
 
 // pip 状态色映射（与 Plan 逐字一致）：done=阶段色实心（emerald-500）、
-// active=主色、blocked=amber-500、pending=line 令牌。
+// active=主色、blocked=amber-500、pending=line 令牌；
+// unknown=详情未到达（unloaded 行）：line 令牌的空心虚线圆，区别于 pending 的实心灰。
 const PIP_CLASS_BY_STATE: Record<StagePipState, string> = {
   done: "bg-emerald-500",
   active: "bg-[var(--aria-primary)]",
   blocked: "bg-amber-500",
   pending: "bg-[var(--aria-line)]",
+  unknown: "border border-dashed border-[var(--aria-line)]",
 };
 
 const STAGE_LABEL: Record<StagePip["stage"], string> = {
@@ -32,6 +34,7 @@ const PIP_STATE_LABEL: Record<StagePipState, string> = {
   active: "进行中",
   blocked: "阻塞",
   pending: "待开始",
+  unknown: "未知",
 };
 
 export function StageMiniGraph({ pips }: { pips: StagePip[] }): JSX.Element {

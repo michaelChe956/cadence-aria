@@ -1,6 +1,6 @@
 // 从 IssueLifecycleWorkbench.tsx 拆出（large_file_guard 1200 行上限，纯移动零行为变化）：
 // 生命周期实体删除动作（Issue / Story / Design / Work Item / 计划 Coding 工作区）。
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import { useRef, type Dispatch, type RefObject, type SetStateAction } from "react";
 import {
   ApiRequestError,
   deleteDesignSpec,
@@ -31,7 +31,7 @@ type Args = {
   setError: Dispatch<SetStateAction<string | null>>;
   setFocusedIssueId: Dispatch<SetStateAction<string | null>>;
   setSelectedCardKey: Dispatch<SetStateAction<string | null>>;
-  setDeletingCardKey: Dispatch<SetStateAction<string | null>>;
+  setDeletingCardKeys: Dispatch<SetStateAction<ReadonlySet<string>>>;
   setGroupCodingDeleteBusy: Dispatch<SetStateAction<boolean>>;
   closeDrawer: () => void;
   refresh: (
@@ -39,6 +39,31 @@ type Args = {
     optimisticIssues?: readonly ProductIssue[],
   ) => Promise<void>;
 };
+
+// 在途删除键集合的不可变更新：命中时保持原引用，避免无谓重渲染。
+function addDeletingKey(
+  current: ReadonlySet<string>,
+  key: string,
+): ReadonlySet<string> {
+  if (current.has(key)) {
+    return current;
+  }
+  const next = new Set(current);
+  next.add(key);
+  return next;
+}
+
+function removeDeletingKey(
+  current: ReadonlySet<string>,
+  key: string,
+): ReadonlySet<string> {
+  if (!current.has(key)) {
+    return current;
+  }
+  const next = new Set(current);
+  next.delete(key);
+  return next;
+}
 
 export function useIssueLifecycleWorkbenchDeletion({
   selectedProjectId,
@@ -50,19 +75,32 @@ export function useIssueLifecycleWorkbenchDeletion({
   setError,
   setFocusedIssueId,
   setSelectedCardKey,
-  setDeletingCardKey,
+  setDeletingCardKeys,
   setGroupCodingDeleteBusy,
   closeDrawer,
   refresh,
 }: Args) {
+
+  // PR #92 四审 Important：Issue DELETE 在途守卫。UI 层 deletingCardKeys 在切换
+  // Project 时被 resetProjectScopeState 清空，回到原 Project 后在途行的删除按钮
+  // 会重新可用；守卫挂在请求发出处、按 `${projectId}:${issueId}` 记账，同一
+  // Issue 的 DELETE 未结算（成功或失败）前不出站第二个请求，结算即释放。
+  // 仅约束 Issue 删除路径；生命周期实体删除保持既有行为。
+  const issueDeleteInFlightRef = useRef<Set<string>>(new Set());
     async function handleDeleteIssue(issueId: string) {
       if (!selectedProjectId) {
         setError("缺少 Project");
         return;
       }
-
+      const guardKey = `${selectedProjectId}:${issueId}`;
+      if (issueDeleteInFlightRef.current.has(guardKey)) {
+        return;
+      }
+      issueDeleteInFlightRef.current.add(guardKey);
       const cardKey = lifecycleEntityKey("issue", issueId, issueId);
-      setDeletingCardKey(cardKey);
+      // 并发删除（PR #92 三审 Important）：在途键入集合而非单键覆盖——先删 A 再删
+      // B 时两行都保持 busy，先结算的只移除自己的键。
+      setDeletingCardKeys((current) => addDeletingKey(current, cardKey));
       setError(null);
       try {
         await Promise.all([
@@ -85,8 +123,11 @@ export function useIssueLifecycleWorkbenchDeletion({
       } catch (reason) {
         if (isCurrentProject(selectedProjectId)) setError(errorMessage(reason, "删除 Issue 失败"));
       } finally {
+        issueDeleteInFlightRef.current.delete(guardKey);
         if (isCurrentProject(selectedProjectId)) {
-          setDeletingCardKey((current) => current === cardKey ? null : current);
+          setDeletingCardKeys((current) =>
+            removeDeletingKey(current, cardKey),
+          );
         }
       }
     }
@@ -126,7 +167,7 @@ export function useIssueLifecycleWorkbenchDeletion({
       };
 
       const cardKey = lifecycleCardKey(card);
-      setDeletingCardKey(cardKey);
+      setDeletingCardKeys((current) => addDeletingKey(current, cardKey));
       setError(null);
       try {
         try {
@@ -166,7 +207,7 @@ export function useIssueLifecycleWorkbenchDeletion({
         if (isCurrentProject(selectedProjectId)) setError(errorMessage(reason, "删除生命周期实体失败"));
       } finally {
         if (isCurrentProject(selectedProjectId)) {
-          setDeletingCardKey((current) => current === cardKey ? null : current);
+          setDeletingCardKeys((current) => removeDeletingKey(current, cardKey));
         }
       }
     }
