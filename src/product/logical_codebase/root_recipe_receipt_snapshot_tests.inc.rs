@@ -6,6 +6,68 @@
 // 本文件被 `include!` 进 `mod tests`（不是独立模块），因此可直接使用
 // 同模块的 `ReceiptFixture` / `GitignoreFixture` / `command_spec` 等夹具。
 
+    #[test]
+    fn finalize_reports_rejected_command_evidence_without_snapshots() {
+        let fixture = ReceiptFixture::new();
+        let auditor = RootRecipeFilesystemAuditor::new();
+        let first = fixture.run_allowed_command(&auditor, 1, "first.json", "ok");
+        fixture.store.append_command(PROJECT_ID, first).unwrap();
+
+        // This link already exists at turn start; it can reject without a change entry.
+        let target = fixture._temp.path().join("private-link-target");
+        std::fs::write(&target, "outside root").unwrap();
+        let link = fixture.root.join(".aria/aggregate/escape-link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let (step, command) = command_spec(2);
+        let watch = auditor
+            .before_command(OPERATION_ID, &fixture.root, step, 2, command)
+            .unwrap();
+        std::fs::write(fixture.root.join("unexpected.md"), "private-file-content").unwrap();
+        for index in 0..32 {
+            std::fs::write(fixture.root.join(format!("z-extra-{index:02}.md")), "").unwrap();
+        }
+        std::fs::write(fixture.root.join(".aria/aggregate/allowed.json"), "ok").unwrap();
+        let receipt = auditor
+            .after_command(watch, RECORDED_AT.to_string())
+            .unwrap();
+        fixture.store.append_command(PROJECT_ID, receipt).unwrap();
+        std::fs::remove_file(&link).unwrap();
+        for index in 3..=4 {
+            let receipt = fixture.run_allowed_command(&auditor, index, &format!("{index}.json"), "ok");
+            fixture.store.append_command(PROJECT_ID, receipt).unwrap();
+        }
+
+        let error = fixture
+            .store
+            .finalize(
+                PROJECT_ID,
+                OPERATION_ID,
+                POLICY_DIGEST,
+                RULE_DIGEST,
+                RECORDED_AT.to_string(),
+            )
+            .unwrap_err();
+        let ProductStoreError::InvalidRecord {
+            kind: "root_recipe_receipt",
+            reason,
+        } = error
+        else {
+            panic!("expected the final receipt to be rejected, got {error:?}");
+        };
+        assert!(reason.contains("command 2 (/rule-config --no-interrupt)"), "{reason}");
+        assert!(reason.contains("rule_and_mcp_config"), "{reason}");
+        assert!(reason.contains("disallowed_changes=33"), "{reason}");
+        assert!(reason.contains("UnknownPath"), "{reason}");
+        assert!(reason.contains("unexpected.md"), "{reason}");
+        assert!(reason.contains("symlink_escapes=1"), "{reason}");
+        assert!(reason.contains(".aria/aggregate/escape-link"), "{reason}");
+        assert!(!reason.contains("z-extra-31.md"), "path samples must be capped: {reason}");
+        assert!(!reason.contains("allowed.json"), "{reason}");
+        assert!(!reason.contains("private-file-content"), "{reason}");
+        assert!(!reason.contains("private-link-target"), "{reason}");
+        assert!(!reason.contains(fixture.root.to_str().unwrap()), "{reason}");
+    }
+
     // ---- 块2 片6（REQ-AUD-01/02/03/04）：元数据差分 + .git 跳过 + 流式读 --
 
     /// T1：`.git/HEAD` **不在**快照 entries；`.git` 字节不计入预算。
