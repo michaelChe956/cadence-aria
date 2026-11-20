@@ -155,6 +155,10 @@ export function IssueLifecycleWorkbench({
     LogicalCodebaseListEntryDto[]
   >([]);
   const [issueList, setIssueList] = useState<{ projectId: string; issues: ProductIssue[] } | null>(null);
+  // 队列加载态的真实在途信号：busy 只活到 Promise.all 首个 reject（如项目
+  // 元数据先失败）为止，届时 issue 列表读取可能仍在途；队列不得因此把
+  // 「仍在加载」谎报成「没有匹配的 Issue。」。
+  const [issueListReadPending, setIssueListLoading] = useState(false);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
   );
@@ -237,7 +241,8 @@ export function IssueLifecycleWorkbench({
   }, []);
 
   // Promote explicit selections and drawer deep links over unselected rows.
-  const drawerIssueId = (isDrawerOpen ? drawerFocusedEntityKey : focusEntityKey)?.split(":")[1];
+  const activeFocusEntityKey = isDrawerOpen ? drawerFocusedEntityKey : focusEntityKey;
+  const drawerIssueId = activeFocusEntityKey?.split(":")[1];
   useEffect(() => {
     prioritizeDetails(focusedIssueId, drawerIssueId);
   }, [drawerIssueId, focusedIssueId, issueList, prioritizeDetails]);
@@ -321,48 +326,58 @@ export function IssueLifecycleWorkbench({
         setPointerPublications([]);
         setLogicalCodebaseMembers([]);
         setAggregateIndex(null);
+        // 无项目可加载：清掉可能残留的列表在途标记（如最后一个项目被删）。
+        setIssueListLoading(false);
         return;
       }
 
       const loadIssues = async () => {
-        const issueGuard = { projectId, deletedIssueIds: new Set<string>() };
-        refreshReconcileRef.current.issueListGuard = issueGuard;
-        let issues: ProductIssue[];
         try {
-          ({ issues = [] } = await listProductIssues(projectId));
-        } finally {
-          if (refreshReconcileRef.current.issueListGuard === issueGuard) {
-            refreshReconcileRef.current.issueListGuard = null;
+          const issueGuard = { projectId, deletedIssueIds: new Set<string>() };
+          refreshReconcileRef.current.issueListGuard = issueGuard;
+          let issues: ProductIssue[];
+          try {
+            ({ issues = [] } = await listProductIssues(projectId));
+          } finally {
+            if (refreshReconcileRef.current.issueListGuard === issueGuard) {
+              refreshReconcileRef.current.issueListGuard = null;
+            }
           }
-        }
-        if (!isLatestRefresh(requestId)) return;
-        const byId = new Map(issues.map((issue) => [issue.issue_id, issue]));
-        for (const deletedId of issueGuard.deletedIssueIds) byId.delete(deletedId);
-        createdIssuesRef.current = createdIssuesRef.current.filter((issue) =>
-          issue.project_id !== projectId || !byId.has(issue.issue_id),
-        );
-        for (const issue of [...createdIssuesRef.current, ...optimisticIssues]) {
-          if (issue.project_id === projectId && !issueGuard.deletedIssueIds.has(issue.issue_id) && !byId.has(issue.issue_id)) {
-            byId.set(issue.issue_id, issue);
-          }
-        }
-        const materializedIssues = [...byId.values()];
-        if (optimisticIssues.length > 0) {
-          materializedIssues.sort((left, right) =>
-            (right.updated_at ?? right.created_at).localeCompare(left.updated_at ?? left.created_at),
+          if (!isLatestRefresh(requestId)) return;
+          const byId = new Map(issues.map((issue) => [issue.issue_id, issue]));
+          for (const deletedId of issueGuard.deletedIssueIds) byId.delete(deletedId);
+          createdIssuesRef.current = createdIssuesRef.current.filter((issue) =>
+            issue.project_id !== projectId || !byId.has(issue.issue_id),
           );
+          for (const issue of [...createdIssuesRef.current, ...optimisticIssues]) {
+            if (issue.project_id === projectId && !issueGuard.deletedIssueIds.has(issue.issue_id) && !byId.has(issue.issue_id)) {
+              byId.set(issue.issue_id, issue);
+            }
+          }
+          const materializedIssues = [...byId.values()];
+          if (optimisticIssues.length > 0) {
+            materializedIssues.sort((left, right) =>
+              (right.updated_at ?? right.created_at).localeCompare(left.updated_at ?? left.created_at),
+            );
+          }
+          const firstIssueId = materializedIssues[0]?.issue_id ?? null;
+          setIssueList({ projectId, issues: materializedIssues });
+          setFocusedIssueId((current) =>
+            !projectChanged && current && byId.has(current) ? current : firstIssueId,
+          );
+          hydrateDetails(
+            projectId,
+            materializedIssues,
+            !projectChanged && focusedIssueId && byId.has(focusedIssueId) ? focusedIssueId : firstIssueId,
+            drawerIssueId,
+          );
+        } finally {
+          // 列表读取结算（无论成败）即解除队列加载态；被更新的刷新取代时
+          // 不清——新一轮刷新自行管理该状态。
+          if (isLatestRefresh(requestId)) {
+            setIssueListLoading(false);
+          }
         }
-        const firstIssueId = materializedIssues[0]?.issue_id ?? null;
-        setIssueList({ projectId, issues: materializedIssues });
-        setFocusedIssueId((current) =>
-          !projectChanged && current && byId.has(current) ? current : firstIssueId,
-        );
-        hydrateDetails(
-          projectId,
-          materializedIssues,
-          !projectChanged && focusedIssueId && byId.has(focusedIssueId) ? focusedIssueId : firstIssueId,
-          drawerIssueId,
-        );
       };
 
       const loadProjectMetadata = async () => {
@@ -382,6 +397,8 @@ export function IssueLifecycleWorkbench({
         );
       };
 
+      // 列表读取开始：置位队列加载态（结算在 loadIssues 的 finally）。
+      setIssueListLoading(true);
       await Promise.all([loadIssues(), loadProjectMetadata()]);
     } catch (reason) {
       if (isLatestRefresh(requestId)) {
@@ -467,6 +484,15 @@ export function IssueLifecycleWorkbench({
     }
     return findCardInColumns(allColumns, drawerFocusedEntityKey);
   }, [allColumns, drawerFocusedEntityKey, lifecycles]);
+  // 深链/抽屉目标自身的 lifecycle 读取失败（detailErrors 有记录、目标实体
+  // 无法解析）时，入口 alert 位必须可见地说明链接目标没能加载——否则
+  // /workbench?focus=… 只会留下一个指向从未打开目标的 URL（issueDetailError
+  // 只跟随聚焦 Issue，深链目标不是聚焦 Issue 时不会露出）。复用 detailErrors
+  // 与页面既有 alert 位，不新增错误通道。
+  const deepLinkFailureAlert =
+    activeFocusEntityKey && drawerIssueId && !focusedEntity && detailErrors.has(drawerIssueId)
+      ? `深链目标 ${activeFocusEntityKey} 生命周期加载失败，可刷新重试。\n${detailErrors.get(drawerIssueId) ?? ""}`
+      : null;
   const logicalCodebases = codebases.filter(
     (codebase) => codebase.kind === "logical",
   );
@@ -1091,7 +1117,7 @@ export function IssueLifecycleWorkbench({
       selectedProjectId={selectedProjectId}
       issueCount={issueCount}
       busy={busy}
-      error={error}
+      error={error ?? deepLinkFailureAlert}
       selectedProject={selectedProject}
       focusedIssueId={focusedIssueId}
       selectedCardKey={selectedCardKey}
@@ -1099,7 +1125,7 @@ export function IssueLifecycleWorkbench({
       selectedIssue={selectedIssueColumns.issue[0] ?? null}
       unloadedIssue={unloadedIssue}
       issueDetailError={focusedIssueId ? detailErrors.get(focusedIssueId) : undefined}
-      issueListLoading={busy && issueList === null}
+      issueListLoading={issueListReadPending || (busy && issueList === null)}
       storySpecs={selectedIssueColumns.story_spec}
       designSpecs={selectedIssueColumns.design_spec}
       workItems={selectedIssueColumns.work_item}

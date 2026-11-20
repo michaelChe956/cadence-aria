@@ -8,8 +8,8 @@
 // 2. 未传 onShowMoreGroup 的非受控回退模式下，本地「已追加」state 随 filterText 变化复位，
 //    避免过滤重派生后入口被旧标记永久隐藏。
 // 契约：外层必须是 <section role="region" aria-label="Issue 卡片列表">（既有 E2E/单测定位）。
-import { useState } from "react";
-import type { JSX } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
+import type { FocusEvent, JSX } from "react";
 import { ChevronDown, ChevronRight, Search } from "lucide-react";
 import type {
   IssueQueueGroup,
@@ -28,6 +28,27 @@ const GROUP_LABEL: Record<IssueQueueGroupKey, string> = {
   completed: "已完成",
   unloaded: "生命周期待查看",
 };
+
+// 迁组行的焦点还原目标：按 data-issue-id 定位行，再取标题 span 所在按钮。
+function findRowTitleButton(
+  root: HTMLElement,
+  issueId: string,
+): HTMLButtonElement | null {
+  const rows = root.querySelectorAll<HTMLElement>(
+    '[data-testid="issue-queue-row"]',
+  );
+  for (const row of rows) {
+    if (row.getAttribute("data-issue-id") !== issueId) {
+      continue;
+    }
+    const title = row.querySelector<HTMLElement>(
+      '[data-testid="issue-queue-row-title"]',
+    );
+    const button = title?.closest("button");
+    return button instanceof HTMLButtonElement ? button : null;
+  }
+  return null;
+}
 
 export function IssueQueue(props: {
   groups: IssueQueueGroup[];
@@ -73,6 +94,56 @@ export function IssueQueue(props: {
       ? appended.keys
       : (new Set<IssueQueueGroupKey>() as ReadonlySet<IssueQueueGroupKey>);
 
+  // 焦点保持（迁组场景）：行迁组（如 unloaded → 阶段组）时行换父容器，React 无法跨父
+  // 复用 DOM 节点，被销毁的标题按钮会把键盘焦点丢给 <body>。行 key 已是 issueId（身份
+  // 稳定），但 key 相同不足以跨父保住节点，因此显式还原：借 focus 冒泡记录最近在行内
+  // 获得焦点的元素；每次提交后若该节点确已被本次渲染移除且行仍在（换了组），把焦点
+  // 还原到该行标题按钮。未迁组 / 行被移除 / 焦点已被其他元素接管时均不动作。
+  const sectionRef = useRef<HTMLElement | null>(null);
+  const lastRowFocusRef = useRef<{ issueId: string; element: Element } | null>(
+    null,
+  );
+
+  const handleSectionFocus = (event: FocusEvent<HTMLElement>) => {
+    const row =
+      event.target instanceof Element
+        ? event.target.closest('[data-testid="issue-queue-row"]')
+        : null;
+    lastRowFocusRef.current =
+      row === null
+        ? null
+        : {
+            issueId: row.getAttribute("data-issue-id") ?? "",
+            element: event.target,
+          };
+  };
+
+  useLayoutEffect(() => {
+    const prev = lastRowFocusRef.current;
+    if (prev === null) {
+      return;
+    }
+    // 原焦点节点仍在文档中：本次提交没有销毁它，焦点要么仍在原处，要么已由用户
+    // 移走（focus 事件会刷新记录），交给默认行为。
+    if (prev.element.isConnected) {
+      return;
+    }
+    lastRowFocusRef.current = null;
+    const active = document.activeElement;
+    if (active !== null && active !== document.body && active.isConnected) {
+      // 焦点已被其他元素接管（如父层焦点管理），不抢占。
+      return;
+    }
+    const root = sectionRef.current;
+    if (root === null) {
+      return;
+    }
+    const titleButton = findRowTitleButton(root, prev.issueId);
+    if (titleButton !== null) {
+      titleButton.focus();
+    }
+  });
+
   // 防御性排序：无论传入顺序如何，组一律按 ISSUE_QUEUE_GROUP_ORDER 渲染。
   const groupsByKey = new Map(groups.map((group) => [group.key, group]));
   const orderedGroups = ISSUE_QUEUE_GROUP_ORDER.flatMap((key) => {
@@ -88,6 +159,8 @@ export function IssueQueue(props: {
 
   return (
     <section
+      ref={sectionRef}
+      onFocus={handleSectionFocus}
       role="region"
       aria-label="Issue 卡片列表"
       aria-busy={loading || undefined}
