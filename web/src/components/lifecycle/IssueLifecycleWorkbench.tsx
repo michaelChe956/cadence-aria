@@ -569,11 +569,15 @@ export function IssueLifecycleWorkbench({
     0,
   );
   // 队列行的 aria-busy 需要 issueId；页面只维护 cardKey（issue 卡的 key 形如
-  // "issue:<issueId>:<issueId>"），这里反向取回当前正在删除的 Issue。
+  // "issue:<issueId>:<issueId>"），这里反向取回当前正在删除的 Issue。删除键在
+  // handleDeleteIssue 发起删除时即生成，不依赖生命周期详情已加载——「生命周
+  // 期待查看」组的未加载行同样能从键内取回 issueId，DELETE 在途期间行进入
+  // busy、删除按钮禁用，连点不会发出第二个 DELETE；其他实体键（story/design/
+  // work item 等）不以 "issue:" 开头，不命中任何队列行。
   const deletingIssueId =
-    allColumns.issue.find(
-      (card) => lifecycleCardKey(card) === deletingCardKey,
-    )?.issueId ?? null;
+    deletingCardKey !== null && deletingCardKey.startsWith("issue:")
+      ? (deletingCardKey.split(":")[1] ?? null)
+      : null;
   // R9 fix round 1【Important-2】：LC 作用域数据（成员/指针发布/聚合索引/轮询）抽取为
   // 独立 hook（纯搬运，无行为改动）。
   const {
