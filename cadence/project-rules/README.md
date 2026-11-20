@@ -143,10 +143,7 @@
   - main 分支禁止直接 commit（受 shared `pre-commit` hook 与本规则双约束）；实施/交付一律在功能 worktree 分支进行，主仓 main 仅作合并目标；误在 main 产生的 commit 按「备份 tag → 复位 `origin/main` → cherry-pick 回功能分支」处置。完整规则详见 `cadence/project-rules/branch-protection.md`。
 
 - **仓库结构与合并方式规则（强制）**
-  - 🔴 `core.bare` 恒为 `true`，禁止任何形式修改：根目录是共享 gitdir 容器而非工作区，改动它会让根目录变成 `main` 的工作区并使 main 提交保护失效。发现即用 `git config core.bare true` 复原。
-  - 所有代码、文档、规则、配置、脚本的改动一律经 `.worktrees/` 下的工作树进行；禁止在仓库根目录直接编辑任何项目文件。
-  - 所有代码合并一律经 PR 落地（`gh pr create` → `gh pr merge`）；禁止本地 merge 后直推 `origin/main`、禁止绕过 PR 直推 main、禁止对 main 强推。
-  - 强制闸门：共享 `pre-commit` hook 增加 bare 校验（真源 `scripts/hooks/pre-commit`）；`scripts/verify-repo-structure.sh` 做四项只读核验（bare 恒 true / 不在根目录工作区 / main 不领先 origin/main / 当前分支非 main）。
+  - 主仓 `core.bare` 保持 `true`，禁止改写或临时覆盖；所有项目内容在功能分支 worktree 中实施；所有分支间合并必须通过 PR，禁止绕过 PR 直推 `main`。
   - 完整规则详见 `cadence/project-rules/repo-structure-policy.md`。
 
 - **版本发布策略规则（强制）**
