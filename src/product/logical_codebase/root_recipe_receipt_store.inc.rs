@@ -252,11 +252,7 @@ impl RootRecipeReceiptStore {
                 if receipt.verdict != RootRecipeCommandVerdict::Allowed {
                     return Err(ProductStoreError::InvalidRecord {
                         kind: "root_recipe_receipt",
-                        reason: format!(
-                            "command {command_index} ({command}) was audited {:?}; \
-                             a rejected recipe cannot be finalized",
-                            receipt.verdict
-                        ),
+                        reason: audit_rejection_diagnostic(receipt),
                     });
                 }
                 match &canonical_root {
@@ -670,6 +666,62 @@ fn classify_change<'a>(
         escapes_root,
         link_target,
     )
+}
+
+// 失败原因会写入聚合初始化记录，须能独立于可能超出打包限额的完整审计回执排障。
+fn audit_rejection_diagnostic(receipt: &RootRecipeCommandReceipt) -> String {
+    use std::fmt::Write as _;
+
+    const MAX_PATH_SAMPLES: usize = 8;
+    let mut reason = format!(
+        "command {} ({}) was audited {:?}; a rejected recipe cannot be finalized; audit_step={}",
+        receipt.command_index,
+        receipt.command,
+        receipt.verdict,
+        receipt.step.as_str(),
+    );
+    let mut disallowed = receipt.observed_changes.iter().filter(|change| !change.allowed);
+    let mut sampled = 0;
+    for change in disallowed.by_ref().take(MAX_PATH_SAMPLES) {
+        let _ = write!(
+            reason,
+            "; {:?}/{:?}=",
+            change.classification, change.change_kind,
+        );
+        append_audit_path_sample(&mut reason, &change.path);
+        sampled += 1;
+    }
+    let disallowed_count = sampled + disallowed.count();
+    let _ = write!(
+        reason,
+        "; disallowed_changes={disallowed_count}; symlink_escapes={}",
+        receipt.escape_evidence.len(),
+    );
+    for path in receipt.escape_evidence.iter().take(MAX_PATH_SAMPLES) {
+        reason.push_str("; escape_path=");
+        append_audit_path_sample(&mut reason, path);
+    }
+    reason
+}
+
+fn append_audit_path_sample(reason: &mut String, path: &str) {
+    use std::fmt::Write as _;
+
+    const MAX_PATH_BYTES: usize = 256;
+    if path.is_empty()
+        || Path::new(path)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        reason.push_str("<non-relative path>");
+        return;
+    }
+    let prefix = &path[..path.floor_char_boundary(MAX_PATH_BYTES)];
+    // 转义文件名里的控制字符；不记录链接目标、文件内容或快照。
+    let _ = write!(reason, "{prefix:?}");
+    if prefix.len() < path.len() {
+        reason.push('…');
+    }
 }
 
 fn rejection_summary(
